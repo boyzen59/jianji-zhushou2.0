@@ -470,4 +470,3 @@
 /modules/upstream/wtt-code-animation-studio/source.json filter=lfs diff=lfs merge=lfs -text
 /modules/upstream/xilo-opus-video/examples/plan-b-pixel-crt.png filter=lfs diff=lfs merge=lfs -text
 /modules/upstream/youtube-shorts-generator/assets/video-demo-thumb.png filter=lfs diff=lfs merge=lfs -text
-/references/motion-sources.json filter=lfs diff=lfs merge=lfs -text
