@@ -6,6 +6,8 @@
 
 ## 使用
 
+先安装 Git 和 Git LFS，执行 `git lfs install` 后克隆本仓库；若此前已克隆，执行 `git lfs pull` 补齐大文件。GitHub网页的ZIP可能仅含LFS指针，完整离线包另行提供。
+
 将仓库放到代理的技能目录，文件夹命名为`jianji-zhushou`，从[SKILL.md](SKILL.md)进入。
 
 ```text
