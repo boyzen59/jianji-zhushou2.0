@@ -1,0 +1,425 @@
+import { creditsShortStatusError } from '@/billing/credits-short';
+import { microsToUsd } from '@/billing/money';
+import { freezeFreshGenerationPlan } from '@/sequences/server/freeze-fresh-generation-plan';
+import { gateStoryboardRenders } from '@/billing/server/storyboard-render-gate';
+/**
+ * The `generateStoryboardWorkflow` durable workflow.
+ *
+ * Runs surface in the Cloudflare Workflows dashboard by `event.instanceId`.
+ */
+
+import { PREVIEW_IMAGE_MODEL } from '@/models/models';
+import {
+  deductWorkflowCredits,
+  extractImageCost,
+  recordFalUsageStep,
+} from '@/billing/server/workflow-deduction';
+import { aspectRatioToImageSize } from '@/models/aspect-ratios';
+import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
+import { generateImageWithProvider } from '@/stills/server/image-generation';
+import { uploadPosterToStorage } from '@/stills/server/image-storage';
+import { buildPosterPrompt } from '@/sequences/server/poster-prompt';
+import {
+  notifySequenceReady,
+  sequenceScenesUrl,
+} from '@/sequences/server/notify-sequence-ready';
+import { getGenerationChannel } from '@/platform/realtime';
+import { includesStage } from '@/sequences/pipeline';
+import { generateId } from '@/platform/id';
+import { validateSequenceAuth } from '@/platform/server/workflow/auth';
+import { spawnAndAwaitChild } from '@/platform/server/workflow/await-child';
+import { OpenStoryWorkflowEntrypoint } from '@/platform/server/workflow/base-workflow';
+import {
+  isEngineAbortError,
+  WorkflowLoggedError,
+  WorkflowValidationError,
+} from '@/platform/server/workflow/errors';
+import type {
+  AnalyzeScriptWorkflowInput,
+  UpdateStaleShotsWorkflowInput,
+  StoryboardWorkflowInput,
+} from '@/platform/server/workflow/types';
+import type { UpdateStaleShotsResult } from '@/shots/server/workflows/update-stale-shots-workflow';
+import type { WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
+import { NonRetryableError } from 'cloudflare:workflows';
+import { getLogger } from '@/platform/logger';
+
+const logger = getLogger(['openstory', 'workflow', 'storyboard']);
+
+export class StoryboardWorkflow extends OpenStoryWorkflowEntrypoint<StoryboardWorkflowInput> {
+  protected override readonly failureLabel = 'Storyboard';
+
+  protected override async runImpl(
+    event: Readonly<WorkflowEvent<StoryboardWorkflowInput>>,
+    step: WorkflowStep,
+    scopedDb: WorkflowScopedDb
+  ): Promise<void> {
+    const input = event.payload;
+    const { sequenceId, teamId, userId } = input;
+
+    if (!sequenceId || !teamId || !userId) {
+      throw new WorkflowValidationError(
+        'Sequence ID, team ID, and user ID are required'
+      );
+    }
+    const seq = scopedDb.sequence(sequenceId);
+
+    // Everything this run generates from was snapshotted onto the payload by
+    // `triggerStoryboard`. The step below re-reads the row only to re-assert
+    // that it still exists and to flip its status — never to derive content.
+    const {
+      title,
+      script,
+      aspectRatio,
+      resolution,
+      analysisModelId,
+      imageModel,
+      videoModel,
+      elementIds,
+    } = input;
+
+    await step.do('verify-clear-and-start-processing', async () => {
+      logger.info('[StoryboardWorkflow:cf] Input received:', {
+        sequenceId: input.sequenceId,
+        teamId: input.teamId,
+        userId: input.userId,
+        autoGenerateMotion: input.autoGenerateMotion,
+        stopAt: input.stopAt,
+        resume: input.resume,
+      });
+      validateSequenceAuth(input);
+
+      // Throws if the sequence was deleted (or moved teams) since the trigger.
+      await scopedDb.liveRead.sequences.getForUser({ sequenceId });
+
+      if (!input.resume) {
+        await scopedDb.shots.deleteBySequence(sequenceId);
+      }
+
+      await seq.updateStatus('processing');
+      await scopedDb.sequences.update({
+        id: sequenceId,
+        generationStopAt: input.stopAt,
+      });
+    });
+
+    // Pending automatic style (#1213): the poster renders from the script alone.
+    // Continue-from-DAG skips the poster — the sequence already has one.
+    const styleConfig = input.pendingAutoStyleId
+      ? undefined
+      : input.styleConfig;
+    const skipPoster = Boolean(input.resume);
+
+    // Generate a poster image from the script for the video player empty
+    // state. Non-critical — failures are logged and swallowed so a poster
+    // outage cannot block the storyboard.
+    let posterUrl: string | null = null;
+
+    const posterResult = skipPoster
+      ? null
+      : await step.do('generate-poster', async () => {
+          try {
+            const prompt = buildPosterPrompt(title, script, styleConfig);
+            const result = await generateImageWithProvider(
+              {
+                model: PREVIEW_IMAGE_MODEL,
+                prompt,
+                imageSize: aspectRatioToImageSize(aspectRatio),
+              },
+              { credentials: scopedDb.credentials }
+            );
+            const generatedPosterUrl = result.imageUrls[0];
+            if (!generatedPosterUrl) return null;
+            // Stored here rather than in a later step: an inline-bytes
+            // result has no URL to pass on (#1645). Still non-critical — an
+            // upload outage drops the poster rather than failing the run.
+            const upload = await uploadPosterToStorage({
+              imageUrl: generatedPosterUrl,
+              teamId,
+              sequenceId,
+            });
+            return { url: upload.url, metadata: result.metadata };
+          } catch (error) {
+            logger.warn('[StoryboardWorkflow:cf] Poster generation failed:', {
+              err: error,
+            });
+            return null;
+          }
+        });
+
+    if (posterResult) {
+      const savedPosterUrl = posterResult.url;
+      posterUrl = savedPosterUrl;
+
+      await step.do('save-poster', async () => {
+        await scopedDb.sequences.update({
+          id: sequenceId,
+          posterUrl: savedPosterUrl,
+        });
+        await getGenerationChannel(sequenceId).emit('generation.poster:ready', {
+          posterUrl: savedPosterUrl,
+        });
+      });
+
+      // Before the deduction guard — see recordFalUsageStep (#1069).
+      const posterUsage = await recordFalUsageStep(
+        step,
+        scopedDb,
+        posterResult.metadata,
+        'record-fal-usage-poster'
+      );
+
+      await step.do('deduct-poster-credits', async () => {
+        await deductWorkflowCredits({
+          scopedDb,
+          costMicros: extractImageCost(posterResult.metadata),
+          usedOwnKey: posterResult.metadata.usedOwnKey,
+          description: `Sequence poster (${PREVIEW_IMAGE_MODEL})`,
+          idempotencyKey: `${event.instanceId}:poster`,
+          reservationId: input.reservationId,
+          metadata: {
+            ...posterUsage,
+            model: PREVIEW_IMAGE_MODEL,
+            sequenceId,
+          },
+          workflowName: 'StoryboardWorkflow',
+        });
+      });
+    }
+
+    let plan = input.plan;
+    if (!plan) {
+      // Analysis only writes the script/cast and first derived prompt versions.
+      await spawnAndAwaitChild<AnalyzeScriptWorkflowInput, unknown>(step, {
+        binding: this.env.ANALYZE_SCRIPT_WORKFLOW,
+        parentBindingName: 'STORYBOARD_WORKFLOW',
+        parentInstanceId: event.instanceId,
+        childId: `analyze-script:${sequenceId}`,
+        childPayload: {
+          userId: input.userId,
+          teamId: input.teamId,
+          sequenceId,
+          reservationId: input.reservationId,
+          script,
+          userCountry: input.userCountry,
+          aspectRatio,
+          resolution,
+          draftMotion: input.draftMotion,
+          styleConfig: input.styleConfig,
+          pendingAutoStyleId: input.pendingAutoStyleId,
+          analysisModelId,
+          elementIds,
+          cast: input.cast,
+          musicPromptSource: input.musicPromptSource,
+          imageModel,
+          imageModels: input.imageModels ?? [imageModel],
+          videoModel,
+          videoModels: input.videoModels ?? [videoModel],
+          autoGenerateMotion: input.autoGenerateMotion ?? false,
+          autoGenerateMusic: input.autoGenerateMusic ?? false,
+          stopAt: input.stopAt,
+          musicModel: input.musicModel,
+          audioModels: input.audioModels,
+          suggestedLocationIds: input.suggestedLocationIds,
+          suggestedLocations: input.suggestedLocations,
+          referenceOnly: input.referenceOnly,
+          generateVoices: input.generateVoices ?? false,
+          includeMusic: input.includeMusic,
+          leftoverGrokShotIds: input.leftoverGrokShotIds,
+        },
+        spawnStepName: 'spawn-analyze-script',
+        awaitStepName: 'await-analyze-script',
+        // Scene splitting and location matching each allow 45m.
+        timeout: '2 hours',
+      });
+
+      const frozen = await step.do('freeze-generation-plan', async () => {
+        const result = await freezeFreshGenerationPlan(
+          scopedDb.generationPlanning,
+          { ...input, sequenceId }
+        );
+        const gate = await gateStoryboardRenders({
+          scopedDb,
+          reservationId: input.reservationId,
+          remainingWork: result.remainingCost,
+          sceneCount: result.plan.targets.length,
+          sequenceId,
+        });
+        // The gate already zeroed the leftover, so a retry can only fail again:
+        // report the shortfall once, outside the step.
+        if (!gate.spawnRenders)
+          return {
+            plan: null,
+            short: {
+              sceneCount: result.plan.targets.length,
+              neededMicros: gate.neededMicros,
+              remainingMicros: gate.remainingMicros,
+            },
+          };
+        return { plan: JSON.stringify(result.plan), short: null };
+      });
+      const { short } = frozen;
+      if (short) {
+        const message = creditsShortStatusError(short);
+        await step.do('emit-reservation-short', async () => {
+          await seq.updateStatus('failed', message);
+          // A top-up prompt, not a failure toast (#1328).
+          await getGenerationChannel(sequenceId).emit(
+            'generation.reservation:short',
+            {
+              neededUsd: microsToUsd(short.neededMicros),
+              remainingUsd: microsToUsd(short.remainingMicros),
+              sceneCount: short.sceneCount,
+            }
+          );
+        });
+        throw new WorkflowLoggedError(message, {
+          kind: 'run.failed',
+          summary: message,
+        });
+      }
+      if (!frozen.plan) throw new NonRetryableError('Fresh plan missing');
+      // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- exact checkpoint above
+      plan = JSON.parse(frozen.plan) as NonNullable<
+        StoryboardWorkflowInput['plan']
+      >;
+    }
+    // Fresh and continue share the same durable execution path.
+    let unitsFailed = false;
+    if (input.plan || plan.targets.length || plan.references || plan.music) {
+      const result = await spawnAndAwaitChild<
+        UpdateStaleShotsWorkflowInput,
+        UpdateStaleShotsResult
+      >(step, {
+        binding: this.env.UPDATE_STALE_SHOTS_WORKFLOW,
+        parentBindingName: 'STORYBOARD_WORKFLOW',
+        parentInstanceId: event.instanceId,
+        childId: `continue:${sequenceId}:${event.instanceId}`,
+        childPayload: {
+          userId: input.userId,
+          teamId: input.teamId,
+          sequenceId,
+          reservationId: input.reservationId,
+          plan,
+          freshRun: !input.plan,
+          announcePhases: true,
+          leftoverGrokShotIds: input.leftoverGrokShotIds,
+        },
+        spawnStepName: 'spawn-continue',
+        awaitStepName: 'await-continue',
+        // Sheets (30m) then prompts + stills + clips per shot (90m each,
+        // in parallel), plus notify lag under a burst.
+        timeout: '4 hours',
+      });
+      // The executor records a unit's failure on the unit and carries on. The
+      // failure stays there (#2104): copied onto the sequence it outlives the
+      // shot it came from and asks for a whole regenerate. The run still
+      // sends no "ready" email.
+      unitsFailed = result.failures.length > 0;
+    }
+
+    const reservationId = input.reservationId;
+    if (reservationId) {
+      await step.do('zero-reservation', async () => {
+        await scopedDb.billing.zeroReservation(reservationId);
+      });
+    }
+
+    const completedEventId = await step.do(
+      'storyboard-completed-event-id',
+      async () => generateId()
+    );
+    await step.do('mark-completed', async () => {
+      await seq.updateStatus('completed', null, {
+        id: completedEventId,
+        sequenceId,
+        actorId: userId,
+        kind: 'storyboard.completed',
+        targetType: 'sequence',
+        targetId: sequenceId,
+        summary: 'Finished the storyboard',
+      });
+    });
+
+    await step.do('emit-complete', async () => {
+      await getGenerationChannel(sequenceId).emit('generation.complete', {
+        sequenceId,
+      });
+    });
+
+    // "Your video is ready" is a one-shot claim per sequence: sending it for
+    // a run that stopped before motion would spend it on a board with no video
+    // and silence the real completion (#1408).
+    if (unitsFailed || !includesStage(input.stopAt, 'motion')) return;
+
+    // After emit-complete: a send retry must not strand the player on processing.
+    // The step's own retries run first. A send that still fails must not
+    // un-complete the sequence or append "Storyboard failed".
+    try {
+      await step.do('email-ready', async () => {
+        await notifySequenceReady({
+          scopedDb,
+          sequenceId,
+          ownerEmail: input.ownerEmail,
+          sequenceUrl: input.sequenceUrl || sequenceScenesUrl(sequenceId),
+          posterUrl,
+          notify: input.notify,
+          userId,
+        });
+      });
+    } catch (error) {
+      if (isEngineAbortError(error)) throw error;
+      logger.error('Storyboard ready email was not sent', { err: error });
+    }
+  }
+
+  protected override async onFailure({
+    event,
+    error,
+    scopedDb,
+  }: {
+    event: Readonly<WorkflowEvent<StoryboardWorkflowInput>>;
+    error: string;
+    scopedDb: WorkflowScopedDb;
+  }): Promise<void> {
+    logger.error(
+      `[StoryboardWorkflow:cf] Storyboard generation failed: ${error}`
+    );
+
+    // Mark the sequence failed so the user sees the failure summary + retry
+    // UI instead of an eternal 'processing' spinner. A log-only handler here
+    // left ~20 sequences stranded when await-analyze-script timed out on
+    // 2026-06-06 (issue #839).
+    //
+    // Skip the write when the analyze-script child already marked the
+    // sequence failed — its message ("Your OpenRouter API key is invalid…")
+    // is the one written for the user; the parent only has what came back
+    // through the await.
+    const { sequenceId, reservationId } = event.payload;
+    if (reservationId) {
+      try {
+        await scopedDb.billing.zeroReservation(reservationId);
+      } catch (releaseError) {
+        logger.error(
+          `[StoryboardWorkflow:cf] Failed to zero reservation ${reservationId}:`,
+          { err: releaseError }
+        );
+      }
+    }
+    if (!sequenceId) return;
+
+    const sequence = await scopedDb.liveRead.sequences.getForUser({
+      sequenceId,
+    });
+    // Trailing steps (email-ready) run AFTER mark-completed. A send failure
+    // must not un-complete a successful generation.
+    if (sequence.status === 'failed' || sequence.status === 'completed') {
+      return;
+    }
+
+    await scopedDb.sequence(sequenceId).updateStatus('failed', error);
+    await getGenerationChannel(sequenceId).emit('generation.failed', {
+      message: error,
+    });
+  }
+}

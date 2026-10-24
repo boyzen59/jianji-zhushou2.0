@@ -1,0 +1,418 @@
+/**
+ * The upload rights ledger (#1581): one classifier call per URL, its verdict
+ * written so the next ask is free; a real person refused until signed;
+ * rights carried across a move.
+ */
+
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createClient } from '@libsql/client';
+import { drizzle } from 'drizzle-orm/libsql';
+import { migrate } from 'drizzle-orm/libsql/migrator';
+import { generateId } from '@/platform/id';
+import type { Database } from '@/platform/server/db/client';
+import { teams, uploadAttestations, user } from '@/platform/server/db/schema';
+import { relations } from '@/platform/server/db/schema/relations';
+import { sha256Hex } from '@/platform/compliance/hash';
+import {
+  LIKENESS_CLEARED_V1,
+  LIKENESS_DETECTED_V1,
+  PORTRAIT_RIGHTS_V1,
+  statementHash,
+} from '@/platform/compliance/attestations';
+import { AttestationRequiredError } from '@/platform/errors';
+
+let db: Database;
+const mockAnalyze = vi.fn();
+const mockAnalyzeClip = vi.fn();
+
+vi.doMock('#db-client', () => ({ getDb: () => db }));
+vi.doMock('@/cast/server/talent/analyze-talent-media', () => ({
+  analyzeTalentMediaForTeam: mockAnalyze,
+  analyzeTalentClipForTeam: mockAnalyzeClip,
+}));
+
+const {
+  attestUploads,
+  carryUploadRights,
+  carryUploadRightsIfChecked,
+  classifyUpload,
+  likenessFromLedger,
+  realPersonUrls,
+  recordLikenessFinding,
+  requireUploadRights,
+} = await import('./upload-rights');
+
+const { createScopedDb } = await import('@/platform/server/db/scoped');
+
+const TEAM_ID = generateId();
+const USER_ID = 'user-1';
+const request = { ipAddress: '203.0.113.9', userAgent: 'vitest' };
+const url = `/r2/talent/${TEAM_ID}/temp/01ABC.png`;
+
+function verdict(subjectKind: 'human' | 'animated' | 'other') {
+  mockAnalyze.mockResolvedValueOnce({ subjectKind, isCharacterSheet: false });
+}
+
+beforeAll(async () => {
+  const client = createClient({ url: ':memory:' });
+  db = drizzle({ client, relations });
+  await migrate(db, { migrationsFolder: './drizzle/migrations' });
+  await db.insert(user).values([{ id: USER_ID, name: 'U', email: 'u@e.com' }]);
+  await db.insert(teams).values([{ id: TEAM_ID, name: 'T', slug: 't' }]);
+});
+
+beforeEach(async () => {
+  await db.delete(uploadAttestations);
+  vi.clearAllMocks();
+});
+
+describe('classifyUpload', () => {
+  it('clears a non-person and records the finding, once', async () => {
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    verdict('other');
+
+    const first = await classifyUpload({
+      scopedDb,
+      userId: USER_ID,
+      url,
+      filename: 'logo.png',
+      request,
+    });
+    expect(first).toEqual({ status: 'cleared' });
+    expect(mockAnalyze).toHaveBeenCalledWith(
+      expect.objectContaining({
+        imageUrls: [url],
+        filenames: ['logo.png'],
+        idempotencyKey: `likeness:${url}`,
+      })
+    );
+    expect(await db.select().from(uploadAttestations)).toMatchObject([
+      {
+        teamId: TEAM_ID,
+        userId: USER_ID,
+        subjectType: 'uploaded_image',
+        subjectId: await sha256Hex(url),
+        statementVersion: LIKENESS_CLEARED_V1.version,
+        statementSha256: await statementHash(LIKENESS_CLEARED_V1),
+        depictsRealPerson: false,
+        authorizationBasis: null,
+        ipAddress: '203.0.113.9',
+        userAgent: 'vitest',
+      },
+    ]);
+
+    const second = await classifyUpload({
+      scopedDb,
+      userId: USER_ID,
+      url,
+      request,
+    });
+    expect(second).toEqual({ status: 'cleared' });
+    expect(mockAnalyze).toHaveBeenCalledTimes(1);
+    expect(await requireUploadRights(scopedDb, [url])).toEqual(
+      new Map([[url, { depictsRealPerson: false }]])
+    );
+  });
+
+  it('records a detected person and asks for the sign-off, without re-running vision', async () => {
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    verdict('human');
+
+    expect(
+      await classifyUpload({ scopedDb, userId: USER_ID, url, request })
+    ).toEqual({ status: 'needs_portrait' });
+    expect(await db.select().from(uploadAttestations)).toMatchObject([
+      {
+        statementVersion: LIKENESS_DETECTED_V1.version,
+        depictsRealPerson: true,
+      },
+    ]);
+    expect(
+      await classifyUpload({ scopedDb, userId: USER_ID, url, request })
+    ).toEqual({ status: 'needs_portrait' });
+    expect(mockAnalyze).toHaveBeenCalledTimes(1);
+    await expect(requireUploadRights(scopedDb, [url])).rejects.toBeInstanceOf(
+      AttestationRequiredError
+    );
+  });
+
+  it('leaves no row when the classifier fails, so the gate keeps refusing', async () => {
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    mockAnalyze.mockRejectedValueOnce(new Error('vision down'));
+
+    await expect(
+      classifyUpload({ scopedDb, userId: USER_ID, url, request })
+    ).rejects.toThrow('vision down');
+    expect(await db.select().from(uploadAttestations)).toEqual([]);
+    await expect(requireUploadRights(scopedDb, [url])).rejects.toBeInstanceOf(
+      AttestationRequiredError
+    );
+  });
+
+  it('has Gemini watch a stored clip, keyed by the clip (#1930)', async () => {
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    const clip = `/r2/talent/${TEAM_ID}/uploads/01CLIP.mov`;
+    mockAnalyzeClip.mockResolvedValueOnce({
+      subjectKind: 'human',
+      isCharacterSheet: false,
+    });
+
+    const rights = await classifyUpload({
+      scopedDb,
+      userId: USER_ID,
+      url: clip,
+      request,
+    });
+    expect(rights).toEqual({ status: 'needs_portrait' });
+    expect(mockAnalyzeClip).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: `talent/${TEAM_ID}/uploads/01CLIP.mov`,
+        mimeType: 'video/quicktime',
+      })
+    );
+    expect(mockAnalyze).not.toHaveBeenCalled();
+    await expect(requireUploadRights(scopedDb, [clip])).rejects.toThrow(
+      AttestationRequiredError
+    );
+  });
+
+  it('refuses another team’s stored clip, and reads nothing', async () => {
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    const clip = `/r2/talent/${generateId()}/uploads/01CLIP.mp4`;
+
+    await expect(
+      classifyUpload({ scopedDb, userId: USER_ID, url: clip, request })
+    ).rejects.toThrow('can’t be checked for a real person');
+    expect(mockAnalyzeClip).not.toHaveBeenCalled();
+  });
+
+  it('refuses a clip that is not ours, and records nothing', async () => {
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    const clip = 'https://example.com/someone.mp4';
+
+    await expect(
+      classifyUpload({ scopedDb, userId: USER_ID, url: clip, request })
+    ).rejects.toThrow('can’t be checked for a real person');
+    expect(mockAnalyze).not.toHaveBeenCalled();
+    expect(mockAnalyzeClip).not.toHaveBeenCalled();
+    expect(await db.select().from(uploadAttestations)).toEqual([]);
+  });
+});
+
+describe('attestUploads', () => {
+  it('lets the user mark a cleared upload as a real person (#1847)', async () => {
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    await recordLikenessFinding(scopedDb, [url], 'animated', request);
+    expect(await likenessFromLedger(scopedDb, url)).toBe('none');
+
+    await attestUploads(
+      scopedDb,
+      [
+        {
+          url,
+          statementVersion: PORTRAIT_RIGHTS_V1.version,
+          authorizationBasis: 'signed release',
+        },
+      ],
+      request
+    );
+
+    expect(
+      await classifyUpload({ scopedDb, userId: USER_ID, url, request })
+    ).toEqual({ status: 'signed' });
+    expect(await likenessFromLedger(scopedDb, url)).toBe('real');
+    expect(mockAnalyze).not.toHaveBeenCalled();
+  });
+
+  it('records the portrait statement with the basis; a repeat is a no-op', async () => {
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    await recordLikenessFinding(scopedDb, [url], 'human', request);
+
+    const claim = {
+      url,
+      statementVersion: PORTRAIT_RIGHTS_V1.version,
+      authorizationBasis: 'this is me',
+    };
+    await attestUploads(scopedDb, [claim], request);
+    await attestUploads(
+      scopedDb,
+      [{ ...claim, authorizationBasis: 'again' }],
+      request
+    );
+
+    const rows = await db.select().from(uploadAttestations);
+    expect(rows).toHaveLength(2);
+    expect(rows.at(-1)).toMatchObject({
+      statementVersion: PORTRAIT_RIGHTS_V1.version,
+      statementSha256: await statementHash(PORTRAIT_RIGHTS_V1),
+      depictsRealPerson: true,
+      authorizationBasis: 'this is me',
+    });
+    expect(
+      await classifyUpload({ scopedDb, userId: USER_ID, url, request })
+    ).toEqual({ status: 'signed' });
+    expect(await requireUploadRights(scopedDb, [url])).toEqual(
+      new Map([[url, { depictsRealPerson: true }]])
+    );
+    expect(mockAnalyze).not.toHaveBeenCalled();
+  });
+
+  it('keeps a same-second portrait sign-off as signed even if the finding row is inserted later', async () => {
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    const subjectId = await sha256Hex(url);
+    const attestedAt = new Date('2026-09-14T12:00:00.000Z');
+    const findingId = generateId();
+    const portraitId = generateId();
+
+    const base = {
+      userId: USER_ID,
+      teamId: TEAM_ID,
+      subjectType: 'uploaded_image' as const,
+      subjectId,
+      attestedAt,
+      depictsRealPerson: true,
+    };
+    await db.insert(uploadAttestations).values({
+      ...base,
+      id: portraitId,
+      statementVersion: PORTRAIT_RIGHTS_V1.version,
+      statementSha256: await statementHash(PORTRAIT_RIGHTS_V1),
+      authorizationBasis: 'self',
+    });
+    await db.insert(uploadAttestations).values({
+      ...base,
+      id: findingId,
+      statementVersion: LIKENESS_DETECTED_V1.version,
+      statementSha256: await statementHash(LIKENESS_DETECTED_V1),
+    });
+
+    expect(
+      await classifyUpload({ scopedDb, userId: USER_ID, url, request })
+    ).toEqual({ status: 'signed' });
+    expect(await requireUploadRights(scopedDb, [url])).toEqual(
+      new Map([[url, { depictsRealPerson: true }]])
+    );
+  });
+});
+
+describe('likenessFromLedger', () => {
+  it('maps cleared to none, a detected or signed person to real, unknown to null (#1674, #1682)', async () => {
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    const cleared = `/r2/talent/${TEAM_ID}/temp/cleared.png`;
+    const signed = `/r2/talent/${TEAM_ID}/temp/signed.png`;
+    const unknown = `/r2/talent/${TEAM_ID}/temp/unknown.png`;
+    verdict('other');
+    expect(
+      await classifyUpload({
+        scopedDb,
+        userId: USER_ID,
+        url: cleared,
+        request,
+      })
+    ).toEqual({ status: 'cleared' });
+    verdict('human');
+    expect(
+      await classifyUpload({
+        scopedDb,
+        userId: USER_ID,
+        url: signed,
+        request,
+      })
+    ).toEqual({ status: 'needs_portrait' });
+    expect(await likenessFromLedger(scopedDb, signed)).toBe('real');
+    await attestUploads(
+      scopedDb,
+      [
+        {
+          url: signed,
+          statementVersion: PORTRAIT_RIGHTS_V1.version,
+          authorizationBasis: 'self',
+        },
+      ],
+      request
+    );
+
+    expect(await likenessFromLedger(scopedDb, cleared)).toBe('none');
+    expect(await likenessFromLedger(scopedDb, signed)).toBe('real');
+    expect(await likenessFromLedger(scopedDb, unknown)).toBeNull();
+  });
+});
+
+describe('realPersonUrls', () => {
+  it('counts a detected, signed or retired-statement row as a real person, and never throws (#2065)', async () => {
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    const at = (name: string) =>
+      `/r2/characters/${TEAM_ID}/uploads/${name}.png`;
+    await recordLikenessFinding(scopedDb, [at('cleared')], 'other', request);
+    await recordLikenessFinding(scopedDb, [at('detected')], 'human', request);
+    // A statement this code no longer writes: fails closed.
+    await scopedDb.compliance.attestations.record({
+      subjectType: 'uploaded_image',
+      subjectId: await sha256Hex(at('retired')),
+      statementVersion: 'asset-warranty-v1',
+      statementSha256: 'x'.repeat(64),
+      depictsRealPerson: false,
+    });
+    await expect(likenessFromLedger(scopedDb, at('retired'))).rejects.toThrow();
+    expect(
+      await realPersonUrls(scopedDb, [
+        at('cleared'),
+        at('detected'),
+        at('retired'),
+        at('unknown'),
+      ])
+    ).toEqual(new Set([at('detected'), at('retired')]));
+  });
+});
+
+describe('carryUploadRights', () => {
+  it('covers the moved URL with the same evidence', async () => {
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    const libraryUrl = `/r2/talent/${TEAM_ID}/tal1/01ABC.png`;
+    await recordLikenessFinding(scopedDb, [url], 'human', request);
+    await attestUploads(
+      scopedDb,
+      [
+        {
+          url,
+          statementVersion: PORTRAIT_RIGHTS_V1.version,
+          authorizationBasis: 'release #7',
+        },
+      ],
+      request
+    );
+
+    await carryUploadRights(scopedDb, url, libraryUrl);
+
+    expect(await requireUploadRights(scopedDb, [libraryUrl])).toEqual(
+      new Map([[libraryUrl, { depictsRealPerson: true }]])
+    );
+    const rows = await db.select().from(uploadAttestations);
+    expect(rows.at(-1)).toMatchObject({
+      subjectId: await sha256Hex(libraryUrl),
+      statementVersion: PORTRAIT_RIGHTS_V1.version,
+      authorizationBasis: 'release #7',
+      ipAddress: '203.0.113.9',
+    });
+  });
+
+  it('refuses to carry an unchecked URL', async () => {
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    await expect(
+      carryUploadRights(scopedDb, url, `/r2/talent/${TEAM_ID}/tal1/x.png`)
+    ).rejects.toBeInstanceOf(AttestationRequiredError);
+  });
+});
+
+describe('carryUploadRightsIfChecked', () => {
+  it('leaves an unchecked copy unchecked instead of failing the copy', async () => {
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    const copy = `/r2/elements/${TEAM_ID}/seq2/01COPY.mp4`;
+
+    await carryUploadRightsIfChecked(scopedDb, url, copy);
+    expect(await db.select().from(uploadAttestations)).toEqual([]);
+    await expect(requireUploadRights(scopedDb, [copy])).rejects.toBeInstanceOf(
+      AttestationRequiredError
+    );
+  });
+});

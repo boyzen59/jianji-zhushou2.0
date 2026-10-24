@@ -1,0 +1,411 @@
+
+// utility functions for layers
+import { getPointBounds, forEachPoint } from '../points/mapshaper-point-utils';
+import { getPathBounds, countArcsInShapes } from '../paths/mapshaper-path-utils';
+import { cloneShapes, editShapes } from '../paths/mapshaper-shape-utils';
+import { error, stop, formatStringsAsGrid } from '../utils/mapshaper-logging';
+import { DataTable } from '../datatable/mapshaper-data-table';
+import { getFirstNonEmptyRecord } from '../datatable/mapshaper-data-utils';
+import utils from '../utils/mapshaper-utils';
+import { absArcId } from '../paths/mapshaper-arc-utils';
+import { pathIsRectangle } from '../paths/mapshaper-rectangle-utils';
+import {
+  markLayerChanged,
+  noteLayerWillChange
+} from '../undo/mapshaper-undo-tracking';
+import { copyRasterData, getRasterLayerBounds } from '../rasters/mapshaper-raster-utils';
+import {
+  layerHasGeometry, layerIsGeometric, layerHasPaths,
+  layerHasPoints, layerHasNonNullShapes, layerHasRaster
+} from '../dataset/mapshaper-layer-type-utils';
+
+// Re-exported from mapshaper-layer-type-utils.mjs for back-compat.
+export {
+  layerHasGeometry, layerIsGeometric, layerHasPaths,
+  layerHasPoints, layerHasNonNullShapes, layerHasRaster
+};
+
+// Insert a column of values into a (new or existing) data field
+export function insertFieldValues(lyr, fieldName, values) {
+  var size = getFeatureCount(lyr) || values.length,
+      table = lyr.data,
+      fieldExists,
+      records,
+      rec, val;
+
+  if (!table) {
+    noteLayerWillChange(lyr, {operation: 'insertFieldValues', unit: 'data'});
+    table = lyr.data = new DataTable(size);
+    markLayerChanged(lyr, {operation: 'insertFieldValues', unit: 'data'});
+  }
+  fieldExists = table.fieldExists(fieldName);
+  if (fieldExists) {
+    table.captureFieldsBefore([fieldName], {operation: 'insertFieldValues'});
+  } else {
+    table.captureSchemaBefore({operation: 'insertFieldValues', field: fieldName});
+  }
+  records = table.getRecords();
+  for (var i=0, n=records.length; i<n; i++) {
+    rec = records[i];
+    val = values[i];
+    if (!rec) rec = records[i] = {};
+    rec[fieldName] = val === undefined ? null : val;
+  }
+  if (fieldExists) {
+    table.markFieldsChanged([fieldName], {operation: 'insertFieldValues'});
+  } else {
+    table.markSchemaChanged({operation: 'insertFieldValues', field: fieldName});
+  }
+}
+
+export function getLayerDataTable(lyr) {
+  var data = lyr.data;
+  if (!data) {
+    noteLayerWillChange(lyr, {operation: 'getLayerDataTable', unit: 'data'});
+    data = lyr.data = new DataTable(lyr.shapes ? lyr.shapes.length : 0);
+    markLayerChanged(lyr, {operation: 'getLayerDataTable', unit: 'data'});
+  }
+  return data;
+}
+
+export function layerHasAttributeData(lyr) {
+  return lyr.data && lyr.data.getFields().length > 0;
+}
+
+export function layerHasNonNullData(lyr) {
+  return lyr.data && getFirstNonEmptyRecord(lyr.data.getRecords()) ? true : false;
+}
+
+export function layerIsRectangle(lyr, arcs) {
+  return layerOnlyHasRectangles(lyr, arcs) && lyr.shapes.length == 1;
+}
+
+export function layerOnlyHasRectangles(lyr, arcs) {
+  if (!layerHasPaths(lyr)) return false;
+  return lyr.shapes.every(function(shp) {
+    if (!shp) return true;
+    // Every part is tested: a shape whose first ring is rectangular may well
+    // have others that are not.
+    return shp.every(function(path) {
+      return pathIsRectangle(path, arcs);
+    });
+  });
+}
+
+export function deleteFeatureById(lyr, i) {
+  if (lyr.shapes) {
+    noteLayerWillChange(lyr, {operation: 'deleteFeatureById', unit: 'shapes'});
+    lyr.shapes.splice(i, 1);
+    markLayerChanged(lyr, {operation: 'deleteFeatureById', unit: 'shapes'});
+  }
+  if (lyr.data) {
+    lyr.data.captureTableBefore({operation: 'deleteFeatureById'});
+    lyr.data.getRecords().splice(i, 1);
+    lyr.data.markChanged({operation: 'deleteFeatureById'});
+  }
+}
+
+// TODO: move elsewhere (moved here from mapshaper-point-utils to avoid circular dependency)
+export function transformPointsInLayer(lyr, f) {
+  if (layerHasPoints(lyr)) {
+    noteLayerWillChange(lyr, {operation: 'transformPointsInLayer', unit: 'shapes'});
+    forEachPoint(lyr.shapes, function(p) {
+      var p2 = f(p[0], p[1]);
+      p[0] = p2[0];
+      p[1] = p2[1];
+    });
+    markLayerChanged(lyr, {operation: 'transformPointsInLayer', unit: 'shapes'});
+  }
+}
+
+export function getFeatureCount(lyr) {
+  var count = 0;
+  if (layerHasRaster(lyr)) {
+    count = 1;
+  } else if (lyr.data) {
+    count = lyr.data.size();
+  } else if (lyr.shapes) {
+    count = lyr.shapes.length;
+  }
+  return count;
+}
+
+export function layerIsEmpty(lyr) {
+  return getFeatureCount(lyr) == 0;
+}
+
+// A table with no records has no fields, so a field may appear to be missing
+// from a table only because a command removed every record (e.g. -clip or
+// -filter); this is not treated as an error.
+export function requireDataField(obj, field, msg) {
+  var data = obj.fieldExists ? obj : obj.data; // accept layer or DataTable
+  if (!field) stop('Missing a field parameter');
+  if (data && data.size() === 0) return;
+  if (!data || !data.fieldExists(field)) {
+    stop(msg || 'Missing a field named:', field);
+  }
+}
+
+export function requireDataFields(table, fields) {
+  if (!fields || !fields.length) return;
+  if (!table) {
+    stop("Missing attribute data");
+  }
+  if (table.size() === 0) return; // see requireDataField()
+  var dataFields = table.getFields(),
+      missingFields = utils.difference(fields, dataFields);
+  if (missingFields.length > 0) {
+    stop("Table is missing one or more fields:\n",
+        missingFields, "\nExisting fields:", '\n' + formatStringsAsGrid(dataFields));
+  }
+}
+
+export function layerTypeMessage(lyr, defaultMsg, customMsg) {
+  var msg;
+  // check that custom msg is a string (could be an index if require function is called by forEach)
+  if (customMsg && utils.isString(customMsg)) {
+    msg = customMsg;
+  } else {
+    msg = defaultMsg + ', ';
+    if (!lyr || !lyr.geometry_type) {
+      msg += 'received a layer with no geometry';
+    } else {
+      msg += 'received a ' + lyr.geometry_type + ' layer';
+    }
+  }
+  return msg;
+}
+
+export function requirePointLayer(lyr, msg) {
+  if (!lyr || lyr.geometry_type !== 'point')
+    stop(layerTypeMessage(lyr, "Expected a point layer", msg));
+}
+
+export function requireSinglePointLayer(lyr, msg) {
+  requirePointLayer(lyr);
+  if (countMultiPartFeatures(lyr.shapes) > 0) {
+    stop(msg || 'This command requires single points; layer contains multi-point features.');
+  }
+}
+
+export function requirePolylineLayer(lyr, msg) {
+  if (!lyr || lyr.geometry_type !== 'polyline')
+    stop(layerTypeMessage(lyr, "Expected a polyline layer", msg));
+}
+
+export function requirePolygonLayer(lyr, msg) {
+  if (!lyr || lyr.geometry_type !== 'polygon')
+    stop(layerTypeMessage(lyr, "Expected a polygon layer", msg));
+}
+
+export function requirePathLayer(lyr, msg) {
+  if (!lyr || !layerHasPaths(lyr))
+    stop(layerTypeMessage(lyr, "Expected a polygon or polyline layer", msg));
+}
+
+// Guard for vector commands that would otherwise replace a raster layer with
+// a geometry-less result, silently discarding its pixels.
+export function requireNotRasterLayer(lyr, msg) {
+  if (layerHasRaster(lyr)) {
+    stop(msg || 'This command does not support raster layers');
+  }
+}
+
+// Used by info command and gui layer menu
+export function getLayerSourceFile(lyr, dataset) {
+  var inputs = dataset.info && dataset.info.input_files;
+  return inputs && inputs[0] || '';
+}
+
+// Return layers in @dataset that were *not* selected by the current target
+// set but still match a command-specific geometry predicate.
+//
+// Used for command side-effect messaging, e.g.:
+//   - -proj (shared dataset reprojection)
+//   - -simplify (shared arc simplification)
+//
+// @targetLayers should be the layer selection that triggered the command.
+// If all layers are targeted (or target selection is missing), returns [].
+// @filterFn optional predicate (lyr -> bool) for command-specific relevance.
+export function getImplicitlyTargetedLayers(dataset, targetLayers, filterFn) {
+  if (!targetLayers || targetLayers.length === 0 || targetLayers.length >= dataset.layers.length) {
+    return [];
+  }
+  var targeted = new Set(targetLayers);
+  return dataset.layers.filter(function(lyr) {
+    return !targeted.has(lyr) && (!filterFn || filterFn(lyr));
+  });
+}
+
+export function getImplicitlyTargetedLayerNames(dataset, targetLayers, filterFn) {
+  return getImplicitlyTargetedLayers(dataset, targetLayers, filterFn).map(function(lyr) {
+    return lyr.name || '[unnamed]';
+  });
+}
+
+// Divide a collection of features with mixed types into layers of a single type
+// (Used for importing TopoJSON and GeoJSON features)
+export function divideFeaturesByType(shapes, properties, types) {
+  var typeSet = utils.uniq(types);
+  var layers = typeSet.map(function(geoType) {
+    var p = [],
+        s = [],
+        dataNulls = 0,
+        rec;
+
+    for (var i=0, n=shapes.length; i<n; i++) {
+      if (types[i] != geoType) continue;
+      if (geoType) s.push(shapes[i]);
+      rec = properties[i];
+      p.push(rec);
+      if (!rec) dataNulls++;
+    }
+    return {
+      geometry_type: geoType,
+      shapes: s,
+      data: dataNulls < p.length ? new DataTable(p) : null
+    };
+  });
+  return layers;
+}
+
+// make a stub copy if the no_replace option is given, else pass thru src layer
+export function getOutputLayer(src, opts) {
+  return opts && opts.no_replace ? {geometry_type: src.geometry_type} : src;
+}
+
+//
+export function setOutputLayerName(dest, src, defName, opts) {
+  opts = opts || {};
+  if (opts.name) {
+    dest.name = opts.name;
+  } else if (opts.no_replace) {
+    dest.name = defName || undefined;
+  } else {
+    dest.name = src && src.name || defName || undefined;
+  }
+}
+
+// Make a deep copy of a layer
+export function copyLayer(lyr) {
+  var copy = copyLayerShapes(lyr);
+  if (copy.data) {
+    copy.data = copy.data.clone();
+  }
+  return copy;
+}
+
+// Make a shallow copy of a path layer; replace layer.shapes with an array that is
+// filtered to exclude paths containing any of the arc ids contained in arcIds.
+// arcIds: an array of (non-negative) arc ids to exclude
+export function filterPathLayerByArcIds(pathLyr, arcIds) {
+  var index = arcIds.reduce(function(memo, id) {
+    memo[id] = true;
+    return memo;
+  }, {});
+  // deep copy shapes; this could be optimized to only copy shapes that are modified
+  var shapes = cloneShapes(pathLyr.shapes);
+  editShapes(shapes, onPath); // remove paths that are missing shapes
+  return utils.defaults({shapes: shapes}, pathLyr);
+
+  function onPath(path) {
+    for (var i=0; i<path.length; i++) {
+      if (absArcId(path[i]) in index) {
+        return null;
+      }
+    }
+    return path;
+  }
+}
+
+export function copyLayerShapes(lyr) {
+  var copy = utils.extend({}, lyr);
+  if (lyr.shapes) {
+    copy.shapes = cloneShapes(lyr.shapes);
+  }
+  if (lyr.raster) copy.raster = copyRasterData(lyr.raster);
+  return copy;
+}
+
+// shapes: one layer's "shapes" array
+// Guards against being passed a layer instead: several callers made that
+// mistake, and reading .length off a layer object silently returned 0, which
+// disabled the multi-part checks that depend on this function.
+export function countMultiPartFeatures(shapes) {
+  var count = 0;
+  if (!shapes) return 0;
+  if (!Array.isArray(shapes)) {
+    error('countMultiPartFeatures() expects an array of shapes');
+  }
+  for (var i=0, n=shapes.length; i<n; i++) {
+    if (shapes[i] && shapes[i].length > 1) count++;
+  }
+  return count;
+}
+
+// moving this here from mapshaper-path-utils to avoid circular dependency
+export function getArcPresenceTest2(layers, arcs) {
+  var counts = countArcsInLayers(layers, arcs);
+  return function(arcId) {
+    return counts[absArcId(arcId)] > 0;
+  };
+}
+
+// Returns a test for arcs that are referenced by a path layer in @dataset, or
+// null if every arc is referenced (or there are no path layers to refer to
+// them). Arcs can be left unreferenced by commands like -filter, and by GUI
+// edits that replace a path's arcs; code that reads all the arcs in a
+// collection uses this to skip them.
+export function getUsedArcTest(dataset) {
+  var arcs = dataset.arcs;
+  var layers = dataset.layers || [];
+  var counts;
+  if (!arcs || !layers.some(layerHasPaths)) return null;
+  counts = countArcsInLayers(layers, arcs);
+  for (var i=0, n=counts.length; i<n; i++) {
+    if (counts[i] === 0) {
+      return function(arcId) {
+        return counts[absArcId(arcId)] > 0;
+      };
+    }
+  }
+  return null;
+}
+
+// Count arcs in a collection of layers
+export function countArcsInLayers(layers, arcs) {
+  var counts = new Uint32Array(arcs.size());
+  layers.filter(layerHasPaths).forEach(function(lyr) {
+    countArcsInShapes(lyr.shapes, counts);
+  });
+  return counts;
+}
+
+// Returns a Bounds object
+export function getLayerBounds(lyr, arcs) {
+  var bounds = null;
+  if (lyr.geometry_type == 'point') {
+    bounds = getPointBounds(lyr.shapes);
+  } else if (lyr.geometry_type == 'polygon' || lyr.geometry_type == 'polyline') {
+    bounds = getPathBounds(lyr.shapes, arcs);
+  } else if (layerHasRaster(lyr)) {
+    bounds = getRasterLayerBounds(lyr);
+  } else {
+    // just return null if layer has no bounds
+    // error("Layer is missing a valid geometry type");
+  }
+  return bounds;
+}
+
+
+export function isolateLayer(layer, dataset) {
+  return utils.defaults({
+    layers: dataset.layers.filter(function(lyr) {return lyr == layer;})
+  }, dataset);
+}
+
+export function initDataTable(lyr) {
+  noteLayerWillChange(lyr, {operation: 'initDataTable', unit: 'data'});
+  lyr.data = new DataTable(getFeatureCount(lyr));
+  markLayerChanged(lyr, {operation: 'initDataTable', unit: 'data'});
+}

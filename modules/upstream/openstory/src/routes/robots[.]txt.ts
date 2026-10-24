@@ -1,0 +1,26 @@
+import { createFileRoute } from '@tanstack/react-router';
+import { IS_PREVIEW_DEPLOYMENT } from '@/platform/flags';
+import { SITE_CONFIG } from '@/ui/marketing/constants';
+
+function buildRobotsTxt(isPreview: boolean): string {
+  if (isPreview) {
+    return `User-agent: *\nDisallow: /\n`;
+  }
+  return `User-agent: *\nAllow: /\n\nSitemap: ${SITE_CONFIG.url}/sitemap.xml\n`;
+}
+
+export const Route = createFileRoute('/robots.txt')({
+  server: {
+    handlers: {
+      GET: async () => {
+        return new Response(buildRobotsTxt(IS_PREVIEW_DEPLOYMENT), {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'Cache-Control': 'public, max-age=86400',
+          },
+        });
+      },
+    },
+  },
+});

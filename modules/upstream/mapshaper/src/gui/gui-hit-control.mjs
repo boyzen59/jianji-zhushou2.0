@@ -1,0 +1,729 @@
+import { getPointerHitTest } from './gui-hit-test';
+import { utils } from './gui-core';
+import { EventDispatcher } from './gui-events';
+import { GUI } from './gui-lib';
+import { El } from './gui-el';
+import { internal } from './gui-core';
+import { translateDisplayPoint } from './gui-display-utils';
+
+export function HitControl(gui, ext, mouse) {
+  var self = new EventDispatcher();
+  var storedData = noHitData(); // may include additional data from SVG symbol hit (e.g. hit node)
+  var selectionIds = [];
+  var transientIds = []; // e.g. hit ids while dragging a box
+  var pendingPath = null; // display coords of a path being drawn (see setPendingPath())
+  var pendingPathStyle = null;
+  var pendingKnots = null; // display coords of a curve's knots (see setPendingKnots())
+  var hiddenShapeIds = []; // see setHiddenShapes()
+  var hiddenShapePaths = null;
+  var active = false;
+  var targetLayer;
+  var hitTest;
+  var pinnedOn; // used in multi-edit mode (selection) for toggling pinning behavior
+  var suppressChangeEvent = false;
+  // set while a panel that acts on the whole layer is open (e.g. color palettes)
+  var selectionDisabled = false;
+
+  // event priority is higher than navigation, so stopping propagation disables
+  // pan navigation
+  var priority = 2;
+
+  mouse.on('contextmenu', function(e) {
+    e.originalEvent.preventDefault();
+    if (El('body').hasClass('map-view')) {
+      triggerPointerEvent('contextmenu', e);
+    }
+  });
+
+  // init keyboard controls for pinned features
+  gui.keyboard.on('keydown', function(evt) {
+    var e = evt.originalEvent;
+
+    if (gui.interaction.getMode() == 'off' || !targetLayer) return;
+
+    // esc key clears selection (unless in an editing mode -- esc key also exits current mode)
+    if (e.keyCode == 27 && !gui.getMode()) {
+      self.clearSelection();
+      return;
+    }
+
+    // ignore keypress if no feature is selected or user is editing text
+    if (pinnedId() == -1 || GUI.textIsSelected()) return;
+
+    if (e.keyCode == 37 || e.keyCode == 39) {
+      // L/R arrow keys
+      // advance pinned feature
+      advanceSelectedFeature(e.keyCode == 37 ? -1 : 1);
+      e.stopPropagation();
+
+    } else if (e.keyCode == 8) {
+      // DELETE key
+      // delete pinned feature
+      // to help protect against inadvertent deletion, don't delete
+      // when a sidebar panel or popup menu is open
+      if (!gui.getMode() && !gui.sidebarPanelIsOpen()) {
+        internal.deleteFeatureById(targetLayer, pinnedId());
+        self.clearSelection();
+        gui.model.updated({flags: 'filter'}); // signal map to update
+      }
+    }
+  }, !!'capture'); // preempt the layer control's arrow key handler
+
+  self.setLayer = function(mapLayer) {
+    targetLayer = mapLayer;
+    updateHitTest();
+  };
+
+  function updateHitTest(featureFilter) {
+    hitTest = getPointerHitTest(targetLayer, ext, interactionMode(), featureFilter);
+  }
+
+  // what the pointer does in the mode (see getToolMode())
+  function interactionMode() {
+    return gui.interaction.getToolMode ? gui.interaction.getToolMode() :
+      gui.interaction.getMode();
+  }
+
+  function turnOn(mode) {
+    active = true;
+    updateHitTest();
+  }
+
+  function turnOff() {
+    if (active) {
+      updateSelectionState(null); // no hit data, no event
+      active = false;
+      hitTest = null;
+      pinnedOn = false;
+      pendingPath = null;
+      pendingKnots = null;
+      hiddenShapeIds = [];
+      hiddenShapePaths = null;
+    }
+  }
+
+  // The drawing tool selects features itself (see setSelectionIds()), since a
+  // click there may instead start or extend a path. So its modes are
+  // selectable, which keeps the selection apart from the hovered feature, but
+  // not clickable.
+  function selectable() {
+    var mode = interactionMode();
+    return mode == 'selection' || mode == 'label' || mode == 'label_style' ||
+      mode == 'point_style' || mode == 'line_style' || mode == 'polygon_style' ||
+      mode == 'symbols' || drawingMode(mode);
+  }
+
+  function pinnable() {
+    return clickable() && !selectable();
+    // return clickable();
+  }
+
+  function draggable() {
+    var mode = interactionMode();
+    return mode == 'vertices' || mode == 'edit_points' || mode == 'point_style' ||
+      mode == 'label' || mode == 'symbols' || lineToolMode(mode);
+  }
+
+  // the modes that draw new shapes: the Draw tool's, and the curve tool's
+  // (gui-curve-lines.mjs)
+  function drawingMode(mode) {
+    return mode == 'edit_lines' || mode == 'edit_polygons' || mode == 'curve_lines';
+  }
+
+  // the modes of the line and polygon tools (gui-draw-lines2.mjs,
+  // gui-curve-lines.mjs)
+  function lineToolMode(mode) {
+    return drawingMode(mode) || mode == 'reshape_lines' || mode == 'reshape_polygons';
+  }
+
+  // 'edit_points' is left out: a click there adds a point or does nothing, and
+  // never selects or pins (see eventIsEnabled())
+  function clickable() {
+    var mode = interactionMode();
+    // click used to pin popup and select features
+    return mode == 'data' || mode == 'info' || mode == 'selection' ||
+    mode == 'label' || mode == 'label_style' || mode == 'point_style' ||
+    mode == 'line_style' || mode == 'polygon_style' ||
+    mode == 'rectangles' || mode == 'symbols';
+  }
+
+  self.getHitId = function() {
+    return hitTest ? storedData.id : -1;
+  };
+
+  self.setHitId = function(id) {
+    if (storedData.id == id) return;
+    storedData.id = id;
+    storedData.ids = id == -1 ? [] : [id];
+    triggerChangeEvent();
+  };
+
+  // Get a reference to the active layer, so listeners to hit events can interact
+  // with data and shapes
+  self.getHitTarget = function() {
+    return targetLayer;
+  };
+
+  self.addSelectionIds = function(ids) {
+    turnOn('selection');
+    selectionIds = utils.uniq(selectionIds.concat(ids));
+    ids = utils.uniq(storedData.ids.concat(ids));
+    updateSelectionState({ids: ids});
+  };
+
+  // Replaces the selection outright, for a mode that decides what is selected
+  // itself rather than letting a click decide -- the label tool putting a label
+  // back in the selection when its text editing session ends.
+  // opts.keepHover: leave the hovered feature as it is, for a tool that changes
+  // the selection with a click and reads the hovered feature on the next one
+  self.setSelectionIds = function(ids, opts) {
+    var hoverId = opts && opts.keepHover && !storedData.pinned ? storedData.id : -1;
+    selectionIds = utils.uniq(ids || []);
+    updateSelectionState({ids: selectionIds.concat(), id: hoverId, pinned: false});
+  };
+
+  self.setPinning = function(val) {
+    if (pinnedOn != val) {
+      pinnedOn = val;
+      triggerChangeEvent();
+    }
+  };
+
+  self.setTransientIds = function(ids) {
+    // turnOn('selection');
+    transientIds = ids || [];
+    if (active) {
+      triggerChangeEvent();
+    }
+  };
+
+  // Shows a path that is being drawn and is not yet part of the target layer.
+  // coords: [[x, y], ...] display coordinates, or null to remove the path
+  // style: (optional) SVG style properties to draw it with, e.g. {stroke: 'red'}
+  self.setPendingPath = function(coords, style) {
+    if (!pendingPath && !coords) return;
+    pendingPath = coords && coords.length > 0 ? coords : null;
+    pendingPathStyle = pendingPath && style || null;
+    triggerChangeEvent();
+  };
+
+  // Whether a path is being drawn or previewed (see setPendingPath())
+  self.hasPendingPath = function() {
+    return !!pendingPath;
+  };
+
+  // Shows handles on the knots of a curve, for the curve tool.
+  // knots: [[x, y], ...] display coordinates, or null to remove the handles
+  self.setPendingKnots = function(knots) {
+    if (!pendingKnots && !knots) return;
+    pendingKnots = knots && knots.length > 0 ? knots : null;
+    triggerChangeEvent();
+  };
+
+  // Shapes of the target layer that a tool is redrawing in the overlay while
+  // the user drags: a curve whose knot is being dragged, or the shapes that
+  // share a vertex being moved by the reshape tool. The layer is drawn without
+  // them, and the overlay draws their original geometry as a plain outline,
+  // without their style or selection highlight (see gui-overlay-styler.mjs).
+  // ids: feature ids, or [] for none
+  // paths: (optional) the shapes' original paths, [[x, y], ...] in display
+  //   coordinates, for a tool that edits the display geometry in place;
+  //   otherwise the outline is drawn from the layer
+  self.setHiddenShapes = function(ids, paths) {
+    var next = ids || [];
+    if (next.length === 0 && hiddenShapeIds.length === 0) return;
+    hiddenShapeIds = next.concat();
+    hiddenShapePaths = next.length > 0 && paths || null;
+    triggerChangeEvent();
+    gui.dispatchEvent('map-needs-refresh'); // the layer itself is redrawn
+  };
+
+  self.getHiddenShapeIds = function() {
+    return active ? hiddenShapeIds.concat() : [];
+  };
+
+  self.triggerChangeEvent = triggerChangeEvent;
+
+  self.getHitState = getHitState;
+
+  self.setHoverVertex = function(p, type) {
+    var p2 = storedData.hit_coordinates;
+    if (!active || !p) return;
+    if (p2 && p2[0] == p[0] && p2[1] == p[1]) return;
+    storedData.hit_coordinates = p;
+    storedData.hit_type = type || '';
+    triggerChangeEvent();
+  };
+
+  self.clearHoverVertex = function() {
+    if (!storedData.hit_coordinates) return;
+    delete storedData.hit_coordinates;
+    delete storedData.hit_type;
+    triggerChangeEvent();
+  };
+
+  // Mark the location of a snip that has been chosen but not yet applied
+  // (the first of the two cuts needed to divide a ring).
+  self.setPendingSnip = function(p) {
+    var p2 = storedData.snip_coordinates;
+    if (!active || !p) return;
+    if (p2 && p2[0] == p[0] && p2[1] == p[1]) return;
+    storedData.snip_coordinates = p;
+    triggerChangeEvent();
+  };
+
+  self.clearPendingSnip = function() {
+    if (!storedData.snip_coordinates) return;
+    delete storedData.snip_coordinates;
+    triggerChangeEvent();
+  };
+
+  self.clearSelection = function() {
+    updateSelectionState(null);
+  };
+
+  // Disabling clears the selection and the hover highlight, and leaves clicks
+  // and hovers over features to the map until selection is enabled again or
+  // the interaction mode changes.
+  self.setSelectionEnabled = function(enabled) {
+    selectionDisabled = !enabled;
+    if (selectionDisabled) self.clearSelection();
+  };
+
+  self.clearHover = function() {
+    updateSelectionState(mergeHoverData({ids: []}));
+  };
+
+  self.getSelectionIds = function() {
+    return selectionIds.concat();
+  };
+
+  self.getTargetDataTable = function() {
+    var targ = self.getHitTarget();
+    return targ?.data || null;
+  };
+
+  // get function for selecting next or prev feature within the current set of
+  // selected features
+  self.getSwitchTrigger = function(diff) {
+    return function() {
+      switchWithinSelection(diff);
+    };
+  };
+
+  // diff: 1 or -1
+  function advanceSelectedFeature(diff) {
+    var n = internal.getFeatureCount(targetLayer);
+    if (n < 2 || pinnedId() == -1) return;
+    storedData.id = (pinnedId() + n + diff) % n;
+    storedData.ids = [storedData.id];
+    triggerChangeEvent();
+  }
+
+  // diff: 1 or -1
+  function switchWithinSelection(diff) {
+    var id = pinnedId();
+    var i = storedData.ids.indexOf(id);
+    var n = storedData.ids.length;
+    if (i < 0 || n < 2) return;
+    storedData.id = storedData.ids[(i + diff + n) % n];
+    triggerChangeEvent();
+  }
+
+  // make sure popup is unpinned and turned off when switching editing modes
+  // (some modes do not support pinning)
+  gui.on('interaction_mode_change', function(e) {
+    selectionDisabled = false;
+    clearSelectionSilently();
+    if (gui.interaction.modeUsesHitDetection(e.mode)) {
+      turnOn(e.mode);
+    } else {
+      turnOff();
+    }
+    gui.dispatchEvent('map-needs-refresh');
+  });
+
+  // Arming a tool changes what a click means, so the selection made for
+  // styling goes, and the hit test is remade for the tool.
+  gui.on('interaction_tool_change', function() {
+    if (!active) return;
+    clearSelectionSilently();
+    updateHitTest();
+    triggerChangeEvent();
+    gui.dispatchEvent('map-needs-refresh');
+  });
+
+  gui.on('undo_redo_pre', function() {
+    self.clearSelection();
+  });
+
+  gui.on('shift_drag_start', function() {
+    self.clearHover();
+  });
+
+  mouse.on('dblclick', handlePointerEvent, null, priority);
+  mouse.on('dragstart', handlePointerEvent, null, priority);
+  mouse.on('drag', handlePointerEvent, null, priority);
+  mouse.on('dragend', handlePointerEvent, null, priority);
+
+  mouse.on('click', function(e) {
+    var pinned = storedData.pinned;
+    var hitData, clickInfo;
+    if (!hitTest || !active) return;
+    if (!eventIsEnabled('click')) return;
+    e.stopPropagation();
+
+    // TODO: move pinning to inspection control?
+    if (clickable()) {
+      hitData = hitTest(e);
+      clickInfo = describeClickedSelection(hitData, e);
+      updateSelectionState(convertClickDataToSelectionData(hitData, e));
+    }
+
+    triggerPointerEvent('click', e, clickInfo);
+  }, null, priority);
+
+  // What the click found in the selection as it stood before the click, which
+  // the click itself is about to replace. The label tool reads this to tell a
+  // click that selects a label from a click on the label that was already the
+  // whole selection -- its gesture for editing that label's text -- and a click
+  // off a selection from one on empty map, since a click on an unlabelled
+  // feature selects it before the tool hears of the click.
+  //
+  // An additive click never qualifies: shift-click means toggle, and it would
+  // otherwise open a text session on the label it was removing.
+  //
+  // Reported on the click event rather than stored, because it describes one
+  // gesture and would be wrong by the next one.
+  function describeClickedSelection(hitData, e) {
+    var id = hitData.ids.length > 0 ? hitData.ids[0] : -1;
+    return {
+      clicked_only_selection: id > -1 && !eventUsesAdditiveSelection(e) &&
+        selectionIds.length == 1 && selectionIds[0] === id,
+      had_selection: selectionIds.length > 0
+    };
+  }
+
+  // Hits are re-detected on 'hover' (if hit detection is active)
+  mouse.on('hover', function(e) {
+    if (gui.contextMenu.isOpen()) return;
+    handlePointerEvent(e);
+    if (storedData.pinned || !hitTest || !active || selectionDisabled) return;
+    if (e.hover && isOverMap(e)) {
+      // mouse is hovering directly over map area -- update hit detection
+      updateSelectionState(mergeHoverData(hitTest(e)));
+    } else if (targetIsRollover(e.originalEvent.target)) {
+      // don't update hit detection if mouse is over the rollover (to prevent
+      // on-off flickering)
+    } else {
+      updateSelectionState(mergeHoverData({ids:[]}));
+    }
+  }, null, priority);
+
+
+  function targetIsRollover(target) {
+    while (target.parentNode && target != target.parentNode) {
+      if (target.className && String(target.className).indexOf('rollover') > -1) {
+        return true;
+      }
+      target = target.parentNode;
+    }
+    return false;
+  }
+
+  function noHitData() {return {ids: [], id: -1, pinned: false};}
+
+  // Translates feature hit data from a mouse click into feature selection data
+  // hitData: hit data from a mouse click
+  function convertClickDataToSelectionData(hitData, e) {
+    // mergeCurrentState(hitData);
+    // TOGGLE pinned state under some conditions
+    var id = hitData.ids.length > 0 ? hitData.ids[0] : -1;
+    hitData.id = id;
+    if (pinnable()) {
+      if (!storedData.pinned && id > -1) {
+        hitData.pinned = true; // add pin
+      } else if (storedData.pinned && storedData.id == id) {
+        delete hitData.pinned; // remove pin
+        // hitData.id = -1; // keep highlighting (pointer is still hovering)
+      } else if (storedData.pinned && id > -1) {
+        hitData.pinned = true; // stay pinned, switch id
+      }
+    }
+    if (selectable()) {
+      if (id > -1) {
+        selectionIds = styleSelectionMode() ?
+          selectStyleFeature(id, e) :
+          toggleId(id, selectionIds);
+      } else if (shapeStyleMode(interactionMode()) && !eventUsesAdditiveSelection(e)) {
+        selectionIds = []; // a click off the selection deselects, as in Draw
+      }
+      hitData.ids = selectionIds;
+    }
+    return hitData;
+  }
+
+  // The line and polygon style modes select as their Draw tool does (see
+  // selectShape() in gui-draw-lines2.mjs)
+  function shapeStyleMode(mode) {
+    return mode == 'line_style' || mode == 'polygon_style';
+  }
+
+  function styleSelectionMode() {
+    var mode = interactionMode();
+    return mode == 'label' || mode == 'label_style' || mode == 'point_style' ||
+      mode == 'line_style' || mode == 'polygon_style' || mode == 'symbols';
+  }
+
+  function selectStyleFeature(id, e) {
+    if (eventUsesAdditiveSelection(e)) {
+      return toggleId(id, selectionIds);
+    }
+    // In label mode a plain click always narrows the selection to the feature
+    // clicked, whatever was selected before. It cannot also mean "deselect",
+    // because the label tool needs a click on the one selected label to mean
+    // "edit this label's text"; shift-click is what removes one. The other
+    // style modes keep the older rule, where a plain click on a selected
+    // feature deselects it, except the line and polygon modes, where a click
+    // off the selection deselects instead.
+    if (interactionMode() == 'label' || interactionMode() == 'symbols' ||
+        shapeStyleMode(interactionMode())) {
+      return [id];
+    }
+    if (selectionIds.includes(id)) {
+      return utils.difference(selectionIds, [id]);
+    }
+    return [id];
+  }
+
+  function eventUsesAdditiveSelection(e) {
+    var original = e && e.originalEvent || e;
+    return !!(original && original.shiftKey);
+  }
+
+  function mergeSelectionModeHoverData(hitData) {
+      if (hitData.ids.length === 0 || selectionIds.includes(hitData.ids[0])) {
+        hitData.ids = selectionIds;
+        hitData.pinned = storedData.pinned;
+      } else {
+        //
+      }
+
+      // kludge to inhibit hover effect while dragging a box
+      if (gui.keydown) hitData.id = -1;
+      return hitData;
+  }
+
+  function mergeHoverData(hitData) {
+    if (storedData.pinned) {
+      hitData.id = storedData.id;
+      hitData.pinned = true;
+    } else {
+      hitData.id = hitData.ids.length > 0 ? hitData.ids[0] : -1;
+    }
+    if (selectable()) {
+      hitData.ids = selectionIds;
+      // kludge to inhibit hover effect while dragging a box
+      if (gui.keydown) hitData.id = -1;
+    }
+    return hitData;
+  }
+
+  function pinnedId() {
+    return storedData.pinned ? storedData.id : -1;
+  }
+
+  function toggleId(id, ids) {
+    if (ids.indexOf(id) > -1) {
+      return utils.difference(ids, [id]);
+    }
+    return [id].concat(ids);
+  }
+
+  // If hit ids have changed, update stored hit ids and fire 'hover' event
+  // evt: (optional) mouse event
+  function updateSelectionState(newData) {
+    var nonEmpty = newData && (newData.ids.length || newData.id > -1);
+    transientIds = [];
+    if (!newData) {
+      newData = noHitData();
+      selectionIds = [];
+    }
+
+    if (!testHitChange(storedData, newData)) {
+      return;
+    }
+
+    storedData = newData;
+    gui.container.findChild('.map-layers').classed('symbol-hit', nonEmpty);
+    if (active && !suppressChangeEvent) {
+      triggerChangeEvent();
+    }
+  }
+
+  function clearSelectionSilently() {
+    suppressChangeEvent = true;
+    self.clearSelection();
+    suppressChangeEvent = false;
+  }
+
+  // check if an event is used in the current interaction mode
+  function eventIsEnabled(type) {
+    var mode = interactionMode();
+    if (!active || selectionDisabled) return false;
+    if (type == 'click' && gui.keyboard.ctrlIsPressed()) {
+      return false; // don't fire if context menu might open
+    }
+    if (type == 'click' && gui.contextMenu.isOpen()) {
+      return false;
+    }
+    if (type == 'click' && drawingMode(mode)) {
+      return true; // click events are triggered even if no shape is hit
+    }
+    if (type == 'click' && shapeStyleMode(mode) && selectionIds.length > 0) {
+      return true; // a click off the selection deselects
+    }
+    if (type == 'click' && mode == 'edit_points') {
+      return true;
+    }
+    if ((mode == 'label' || mode == 'symbols') && (type == 'click' || type == 'dblclick' ||
+        type == 'hover' || isDragEvent(type))) {
+      // placing a label or a knot happens on empty map as often as on a
+      // feature, and a double-click finishes a curve wherever it lands.
+      // Hover is how the label tool runs the far end of a curve it is drawing
+      // along with the pointer, so it is needed over empty map too.
+      //
+      // Drags cannot wait for a hit either. A curve's knots are deliberately
+      // not hit targets -- hovering a path label triggers on its glyphs -- so
+      // the pointer on a knot handle out along the curve is over nothing at
+      // all, and a drag that needed a hit first could never start there.
+      return true;
+    }
+    if (lineToolMode(mode) && (type == 'hover' || type == 'dblclick')) {
+      return true; // special case -- using hover for line drawing animation
+    }
+    if (mode == 'snip_lines' && (type == 'hover' || type == 'click')) {
+      // the snip tool tracks vertices under the pointer, so it needs hover
+      // events as soon as a feature is hit, not one event later
+      return true;
+    }
+
+    // ignore pointer events when no features are being hit
+    // (don't block pan and other navigation when events aren't being used for editing)
+    var hitId = self.getHitId();
+    if (hitId == -1) return false;
+
+    if (isDragEvent(type) && !draggable()) {
+      return false;
+    }
+    return true;
+  }
+
+  function isDragEvent(type) {
+    return type == 'drag' || type == 'dragstart' || type == 'dragend';
+  }
+
+  function isOverMap(e) {
+    return e.x >= 0 && e.y >= 0 && e.x < ext.width() && e.y < ext.height();
+  }
+
+  function possiblyStopPropagation(e) {
+    var mode = interactionMode();
+    if (lineToolMode(mode) || mode == 'snip_lines') {
+      // handled conditionally in the control
+      return;
+    }
+    if ((mode == 'label' || mode == 'symbols') && (e.type == 'hover' || isDragEvent(e.type))) {
+      // Hover: the label tool only watches the pointer in this mode;
+      // swallowing the event would take hover away from everything downstream.
+      //
+      // Drags: a drag over a label means something only on one of its knot or
+      // anchor handles, and the tool is what knows where those are. Anywhere
+      // else over the label the drag has to stay available for panning, so the
+      // tool stops propagation itself once it has taken the drag -- the same
+      // arrangement the line tools use.
+      return;
+    }
+    e.stopPropagation();
+  }
+
+  function handlePointerEvent(e) {
+    if (eventIsEnabled(e.type)) {
+      possiblyStopPropagation(e);
+      triggerPointerEvent(e.type, e);
+    }
+  }
+
+  function triggerChangeEvent() {
+    self.dispatchEvent('change', getHitState());
+  }
+
+  // evt: event data (may be a pointer event object, an ordinary object or null)
+  // extra: (optional) fields describing this one gesture, which are not stored
+  function triggerPointerEvent(type, evt, extra) {
+    var eventData = getHitState();
+    if (evt) {
+      // data coordinates
+      eventData.projected_coordinates = gui.map.pixelCoordsToProjectedCoords(evt.x, evt.y);
+      eventData.lonlat_coordinates = gui.map.pixelCoordsToLngLatCoords(evt.x, evt.y);
+      if (type == 'contextmenu') {
+        // Only the context menu reads pixel values, and sampling one can cost a
+        // scan of the grid, so it is not done on every hover event.
+        eventData.raster_pixel = gui.map.pixelCoordsToRasterPixel(evt.x, evt.y);
+      }
+      eventData.originalEvent = evt;
+      eventData.overMap = isOverMap(evt);
+      utils.defaults(eventData, evt.data);
+    }
+    if (extra) utils.extend(eventData, extra);
+    // utils.defaults(eventData, evt && evt.data || {}, storedData);
+    self.dispatchEvent(type, eventData);
+  }
+
+  function getHitState() {
+    var data = {
+      mode: interactionMode()
+    };
+    // Merge stored hit data into the event data
+    utils.defaults(data, storedData);
+    if (transientIds.length) {
+      // add transient ids to any other hit ids
+      data.ids = utils.uniq(transientIds.concat(data.ids || []));
+    }
+    if (pendingPath) {
+      data.pending_path = pendingPath;
+      data.pending_path_style = pendingPathStyle;
+    }
+    if (pendingKnots) {
+      data.pending_knots = pendingKnots;
+    }
+    if (hiddenShapeIds.length > 0) {
+      data.hidden_ids = hiddenShapeIds;
+      if (hiddenShapePaths) data.hidden_paths = hiddenShapePaths;
+    }
+    if (pinnedOn) {
+      data.pinned = true;
+    }
+    return data;
+  }
+
+  // Test if two hit data objects are equivalent
+  function testHitChange(a, b) {
+    // check change in 'container', e.g. so moving from anchor hit to label hit
+    //   is detected
+    if (sameIds(a.ids, b.ids) && a.container == b.container && a.pinned == b.pinned && a.id == b.id) {
+      return false;
+    }
+    return true;
+  }
+
+  function sameIds(a, b) {
+    if (a.length != b.length) return false;
+    for (var i=0; i<a.length; i++) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  }
+
+  return self;
+}

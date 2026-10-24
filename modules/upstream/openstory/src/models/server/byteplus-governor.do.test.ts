@@ -1,0 +1,84 @@
+import { describe, expect, it } from 'vitest';
+import { BytePlusGovernor } from './byteplus-governor.do';
+import { asStub } from '@/test/as-stub';
+
+const bucket = {
+  bucket: 'assets-write',
+  capacity: 3,
+  refillPerMinute: 60,
+  maxWaitMs: 60_000,
+};
+
+/** Storage outlives the instance, as it does across a DO eviction. */
+function storage(): Map<string, unknown> {
+  return new Map();
+}
+
+function governor(store = storage()): BytePlusGovernor {
+  const kv = {
+    get: (key: string) => store.get(key),
+    put: (key: string, value: unknown) => void store.set(key, value),
+  };
+  return new BytePlusGovernor(
+    // the DO reads only ctx.storage.kv
+    asStub<DurableObjectState>({ storage: { kv } }),
+    // the DO reads no env
+    asStub<Cloudflare.Env>({})
+  );
+}
+
+describe('BytePlusGovernor.acquire', () => {
+  it('hands out the burst for free, then paces at the refill rate in arrival order', () => {
+    const g = governor();
+    const t0 = 1_000_000;
+    // 60/min = one token per second.
+    expect(g.acquire(bucket, t0)).toBe(0);
+    expect(g.acquire(bucket, t0)).toBe(0);
+    expect(g.acquire(bucket, t0)).toBe(0);
+    expect(g.acquire(bucket, t0)).toBe(1_000);
+    expect(g.acquire(bucket, t0)).toBe(2_000);
+    expect(g.acquire(bucket, t0)).toBe(3_000);
+  });
+
+  it('refills with elapsed time and never above capacity', () => {
+    const g = governor();
+    const t0 = 1_000_000;
+    for (let i = 0; i < 5; i += 1) g.acquire(bucket, t0);
+    // Two seconds later the debt of two is paid but nothing is spare, so the
+    // next call still waits one interval; a third second makes it free.
+    expect(g.acquire(bucket, t0 + 2_000)).toBe(1_000);
+    expect(g.acquire(bucket, t0 + 4_000)).toBe(0);
+    // An hour idle refills to capacity (3), not to 3600.
+    expect(g.acquire(bucket, t0 + 3_600_000)).toBe(0);
+    expect(g.acquire(bucket, t0 + 3_600_000)).toBe(0);
+    expect(g.acquire(bucket, t0 + 3_600_000)).toBe(0);
+    expect(g.acquire(bucket, t0 + 3_600_000)).toBe(1_000);
+  });
+
+  it('refuses without reserving when the wait would exceed maxWaitMs', () => {
+    const g = governor();
+    const t0 = 1_000_000;
+    const tight = { ...bucket, maxWaitMs: 1_500 };
+    for (let i = 0; i < 3; i += 1) g.acquire(tight, t0);
+    expect(g.acquire(tight, t0)).toBe(1_000);
+    // Would be 2000ms: refused, and the bucket's debt stays at one.
+    expect(g.acquire(tight, t0)).toBe(-1);
+    expect(g.acquire({ ...tight, maxWaitMs: 60_000 }, t0)).toBe(2_000);
+  });
+
+  it('keeps buckets independent', () => {
+    const g = governor();
+    const t0 = 1_000_000;
+    for (let i = 0; i < 4; i += 1) g.acquire(bucket, t0);
+    expect(g.acquire({ ...bucket, bucket: 'other' }, t0)).toBe(0);
+  });
+
+  it('keeps its reservations across an eviction (#1674)', () => {
+    const store = storage();
+    const t0 = 1_000_000;
+    for (let i = 0; i < 3; i += 1) governor(store).acquire(bucket, t0);
+    // A fresh instance over the same storage is the evicted-and-revived DO:
+    // it must not hand out a full bucket again.
+    expect(governor(store).acquire(bucket, t0)).toBe(1_000);
+  });
+});

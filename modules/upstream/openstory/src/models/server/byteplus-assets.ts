@@ -1,0 +1,350 @@
+/**
+ * ModelArk private asset library (Advanced Creation Rights).
+ *
+ * Seedance 2.5/2.0 refuse a public URL that *may contain a real person*.
+ * Rights unlock this API so we can register the still and pass `asset://<id>`
+ * on the video task instead. Virtual (AIGC) groups cover photorealistic
+ * generated faces; a real-human (LivenessFace) group still needs the person
+ * to complete H5 verification — out of scope here.
+ */
+
+import { aigcGroupName } from './byteplus-config';
+import {
+  bytePlusOpenApi,
+  withProject,
+  type BytePlusOpenApiConfig,
+} from './byteplus-openapi';
+
+export type BytePlusAssetKind = 'Image' | 'Video' | 'Audio';
+type BytePlusAssetStatus = 'Active' | 'Processing' | 'Failed';
+
+export type BytePlusAsset = {
+  Id?: string;
+  Name?: string;
+  Status?: BytePlusAssetStatus;
+  AssetType?: BytePlusAssetKind;
+  GroupId?: string;
+  /** ISO 8601, e.g. `2026-03-20T14:24:52Z`. */
+  CreateTime?: string;
+};
+
+export type BytePlusAssetGroup = {
+  Id?: string;
+  Name?: string;
+  GroupType?: string;
+  CreateTime?: string;
+};
+
+function assetNameFor(identity: string): string {
+  // CreateAsset Name is max 64 chars and is the ListAssets search key.
+  return `os-${identity}`.slice(0, 64);
+}
+
+export async function hashAssetIdentity(identity: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(identity)
+  );
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+/**
+ * AIGC groups whose Name matches the filter (Ark treats Name as fuzzy).
+ * Callers that need an exact name must filter again.
+ */
+export async function listAigcAssetGroups(
+  config: BytePlusOpenApiConfig,
+  name?: string
+): Promise<BytePlusAssetGroup[]> {
+  const pageSize = 100;
+  const all: BytePlusAssetGroup[] = [];
+  for (let page = 1; page <= 50; page += 1) {
+    const result = await bytePlusOpenApi<{
+      Items?: BytePlusAssetGroup[];
+      TotalCount?: number;
+    }>(
+      config,
+      'ListAssetGroups',
+      withProject(config, {
+        Filter: {
+          GroupType: 'AIGC',
+          ...(name ? { Name: name } : {}),
+        },
+        PageNumber: page,
+        PageSize: pageSize,
+      })
+    );
+    const items = result.Items ?? [];
+    all.push(...items);
+    if (items.length < pageSize) break;
+  }
+  return all;
+}
+
+async function listAssetGroups(
+  config: BytePlusOpenApiConfig,
+  name: string
+): Promise<BytePlusAssetGroup[]> {
+  const items = await listAigcAssetGroups(config, name);
+  return items.filter((item) => item.Name === name);
+}
+
+async function createAssetGroup(
+  config: BytePlusOpenApiConfig,
+  name: string
+): Promise<string> {
+  const result = await bytePlusOpenApi<{ Id?: string }>(
+    config,
+    'CreateAssetGroup',
+    withProject(config, {
+      Name: name,
+      Description: 'OpenStory virtual portrait stills for Seedance',
+      GroupType: 'AIGC',
+    })
+  );
+  if (!result.Id) {
+    throw new Error('BytePlus CreateAssetGroup returned no Id');
+  }
+  return result.Id;
+}
+
+/**
+ * The group never changes once created, and looking it up per still is what
+ * tripped `AccountFlowLimitExceeded` on ListAssetGroups (#1519). Keyed by
+ * access key so two accounts in one isolate (tests) cannot share an id.
+ */
+const aigcGroupIdByAccount = new Map<string, Promise<string>>();
+
+export async function resolveAigcGroupId(
+  config: BytePlusOpenApiConfig,
+  existingGroupId?: string
+): Promise<string> {
+  if (existingGroupId) return existingGroupId;
+  const cached = aigcGroupIdByAccount.get(config.accessKey);
+  if (cached) return cached;
+  const lookup = (async () => {
+    const name = aigcGroupName();
+    const existing = await listAssetGroups(config, name);
+    const found = existing[0]?.Id;
+    if (found) return found;
+    return createAssetGroup(config, name);
+  })();
+  aigcGroupIdByAccount.set(config.accessKey, lookup);
+  lookup.catch(() => aigcGroupIdByAccount.delete(config.accessKey));
+  return lookup;
+}
+
+async function listAssetsByName(
+  config: BytePlusOpenApiConfig,
+  groupId: string,
+  name: string
+): Promise<BytePlusAsset[]> {
+  const result = await bytePlusOpenApi<{ Items?: BytePlusAsset[] }>(
+    config,
+    'ListAssets',
+    withProject(config, {
+      Filter: { Name: name, GroupIds: [groupId], GroupType: 'AIGC' },
+      PageNumber: 1,
+      PageSize: 20,
+    })
+  );
+  return (result.Items ?? []).filter((item) => item.Name === name);
+}
+
+/** Every asset in a group, all pages. The sweep's view of Ark (#1519). */
+export async function listAssetsInGroup(
+  config: BytePlusOpenApiConfig,
+  groupId: string
+): Promise<BytePlusAsset[]> {
+  const pageSize = 100;
+  const all: BytePlusAsset[] = [];
+  for (let page = 1; page <= 50; page += 1) {
+    const result = await bytePlusOpenApi<{
+      Items?: BytePlusAsset[];
+      TotalCount?: number;
+    }>(
+      config,
+      'ListAssets',
+      withProject(config, {
+        Filter: { GroupIds: [groupId], GroupType: 'AIGC' },
+        PageNumber: page,
+        PageSize: pageSize,
+      })
+    );
+    const items = result.Items ?? [];
+    all.push(...items);
+    if (items.length < pageSize) break;
+  }
+  return all;
+}
+
+async function createAsset(
+  config: BytePlusOpenApiConfig,
+  input: {
+    groupId: string;
+    url: string;
+    name: string;
+    assetType: BytePlusAssetKind;
+  }
+): Promise<string> {
+  const result = await bytePlusOpenApi<{ Id?: string }>(
+    config,
+    'CreateAsset',
+    withProject(config, {
+      GroupId: input.groupId,
+      URL: input.url,
+      Name: input.name,
+      AssetType: input.assetType,
+    })
+  );
+  if (!result.Id) {
+    throw new Error('BytePlus CreateAsset returned no Id');
+  }
+  return result.Id;
+}
+
+async function getAsset(
+  config: BytePlusOpenApiConfig,
+  id: string
+): Promise<BytePlusAsset> {
+  return bytePlusOpenApi<BytePlusAsset>(
+    config,
+    'GetAsset',
+    withProject(config, { Id: id })
+  );
+}
+
+async function waitForAssetActive(
+  config: BytePlusOpenApiConfig,
+  id: string,
+  options?: {
+    sleep?: (ms: number) => Promise<void>;
+    maxAttempts?: number;
+    delayMs?: number;
+  }
+): Promise<BytePlusAsset> {
+  const sleep =
+    options?.sleep ??
+    ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const maxAttempts = options?.maxAttempts ?? 24;
+  const delayMs = options?.delayMs ?? 2000;
+
+  let last: BytePlusAsset | undefined;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    last = await getAsset(config, id);
+    if (last.Status === 'Active') return last;
+    if (last.Status === 'Failed') {
+      throw new Error(`BytePlus asset ${id} failed processing`);
+    }
+    if (attempt < maxAttempts - 1) await sleep(delayMs);
+  }
+  throw new Error(
+    `BytePlus asset ${id} still ${last?.Status ?? 'unknown'} after ${maxAttempts} polls`
+  );
+}
+
+export async function ingestAigcAsset(
+  config: BytePlusOpenApiConfig,
+  input: {
+    identity: string;
+    publicUrl: string;
+    assetType: BytePlusAssetKind;
+    groupId?: string;
+    sleep?: (ms: number) => Promise<void>;
+  }
+): Promise<string> {
+  try {
+    return await ingestAigcAssetInGroup(
+      config,
+      input,
+      await resolveAigcGroupId(config, input.groupId)
+    );
+  } catch (error) {
+    // The cached group was deleted under us (production's hourly sweep,
+    // or the console). Forget it and resolve again — which recreates the
+    // group — once. A pinned `BYTEPLUS_ASSET_GROUP_ID` is not ours to
+    // recreate, so that error stands.
+    if (input.groupId || !isMissingGroupError(error)) throw error;
+    aigcGroupIdByAccount.delete(config.accessKey);
+    return ingestAigcAssetInGroup(
+      config,
+      input,
+      await resolveAigcGroupId(config)
+    );
+  }
+}
+
+function isMissingGroupError(error: unknown): boolean {
+  return (
+    error instanceof Error && error.message.includes('(NotFound.group_id)')
+  );
+}
+
+async function ingestAigcAssetInGroup(
+  config: BytePlusOpenApiConfig,
+  input: {
+    identity: string;
+    publicUrl: string;
+    assetType: BytePlusAssetKind;
+    sleep?: (ms: number) => Promise<void>;
+  },
+  groupId: string
+): Promise<string> {
+  const name = assetNameFor(await hashAssetIdentity(input.identity));
+  const existing = await listAssetsByName(config, groupId, name);
+  const active = existing.find((item) => item.Status === 'Active' && item.Id);
+  if (active?.Id) return `asset://${active.Id}`;
+
+  const processing = existing.find(
+    (item) => item.Status === 'Processing' && item.Id
+  );
+  const id =
+    processing?.Id ??
+    (await createAsset(config, {
+      groupId,
+      url: input.publicUrl,
+      name,
+      assetType: input.assetType,
+    }));
+  const ready = await waitForAssetActive(config, id, { sleep: input.sleep });
+  if (!ready.Id) {
+    throw new Error('BytePlus GetAsset returned Active with no Id');
+  }
+  return `asset://${ready.Id}`;
+}
+
+/**
+ * Free one slot in the account pool (#1361). Irreversible — the `asset://`
+ * dies with it, and any job still holding that URI 400s, which is why the
+ * caller must own an unexpired lease before calling this.
+ */
+export async function deleteAsset(
+  config: BytePlusOpenApiConfig,
+  id: string
+): Promise<void> {
+  await bytePlusOpenApi<unknown>(
+    config,
+    'DeleteAsset',
+    withProject(config, { Id: id }),
+    { allowEmptyResult: true }
+  );
+}
+
+/**
+ * Wipe a group and every asset in it. Irreversible — eviction and the
+ * per-deployment ledger sweep must never call this (they delete one asset).
+ * Only preview teardown / the production leftover-`pr-*` backstop (#1635).
+ */
+export async function deleteAssetGroup(
+  config: BytePlusOpenApiConfig,
+  id: string
+): Promise<void> {
+  await bytePlusOpenApi<unknown>(
+    config,
+    'DeleteAssetGroup',
+    withProject(config, { Id: id }),
+    { allowEmptyResult: true }
+  );
+}

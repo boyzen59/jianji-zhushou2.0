@@ -1,0 +1,30 @@
+{
+  "id": "iart-map-animation",
+  "url": "https://github.com/iart-ai/map-animation-skills.git",
+  "revision": "390ca98bbcf2ea88a430a69c0dcbf423e43d075d",
+  "checked_at": "2026-10-24T03:05:33.316534+00:00",
+  "package_complete": true,
+  "scope": "Complete selected Git package except video files, generated dependencies, private env files and excluded runtime directories.",
+  "files": {
+    ".claude-plugin/marketplace.json": "332a64ee6ca8cf10ac378ba7f40efc0bd594ab495a5bd47eee789664c9f2fbf2",
+    ".claude-plugin/plugin.json": "c21aa8c746ed7e2b7897116fbe96d0f2cfa2b56ace2c7f148f22c3717ef7f715",
+    "LICENSE": "b6eaaaefcb0592110ab8116392e0cf417ad1f47beaf5e2f1d19f349adfb24ac9",
+    "README.md": "8d6da26d6743dbd2f244e55b0210708ced1d59c6d1c7f875d05254fbf4fb9b22",
+    "scripts/README.md": "34a4ff952b3b01d0d3445bbc9f5a3eca7b4daeac58712df582e5bd4e4739ecd6",
+    "scripts/contact-sheet.sh": "0094dcc21346da26cbd81776c1cfe2ec1e351f7ba7cfb28b73a9125d9923bf6a",
+    "scripts/probe-mp4.sh": "8a8df35130e9158ce517e49a32f1d18cd57bc0b047bd1402849e28e6facafd49",
+    "scripts/seek-shot.sh": "6c4fe0ba9349e518ed9eb274e0311d27a38f8c872f7b97be4f6cc786eef7ecff",
+    "showcase.gif": "ea8c5bedde88920fd9682f2d1d32d66a8d07d05ca62e300c449e61b27e9a27f3",
+    "showcase.html": "361915a4bbb64ed858d9eb8f8a0c9a54e53a6d27625ff1fae7e2af2cd3f4fc7b",
+    "skills/map-animation/README.md": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "skills/map-animation/SKILL.md": "dc06ec3398713a0117c18856f520ea0129c5852eb0b7d6f475357548df810d90",
+    "skills/map-animation/references/earth-studio-to-ae.md": "0c3491225c7fa9c606942db4f5f6127d389b22e524d3ec7a8d085bfeb91b7256",
+    "skills/map-animation/references/vector-maps.md": "e6bf4d0d5e4015d78f34f480d9b14ce0e65a32cb8e185f386b88ffcb20b3a2c9"
+  },
+  "omitted_paths": [],
+  "missing_paths": [],
+  "git_submodules": [],
+  "git_lfs_assets": [],
+  "local_edits_retained": [],
+  "retired_paths_archived": []
+}

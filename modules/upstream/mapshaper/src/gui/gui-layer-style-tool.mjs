@@ -1,0 +1,1253 @@
+import { El } from './gui-el';
+import {
+  claimFieldKeys, isTextInput, opensAMenu, releasePanelFocus
+} from './gui-panel-focus';
+import {
+  makeCollapsibleSection, makeColorRow, makeFieldTip, makePanelActionButton, makePanelButton
+} from './gui-panel-controls';
+import { ARROWHEAD_SHAPES, getArrowheadGlyph } from './gui-arrowhead-shapes';
+import { formatEditingStatus } from './gui-editing-status';
+import { SizeField, getLowerModeValue } from './gui-size-field';
+import {
+  parseOpacityValue, formatOpacityPct, formatColorOpacityPct, normalizeDashArrayInput,
+  getNextStrokeWidth
+} from './gui-style-values';
+import { StylePresetControl } from './gui-style-preset-control';
+import { PatternFillControl } from './gui-pattern-fill-control';
+import { GlowEffectsControl } from './gui-glow-control';
+import { LineCasingControl } from './gui-casing-control';
+import { groupStyleEdits } from './gui-fill-pattern';
+import { runGuiEditCommand } from './gui-edit-command';
+import { internal } from './gui-core';
+import { quoteCommandValue } from './gui-command-utils';
+import { ColorSchemePanel, getSchemeStripBackground } from './gui-color-scheme-panel';
+import { getLayerScheme } from './gui-color-scheme-model';
+import { FloatingToolbar } from './gui-floating-toolbar';
+import {
+  getNewShapeStyle, updateNewShapeStyle, clearNewShapeStyle, syncNewShapeStyle
+} from './gui-shape-style-state';
+import { getSelectionChangeTest } from './gui-selection-change';
+import { isSelectAllObjectsKey } from './gui-keyboard';
+
+var savedStylesKey = 'layer_style_presets';
+var styleFields = ['stroke', 'stroke-width', 'stroke-opacity', 'stroke-dasharray', 'stroke-linecap', 'line-start', 'line-end', 'line-end-size', 'line-fade', 'line-taper', 'fill', 'fill-opacity', 'fill-pattern'].concat(internal.svg.glowFields, internal.svg.casingFields);
+var arrowPositions = [{
+  name: 'start',
+  label: 'Start',
+  title: 'arrowhead at the start of the line'
+}, {
+  name: 'end',
+  label: 'End',
+  title: 'arrowhead at the end of the line'
+}, {
+  name: 'both',
+  label: 'Both',
+  title: 'arrowheads at both ends of the line'
+}];
+var lineCaps = [{
+  name: 'round',
+  label: 'Round',
+  title: 'round line caps'
+}, {
+  name: 'butt',
+  label: 'Butt',
+  title: 'flat line caps that end at the line\'s endpoints'
+}, {
+  name: 'square',
+  label: 'Square',
+  title: 'flat line caps that extend past the line\'s endpoints'
+}];
+
+export function LayerStyleTool(gui) {
+  var parent = gui.container.findChild('.mshp-main-map');
+  var panel = El('div').addClass('label-style-panel layer-style-panel rollover').appendTo(parent).hide();
+  var title, editingStatus, clearLink, strokeControl, fillControl, strokeWidthField, capControl, dashControl, arrowControl, casingControl, presetControl, patternControl, glowControl, hit;
+  var schemeBtn, schemeStrip, schemePanel;
+  var targetLayer = null;
+  var selectionChanged = getSelectionChangeTest();
+  // What a shape or an end gives lines that have no heads
+  var lastArrow = {shape: 'arrow', position: 'end', fade: 0};
+  var lineToolbar, polygonToolbar, drawLineBtn, drawPolygonBtn, reshapeLineBtn, reshapePolygonBtn;
+  var curveLineBtn;
+  var lineStylesBtn, polygonStylesBtn;
+  // The mode is on whether or not the panel is showing: the panel can be
+  // hidden, for room to draw, and stays hidden for the rest of the session
+  // until it is shown again.
+  var active = false;
+  var panelHidden = false;
+
+  initPanel();
+  hit = gui.map.getHitControl && gui.map.getHitControl();
+  if (hit) {
+    hit.on('change', function(e) {
+      var mode = gui.interaction.getMode();
+      if (!selectionChanged(getSelectionIds())) return;
+      if (targetLayer && (mode == 'line_style' || mode == 'polygon_style')) {
+        updateControls();
+      }
+    });
+  }
+
+  // Cmd-A selects every shape in the layer, as it selects every label and
+  // symbol in those tools. Not while a path is being drawn: that gesture owns
+  // the keyboard.
+  gui.keyboard.on('keydown', function(e) {
+    var ids;
+    if (!active || !hit || !isSelectAllObjectsKey(e.originalEvent) || hit.hasPendingPath()) return;
+    syncTargetLayer();
+    if (!targetLayer) return;
+    ids = getAllFeatureIds(targetLayer).filter(function(id) {
+      return !!targetLayer.shapes[id];
+    });
+    hit.setSelectionIds(ids);
+    e.stopPropagation();
+    e.originalEvent.preventDefault();
+  }, null, 5);
+
+  // The toolbar arms drawing, reshaping or (for lines) drawing curves. While
+  // drawing or curves are armed and nothing is selected, the panel's controls set the style of the next shape drawn
+  // rather than restyling the layer (see gui-shape-style-state.mjs); a click
+  // on a shape selects it, and the controls style it, as when nothing is armed.
+  gui.on('interaction_tool_change', function() {
+    if (!active) return;
+    updateToolbar();
+    updateControls();
+  });
+
+  this.open = function(lyr, dataset) {
+    if (!layerCanBeStyled(lyr)) return;
+    if (!gui.map.isActiveLayer(lyr)) {
+      modelSelectLayer(lyr, dataset);
+    }
+    gui.interaction.setMode(lyr.geometry_type == 'polygon' ? 'polygon_style' : 'line_style');
+  };
+
+  gui.on('interaction_mode_change', function(e) {
+    if (modeMatchesActiveLayer(e.mode)) {
+      turnOn();
+    } else {
+      turnOff();
+    }
+  });
+
+  gui.model.on('update', function() {
+    if (active && !modeMatchesActiveLayer(gui.interaction.getMode())) {
+      gui.interaction.turnOff();
+    } else if (active) {
+      updateControls();
+    }
+  });
+
+  gui.on('undo_redo_post', function() {
+    if (active) {
+      updateControls();
+    }
+  });
+
+  function turnOn() {
+    active = true;
+    targetLayer = getActiveLayer();
+    patternControl.reset();
+    applyDefaultLineStyle();
+    if (panelHidden) panel.hide();
+    else panel.show();
+    updateToolbar();
+    updateControls();
+  }
+
+  function turnOff() {
+    active = false;
+    closePanelPopups();
+    panel.hide();
+    if (lineToolbar) lineToolbar.hide();
+    if (polygonToolbar) polygonToolbar.hide();
+    patternControl.reset();
+    glowControl.reset();
+    casingControl.reset();
+    targetLayer = null;
+  }
+
+  function closePanelPopups() {
+    schemePanel.close();
+    strokeControl.picker.hide();
+    fillControl.picker.hide();
+    patternControl.hidePicker();
+    casingControl.hidePicker();
+  }
+
+  function setPanelShown(shown) {
+    panelHidden = !shown;
+    if (shown) {
+      panel.show();
+      updateControls();
+    } else {
+      closePanelPopups();
+      releaseFocus();
+      panel.hide();
+    }
+    updateToolbar();
+  }
+
+  // One toolbar for each geometry type, since the buttons' icons and tooltips
+  // name what they act on
+  function updateToolbar() {
+    var geom = targetLayer && targetLayer.geometry_type;
+    var tool = gui.interaction.getArmedTool();
+    if (geom == 'polyline') {
+      getLineToolbar().show();
+      drawLineBtn.setSelected(tool == 'draw');
+      curveLineBtn.setSelected(tool == 'curve');
+      reshapeLineBtn.setSelected(tool == 'reshape');
+      updateStylesButton(lineStylesBtn);
+    } else if (lineToolbar) {
+      lineToolbar.hide();
+    }
+    if (geom == 'polygon') {
+      getPolygonToolbar().show();
+      drawPolygonBtn.setSelected(tool == 'draw');
+      reshapePolygonBtn.setSelected(tool == 'reshape');
+      updateStylesButton(polygonStylesBtn);
+    } else if (polygonToolbar) {
+      polygonToolbar.hide();
+    }
+  }
+
+  function updateStylesButton(btn) {
+    btn.setSelected(!panelHidden);
+    btn.setTooltip(panelHidden ? 'Show style panel' : 'Hide style panel');
+  }
+
+  function getLineToolbar() {
+    if (!lineToolbar) {
+      lineToolbar = new FloatingToolbar(gui, {name: 'line-draw-toolbar'});
+      drawLineBtn = lineToolbar.addButton('#draw-line-icon', {tooltip: 'Draw lines'})
+        .on('click', function() { toggleTool('draw'); });
+      curveLineBtn = lineToolbar.addButton('#curve-tool-icon', {tooltip: 'Draw curves'})
+        .on('click', function() { toggleTool('curve'); });
+      reshapeLineBtn = lineToolbar.addButton('#reshape-icon', {tooltip: 'Reshape lines'})
+        .on('click', function() { toggleTool('reshape'); });
+      lineStylesBtn = addPanelButtons(lineToolbar);
+    }
+    return lineToolbar;
+  }
+
+  function getPolygonToolbar() {
+    if (!polygonToolbar) {
+      polygonToolbar = new FloatingToolbar(gui, {name: 'polygon-draw-toolbar'});
+      drawPolygonBtn = polygonToolbar.addButton('#draw-polygon-icon', {tooltip: 'Draw polygons'})
+        .on('click', function() { toggleTool('draw'); });
+      reshapePolygonBtn = polygonToolbar.addButton('#reshape-icon', {tooltip: 'Reshape polygons'})
+        .on('click', function() { toggleTool('reshape'); });
+      polygonStylesBtn = addPanelButtons(polygonToolbar);
+    }
+    return polygonToolbar;
+  }
+
+  // The style panel's toggle, and Done, which leaves the mode -- with the
+  // panel hidden, its close button is not there to do that
+  function addPanelButtons(toolbar) {
+    toolbar.addSeparator();
+    var stylesBtn = toolbar.addButton('#style-panel-icon', {tooltip: 'Hide style panel'})
+      .on('click', function() { setPanelShown(panelHidden); });
+    toolbar.addTextButton('Done', {tooltip: 'Stop drawing and styling'})
+      .on('click', exitMode);
+    return stylesBtn;
+  }
+
+  function toggleTool(tool) {
+    gui.interaction.setArmedTool(gui.interaction.getArmedTool() == tool ? null : tool);
+  }
+
+  // The controls set the style of the next shape drawn
+  function editingNewShapes() {
+    return !!targetLayer && gui.interaction.newShapesAreArmed() && getSelectionIds().length === 0;
+  }
+
+  function setNewShapeStyle(styles) {
+    updateNewShapeStyle(gui, targetLayer.geometry_type, styles);
+    updateControls();
+  }
+
+  function initPanel() {
+    // The same rules as the label panel's fields, minus the label being typed
+    // into: there is nothing here for the keyboard to go back to, so a field
+    // that is finished with gives it up altogether.
+    claimFieldKeys(panel.node(), {
+      revert: updateControls,
+      release: releaseFocus
+    });
+
+    // For the controls that take focus and then set no style -- the colour
+    // picker's Close button, and the panel's own buttons in the browsers that
+    // focus a button on click. Left alone while the user is typing into a
+    // field, which a click elsewhere in the panel ends on its own.
+    panel.node().addEventListener('click', function(e) {
+      if (isTextInput(document.activeElement) || opensAMenu(e.target)) return;
+      releaseFocus();
+    });
+
+    var header = El('div').addClass('label-style-panel-title').appendTo(panel);
+    title = El('span').appendTo(header);
+    El('button').addClass('label-style-close').appendTo(header).text('×').on('click', closePanel);
+
+    var editRow = El('div').addClass('label-style-row label-style-selection-row layer-style-selection-row').appendTo(panel);
+    editingStatus = El('span').addClass('label-editing-status').appendTo(editRow);
+    clearLink = El('span').addClass('label-editing-clear colored-text').appendTo(editRow).text('deselect').on('click', clearSelection);
+
+    strokeControl = addColorControl(panel, 'Stroke', 'stroke', '#000000');
+    strokeWidthField = addStrokeWidthControl(strokeControl.aside);
+    fillControl = addColorControl(panel, 'Fill', 'fill', '');
+    addColorSchemeControl();
+    var lineRow = El('div').addClass('label-style-row label-split-row layer-line-row').appendTo(panel);
+    capControl = addLineCapControl(lineRow);
+    dashControl = addDashArrayControl(lineRow);
+    dashControl.row = lineRow;
+    arrowControl = addArrowControl(panel);
+
+    casingControl = new LineCasingControl(panel, {
+      getRecords: getTargetRecords,
+      getTargetIds: getTargetIds,
+      applyEdits: runStyleEdits,
+      revert: updateControls,
+      releaseFocus: releaseFocus
+    });
+
+    var buttonRow = El('div').addClass('label-style-row label-panel-button-row').appendTo(panel);
+    makePanelActionButton(buttonRow, 'Clear style', clearLayerStyle);
+
+    patternControl = new PatternFillControl(panel, {
+      getRecords: getTargetRecords,
+      getTargetIds: getTargetIds,
+      applyEdits: runStyleEdits,
+      revert: updateControls,
+      releaseFocus: releaseFocus
+    });
+
+    glowControl = new GlowEffectsControl(panel, {
+      getRecords: getTargetRecords,
+      getTargetIds: getTargetIds,
+      applyEdits: runStyleEdits,
+      revert: updateControls,
+      releaseFocus: releaseFocus
+    });
+
+    presetControl = new StylePresetControl(panel, {
+      storageKey: savedStylesKey,
+      type: getStyleType,
+      saveTitle: 'Save layer style',
+      styleLabel: 'layer style',
+      getStyle: getCurrentStyle,
+      applyStyle: applyStyleObject,
+      filter: function(item, type) {
+        return item.type == type;
+      },
+      sort: function(a, b) {
+        return getSortKey(a) < getSortKey(b) ? -1 :
+          getSortKey(a) > getSortKey(b) ? 1 : 0;
+      }
+    });
+  }
+
+  function addColorControl(parent, label, field, defaultColor) {
+    var control = makeColorRow(parent, {
+      label: label,
+      onColor: function(color) {
+        // An emptied field unsets the colour: -style reads an empty value as
+        // "remove this".
+        applyColorControlStyle(control, color);
+      },
+      onOpacity: function(value) {
+        applyLayerStyle(field + '-opacity', value);
+      },
+      revert: updateControls
+    });
+    control.field = field;
+    control.defaultColor = defaultColor;
+    return control;
+  }
+
+  // Fills colored by a data field. While a scheme is applied, its colors take
+  // the place of the fill's swatch and hex value, which have no one value to
+  // show; the opacity still applies. Clicking them reopens the scheme.
+  function addColorSchemeControl() {
+    var box = fillControl.input.parent();
+    schemeStrip = El('div').addClass('layer-scheme-strip').attr('role', 'button')
+      .attr('aria-label', 'Edit color scheme');
+    box.node().insertBefore(schemeStrip.node(), fillControl.input.node());
+    schemeStrip.on('click', openColorSchemePanel);
+    El('div').addClass('layer-scheme-colors').appendTo(schemeStrip);
+    El('div').addClass('layer-scheme-remove').attr('role', 'button')
+      .attr('aria-label', 'Remove color scheme').attr('title', 'Remove color scheme')
+      .text('×').appendTo(schemeStrip)
+      .on('click', function(e) {
+        e.stopPropagation();
+        removeColorScheme();
+      });
+    schemeBtn = makePanelActionButton(fillControl.aside, 'Palettes', openColorSchemePanel)
+      .addClass('layer-palettes-btn');
+    schemePanel = new ColorSchemePanel(gui, {
+      getExtraCommands: function() {
+        if (!targetLayer) return '';
+        return formatStyleEditCommands(patternControl.getRefillExpressionEdits(getAllFeatureIds(targetLayer)));
+      },
+      onUpdate: function() {
+        if (active) updateControls();
+      },
+      onClose: function() {
+        if (hit) hit.setSelectionEnabled(true);
+        panel.removeClass('replaced');
+      }
+    });
+  }
+
+  function openColorSchemePanel() {
+    syncTargetLayer();
+    if (!targetLayer || targetLayer.geometry_type != 'polygon') return;
+    // a scheme colors the polygons there are, not the next one drawn, and
+    // takes the whole layer, leaving nothing for a tool to act on
+    gui.interaction.setArmedTool(null);
+    fillControl.picker.hide();
+    strokeControl.picker.hide();
+    patternControl.hidePicker();
+    // The scheme panel takes this panel's place until it closes. Its colors go
+    // to the whole layer, so there is no selection while it is open.
+    panel.addClass('replaced');
+    if (hit) hit.setSelectionEnabled(false);
+    schemePanel.open(targetLayer);
+  }
+
+  // Back to a single fill, unset, as when the fill field is emptied
+  function removeColorScheme() {
+    schemePanel.close();
+    applyColorControlStyle(fillControl, '');
+  }
+
+  function updateColorSchemeControl() {
+    var isPolygon = targetLayer && targetLayer.geometry_type == 'polygon';
+    var scheme = isPolygon ? getLayerScheme(targetLayer) : null;
+    schemeBtn.classed('hidden', !isPolygon);
+    fillControl.input.parent().classed('has-scheme', !!scheme);
+    schemeBtn.classed('selected', schemePanel.isOpen());
+    if (scheme) {
+      schemeStrip.findChild('.layer-scheme-colors')
+        .css('background-image', getSchemeStripBackground(scheme));
+      schemeStrip.attr('title', scheme.method == 'non-adjacent' ?
+        'Neighbors colored differently' : 'Colored by ' + scheme.field);
+      fillControl.picker.hide();
+    }
+  }
+
+  // In the narrow column beside the stroke's colour. Stepping runs up a ladder
+  // of widths rather than by a fixed amount, because the useful ones are close
+  // together at the hairline end and far apart above 2px.
+  function addStrokeWidthControl(cell) {
+    El('span').appendTo(cell).text('Width');
+    return new SizeField(cell, {
+      min: 0,
+      // Quarter-pixel widths are the useful hairlines, and the ladder below
+      // steps through them.
+      decimals: 2,
+      title: 'Stroke width in px',
+      onSet: applyStrokeWidthStyle,
+      onStep: function(delta) {
+        nudgeStrokeWidth(delta > 0 ? 1 : -1);
+      },
+      onDone: releaseFocus
+    });
+  }
+
+  // Round is the default, except on a dashed line, which the renderers give
+  // butt caps unless it has a cap of its own.
+  function addLineCapControl(row) {
+    var cell = El('div').addClass('label-split-cell label-align-row').appendTo(row);
+    var control = {btns: {}};
+    El('span').appendTo(cell).text('Caps');
+    var group = El('div').addClass('label-btn-group layer-cap-buttons').appendTo(cell);
+    lineCaps.forEach(function(item) {
+      control.btns[item.name] = makePanelButton(group, item.label, function() {
+        applyLineCap(item.name);
+      }).attr('data-line-cap', item.name).attr('aria-label', item.title);
+    });
+    return control;
+  }
+
+  function getDefaultLineCap(rec) {
+    return rec && rec['stroke-dasharray'] ? 'butt' : 'round';
+  }
+
+  function getLineCap(rec) {
+    return rec && rec['stroke-linecap'] || getDefaultLineCap(rec);
+  }
+
+  // A cap that is the line's default is unset rather than stored, so that a
+  // layer left at Round gets no stroke-linecap column. As with the width,
+  // dashes and arrowheads, a cap set on lines with no stroke brings the default
+  // stroke, since a styled line with no stroke is not drawn.
+  function applyLineCap(cap) {
+    var records = getTargetRecords();
+    var addStroke = styleFieldIsUnsetForTargets('stroke');
+    var edits = [];
+    getTargetIds().forEach(function(id) {
+      var rec = records[id] || {};
+      var value = cap == getDefaultLineCap(rec) ? '' : cap;
+      var styles;
+      if (value != (rec['stroke-linecap'] || '')) {
+        styles = [['stroke-linecap', value]];
+        if (value && addStroke) styles.push(['stroke', strokeControl.defaultColor]);
+        edits.push({id: id, styles: styles});
+      }
+    });
+    runStyleEdits(edits);
+  }
+
+  function updateLineCapControl() {
+    var records = getTargetRecords();
+    var cap;
+    getTargetIds().forEach(function(id, i) {
+      var val = getLineCap(records[id]);
+      cap = i === 0 || val == cap ? val : '';
+    });
+    lineCaps.forEach(function(item) {
+      capControl.btns[item.name].classed('selected', item.name == cap);
+    });
+  }
+
+  // A literal stroke-dasharray, in the narrow column beside the caps. A blank
+  // field makes the line solid again.
+  function addDashArrayControl(row) {
+    var cell = El('div').addClass('label-split-cell layer-dash-cell').appendTo(row);
+    var caption = El('div').addClass('label-style-row-label').appendTo(cell).text('Dashes');
+    makeFieldTip(caption,
+      'Dash and gap lengths in pixels, separated\n' +
+      'by spaces. "4" gives 4px dashes and 4px gaps.\n' +
+      '"6 3" gives 6px dashes and 3px gaps.');
+    var input = El('input').attr('type', 'text').appendTo(cell)
+      .on('change', function() {
+        var value = normalizeDashArrayInput(input.node().value);
+        if (value && internal.parseStyleLiteral('stroke-dasharray', value) === undefined) {
+          updateControls();
+          return;
+        }
+        applyDashArrayStyle(value);
+      });
+    return {input: input};
+  }
+
+  // The rows are the head's shape with its size beside it, then which ends
+  // get it with the line's fade beside that. Choosing a shape or an end adds
+  // heads to lines that have none, and the heading's × takes them off. A line
+  // has one shape for both ends, which is all the panel sets, though -style
+  // can give the two ends different ones.
+  function addArrowControl(parent) {
+    var heading = makeCollapsibleSection(parent, 'Arrowheads', {
+      onRemove: removeArrows,
+      removeTitle: 'Remove arrowheads'
+    });
+    var section = heading.section.addClass('layer-arrow-section');
+    var shapeRow = El('div').addClass('label-style-row label-split-row').appendTo(section);
+    var shapeCell = El('div').addClass('label-split-cell label-align-row').appendTo(shapeRow);
+    var sizeCell = El('div').addClass('label-split-cell label-spacing-row layer-arrow-size-row').appendTo(shapeRow);
+    var posRow = El('div').addClass('label-style-row label-split-row').appendTo(section);
+    var posCell = El('div').addClass('label-split-cell label-align-row').appendTo(posRow);
+    var fadeCell = El('div').addClass('label-split-cell layer-arrow-fade-cell').appendTo(posRow);
+    var control = {section: section, heading: heading, shapeBtns: {}, posBtns: {}};
+    El('span').appendTo(shapeCell).text('Shape');
+    var shapeGroup = El('div').addClass('label-btn-group label-callout-buttons layer-arrow-shape-buttons').appendTo(shapeCell);
+    ARROWHEAD_SHAPES.forEach(function(item) {
+      var btn = makePanelButton(shapeGroup, '', function() {
+        applyArrowShape(item.name);
+      }).attr('data-arrow-shape', item.name).attr('aria-label', item.title);
+      El(getArrowheadGlyph(item.name)).appendTo(btn);
+      control.shapeBtns[item.name] = btn;
+    });
+    El('span').appendTo(posCell).text('Ends');
+    var posGroup = El('div').addClass('label-btn-group layer-arrow-position-buttons').appendTo(posCell);
+    arrowPositions.forEach(function(item) {
+      control.posBtns[item.name] = makePanelButton(posGroup, item.label, function() {
+        applyArrowPosition(item.name);
+      }).attr('data-arrow-position', item.name).attr('aria-label', item.title);
+    });
+    El('span').appendTo(sizeCell).text('Size');
+    control.sizeField = new SizeField(sizeCell, {
+      title: 'Arrowhead size in px, the length of its sides or the diameter of a dot',
+      min: 1,
+      max: 60,
+      step: 1,
+      bigStep: 5,
+      onSet: applyArrowSize,
+      onStep: nudgeArrowSize,
+      onDone: releaseFocus
+    });
+    var fadeCaption = El('div').addClass('label-style-row-label').appendTo(fadeCell).text('Fade %');
+    makeFieldTip(fadeCaption,
+      'How much of the line fades in from its\n' +
+      'tail, as a percent of its length. The fade\n' +
+      'is a straight gradient, so it follows\n' +
+      'straight and gently curved lines best.');
+    control.fadeField = new SizeField(fadeCell, {
+      title: 'Percent of the line that fades in from its tail',
+      min: 0,
+      max: 100,
+      step: 5,
+      bigStep: 25,
+      onSet: applyArrowFade,
+      onStep: nudgeArrowFade,
+      onDone: releaseFocus
+    });
+    var taperRow = El('div').addClass('label-style-row label-split-row').appendTo(section);
+    var taperCell = El('div').addClass('label-split-cell layer-arrow-taper-cell').appendTo(taperRow);
+    var taperCaption = El('div').addClass('label-style-row-label').appendTo(taperCell).text('Taper %');
+    makeFieldTip(taperCaption,
+      'How much of its width the line loses\n' +
+      'toward its tail: 100 tapers it to a point.\n' +
+      'A line can taper with or without heads.');
+    control.taperField = new SizeField(taperCell, {
+      title: 'Percent of the width the line loses toward its tail',
+      min: 0,
+      max: 100,
+      step: 5,
+      bigStep: 25,
+      onSet: applyLineTaper,
+      onStep: nudgeLineTaper,
+      onDone: releaseFocus
+    });
+    return control;
+  }
+
+  // {shape, position} for one record, 'none' and '' when it has no heads. A
+  // line whose two ends have different shapes reports the start's.
+  function getArrowInfo(rec) {
+    var start = internal.svg.getLineEndType(rec || {}, 'line-start');
+    var end = internal.svg.getLineEndType(rec || {}, 'line-end');
+    var shape = start != 'none' ? start : end;
+    var position = start != 'none' && end != 'none' ? 'both' :
+      start != 'none' ? 'start' : end != 'none' ? 'end' : '';
+    return {shape: shape, position: position};
+  }
+
+  // Everything the heads are drawn with goes with them: the size and the
+  // fade mean nothing on a line without heads.
+  function removeArrows() {
+    var records = getTargetRecords();
+    var edits = [];
+    getTargetIds().forEach(function(id) {
+      var rec = records[id] || {};
+      var styles = ['line-start', 'line-end', 'line-end-size', 'line-fade'].filter(function(field) {
+        return rec[field] !== undefined && rec[field] !== null && String(rec[field]) !== '';
+      }).map(function(field) {
+        return [field, ''];
+      });
+      if (styles.length > 0) edits.push({id: id, styles: styles});
+    });
+    runStyleEdits(edits);
+  }
+
+  // Each target keeps whichever of shape and position is not being set, so
+  // that changing the shape of a selection whose lines point different ways
+  // leaves them pointing those ways.
+  function applyArrowShape(shape) {
+    applyArrowEdits(function(info) {
+      return {shape: shape, position: fillArrowInfo(info).position};
+    });
+  }
+
+  function applyArrowPosition(position) {
+    applyArrowEdits(function(info) {
+      return {shape: fillArrowInfo(info).shape, position: position};
+    });
+  }
+
+  function fillArrowInfo(info) {
+    return info.shape == 'none' ? {shape: lastArrow.shape, position: lastArrow.position} : info;
+  }
+
+  function applyArrowEdits(getNext) {
+    var records = getTargetRecords();
+    var addStroke = styleFieldIsUnsetForTargets('stroke');
+    var edits = [];
+    getTargetIds().forEach(function(id) {
+      var rec = records[id] || {};
+      var info = getArrowInfo(rec);
+      var next = getNext(info);
+      var on = next.shape != 'none';
+      var styles = [
+        ['line-start', on && next.position != 'end' ? next.shape : ''],
+        ['line-end', on && next.position != 'start' ? next.shape : '']
+      ].filter(function(style) {
+        // no need to remove what is not there
+        return style[1] || rec[style[0]];
+      });
+      if (!on && rec['line-fade']) {
+        styles.push(['line-fade', '']);
+      } else if (on && info.shape == 'none' && lastArrow.fade > 0 && !rec['line-fade']) {
+        styles.push(['line-fade', lastArrow.fade]);
+      }
+      if (on && addStroke) styles.push(['stroke', strokeControl.defaultColor]);
+      if (styles.length > 0) edits.push({id: id, styles: styles});
+    });
+    runStyleEdits(edits);
+  }
+
+  function applyArrowSize(value) {
+    var ids = getArrowTargetIds();
+    if (ids.length === 0) return;
+    runStyleEdits(ids.map(function(id) {
+      return {id: id, styles: [['line-end-size', value]]};
+    }));
+  }
+
+  function nudgeArrowSize(delta) {
+    var shown = getArrowSizeShown(getArrowTargetIds());
+    var size = Number(shown.value);
+    if (!isFinite(size) || shown.value === '') return;
+    applyArrowSize(Math.max(1, Math.round(size + delta)));
+  }
+
+  // The field is a percent; line-fade is a share of the line, 0-1. No fade
+  // is unset rather than stored as 0.
+  function applyArrowFade(pct) {
+    var ids = getArrowTargetIds();
+    var value = pct > 0 ? Math.round(pct * 10) / 1000 : '';
+    if (ids.length === 0) return;
+    runStyleEdits(ids.map(function(id) {
+      return {id: id, styles: [['line-fade', value]]};
+    }));
+  }
+
+  function nudgeArrowFade(delta) {
+    var shown = getArrowFadeShown(getArrowTargetIds());
+    if (shown.value === '') return;
+    applyArrowFade(Math.max(0, Math.min(100, Math.round(shown.value + delta))));
+  }
+
+  function getArrowFadeShown(ids) {
+    return getShareShown(ids, 'line-fade', internal.svg.parseLineFade);
+  }
+
+  // A field of shares (0-1) as a percent, for the lines @ids
+  function getShareShown(ids, field, parse) {
+    var records = getTargetRecords();
+    var value = '', pct;
+    for (var i=0; i<ids.length; i++) {
+      pct = Math.round(parse(records[ids[i]] && records[ids[i]][field]) * 1000) / 10;
+      if (i > 0 && pct !== value) return {value: '', mixed: true};
+      value = pct;
+    }
+    return {value: value, mixed: false};
+  }
+
+  // Like the fade, but for every target: a line needs no heads to taper, and
+  // removing the heads leaves its taper.
+  function applyLineTaper(pct) {
+    var ids = getTargetIds();
+    var value = pct > 0 ? Math.round(pct * 10) / 1000 : '';
+    if (ids.length === 0) return;
+    runStyleEdits(ids.map(function(id) {
+      return {id: id, styles: [['line-taper', value]]};
+    }));
+  }
+
+  function nudgeLineTaper(delta) {
+    var shown = getShareShown(getTargetIds(), 'line-taper', internal.svg.parseLineTaper);
+    if (shown.value === '') return;
+    applyLineTaper(Math.max(0, Math.min(100, Math.round(shown.value + delta))));
+  }
+
+  function getArrowTargetIds() {
+    var records = getTargetRecords();
+    return getTargetIds().filter(function(id) {
+      return getArrowInfo(records[id]).shape != 'none';
+    });
+  }
+
+  // The size a head is drawn at, which is the one its line width gives it
+  // when it has none of its own.
+  function getArrowSizeShown(ids) {
+    var records = getTargetRecords();
+    var value = '', size;
+    for (var i=0; i<ids.length; i++) {
+      size = getArrowSize(records[ids[i]]);
+      if (i > 0 && size !== value) return {value: '', mixed: true};
+      value = size;
+    }
+    return {value: value, mixed: false};
+  }
+
+  function getArrowSize(rec) {
+    var opts = internal.svg.makeLineArrowOpts('arrow', '', rec && rec['line-end-size'],
+      rec && rec['stroke-width'], 1);
+    var size = getArrowInfo(rec).shape == 'dot' ? opts.dotSize : opts.size;
+    return formatNumberValue(Math.round(size * 100) / 100);
+  }
+
+  // The shape and ends shown are those of the lines with heads; lines
+  // without are what the heading's mixed marker is for.
+  function updateArrowControl() {
+    var records = getTargetRecords();
+    var ids = getTargetIds();
+    var arrowIds = getArrowTargetIds();
+    var shape, position, info;
+    for (var i=0; i<arrowIds.length; i++) {
+      info = getArrowInfo(records[arrowIds[i]]);
+      if (i === 0) {
+        shape = info.shape;
+        position = info.position;
+      } else {
+        if (info.shape != shape) shape = '';
+        if (info.position != position) position = '';
+      }
+    }
+    if (shape) lastArrow.shape = shape;
+    if (position) lastArrow.position = position;
+    var state = arrowIds.length === 0 ? 'off' :
+      arrowIds.length < ids.length ? 'mixed' : 'on';
+    arrowControl.heading.setPresence(state);
+    ARROWHEAD_SHAPES.forEach(function(item) {
+      arrowControl.shapeBtns[item.name].classed('selected', item.name == shape);
+    });
+    arrowPositions.forEach(function(item) {
+      arrowControl.posBtns[item.name].classed('selected', item.name == position);
+    });
+    var shown = arrowIds.length > 0 ? getArrowSizeShown(arrowIds) : {value: '', mixed: false};
+    arrowControl.sizeField.setValue(shown.value);
+    arrowControl.sizeField.setPlaceholder(shown.mixed ? 'mixed' : '');
+    arrowControl.sizeField.setDisabled(arrowIds.length === 0);
+    var fade = arrowIds.length > 0 ? getArrowFadeShown(arrowIds) : {value: '', mixed: false};
+    if (fade.value !== '') lastArrow.fade = fade.value / 100;
+    arrowControl.fadeField.setValue(fade.value);
+    arrowControl.fadeField.setPlaceholder(fade.mixed ? 'mixed' : '');
+    arrowControl.fadeField.setDisabled(arrowIds.length === 0);
+    var taper = getShareShown(ids, 'line-taper', internal.svg.parseLineTaper);
+    arrowControl.taperField.setValue(taper.value);
+    arrowControl.taperField.setPlaceholder(taper.mixed ? 'mixed' : '');
+  }
+
+  // With drawing armed, the one target is the next shape, whose record is the
+  // new-shape style (see getTargetIds())
+  function getTargetRecords() {
+    if (editingNewShapes()) return [getNewShapeStyle(gui, targetLayer.geometry_type)];
+    return targetLayer && targetLayer.data ? targetLayer.data.getRecords() : [];
+  }
+
+  function releaseFocus() {
+    releasePanelFocus(panel.node());
+  }
+
+  function updateControls() {
+    syncTargetLayer();
+    var geom = targetLayer && targetLayer.geometry_type;
+    var manualIds = getSelectionIds();
+    if (!targetLayer) return;
+    syncNewShapeStyleToSelection(manualIds);
+    title.text(geom == 'polygon' ? 'Polygon styles' : 'Line styles');
+    updateEditingStatus(manualIds.length);
+    strokeControl.row.show();
+    fillControl.row.classed('hidden', geom != 'polygon');
+    dashControl.row.classed('hidden', geom != 'polyline');
+    arrowControl.section.classed('hidden', geom != 'polyline');
+    casingControl.section.classed('hidden', geom != 'polyline');
+    updateColorControl(strokeControl);
+    updateColorControl(fillControl);
+    updateStrokeWidthControl();
+    updateDashArrayControl();
+    if (geom == 'polyline') {
+      updateLineCapControl();
+      updateArrowControl();
+      casingControl.update();
+    }
+    updateColorSchemeControl();
+    patternControl.section.classed('hidden', geom != 'polygon');
+    if (geom == 'polygon') patternControl.update();
+    glowControl.section.classed('hidden', geom != 'polygon');
+    if (geom == 'polygon') glowControl.update();
+    presetControl.render();
+    updateSavedStyleControls();
+  }
+
+  // The next shape is drawn in the style of the shapes last selected. This
+  // runs whenever the panel is refreshed -- after a selection, a restyle, or an
+  // undo -- whether or not the panel is showing.
+  function syncNewShapeStyleToSelection(ids) {
+    var records = targetLayer.data ? targetLayer.data.getRecords() : [];
+    if (ids.length === 0) return;
+    syncNewShapeStyle(gui, targetLayer.geometry_type, ids.map(function(id) {
+      return records[id] || {};
+    }));
+  }
+
+  function updateColorControl(control) {
+    var value = getCommonStyleValue(control.field);
+    control.showColor(value);
+    updateOpacityControl(control);
+  }
+
+  // A selection whose colours disagree still has colours, so an opacity unset
+  // on all of it shows as full rather than blank.
+  function updateOpacityControl(control) {
+    var field = control.field + '-opacity';
+    control.opacity.node().value = styleFieldIsUnsetForTargets(field) ?
+      formatColorOpacityPct(null, !styleFieldIsUnsetForTargets(control.field)) :
+      formatOpacityPct(getCommonStyleValue(field));
+  }
+
+  function updateStrokeWidthControl() {
+    var values = getTargetStrokeWidths();
+    var value = values.length > 0 && values.every(function(val) {
+      return val === values[0];
+    }) ? values[0] : '';
+    strokeWidthField.setValue(value === '' ? '' : formatNumberValue(value));
+  }
+
+  function updateDashArrayControl() {
+    var value = getCommonStyleValue('stroke-dasharray');
+    dashControl.input.node().value = value === undefined || value === null ? '' : String(value);
+  }
+
+  function nudgeStrokeWidth(direction) {
+    var value = getLowerModeValue(getTargetStrokeWidths());
+    if (value === null) value = getDefaultStrokeWidth();
+    applyStrokeWidthStyle(getNextStrokeWidth(value, direction));
+  }
+
+  function getTargetStrokeWidths() {
+    var records = getTargetRecords();
+    var defaultWidth = getDefaultStrokeWidth();
+    return getTargetIds().map(function(id) {
+      var value = records[id] && records[id]['stroke-width'];
+      if (value === undefined || value === null || value === '') return defaultWidth;
+      value = Number(value);
+      return isFinite(value) ? value : defaultWidth;
+    });
+  }
+
+  function applyLayerStyle(field, value) {
+    runStyleCommand([[field, value]]);
+  }
+
+  function applyColorControlStyle(control, color) {
+    var styles = [[control.field, color]];
+    if (control.field == 'stroke') {
+      if (color && strokeWidthIsUnsetForTargets()) {
+        styles.push(['stroke-width', 1]);
+      } else if (!color) {
+        styles.push(['stroke-width', '']);
+      }
+    }
+    if (control.field == 'fill') {
+      runStyleEdits(patternControl.getStyleEdits(styles));
+    } else {
+      runStyleCommand(styles);
+    }
+  }
+
+  function applyStrokeWidthStyle(value) {
+    var styles = [['stroke-width', value]];
+    if (value > 0 && styleFieldIsUnsetForTargets('stroke')) {
+      styles.push(['stroke', strokeControl.defaultColor]);
+    }
+    runStyleCommand(styles);
+  }
+
+  function applyDashArrayStyle(value) {
+    var styles = [['stroke-dasharray', value]];
+    if (value && styleFieldIsUnsetForTargets('stroke')) {
+      styles.push(['stroke', strokeControl.defaultColor]);
+    }
+    runStyleCommand(styles);
+  }
+
+  function runStyleCommand(styles) {
+    releaseFocus();
+    syncTargetLayer();
+    var ids = getTargetIds();
+    if (editingNewShapes()) {
+      setNewShapeStyle(styles);
+      return;
+    }
+    if (!gui.console || !targetLayer || ids.length === 0) return;
+    runCommand(formatStyleCommand(styles, ids), 'Style layer');
+  }
+
+  // Per-feature edits ([{id, styles}]), as one -style command for each set of
+  // styles. They are run as one command string, which is one undo step.
+  function runStyleEdits(edits, title) {
+    releaseFocus();
+    syncTargetLayer();
+    if (editingNewShapes()) {
+      // every edit is to the one target, the next shape
+      setNewShapeStyle(edits.reduce(function(memo, edit) {
+        return memo.concat(edit.styles);
+      }, []));
+      return;
+    }
+    if (!gui.console || !targetLayer || edits.length === 0) return;
+    runCommand(formatStyleEditCommands(edits), title || 'Style layer');
+  }
+
+  function formatStyleEditCommands(edits) {
+    return groupStyleEdits(edits).map(function(group) {
+      return formatStyleCommand(group.styles, group.ids);
+    }).join(' ');
+  }
+
+  function formatStyleCommand(styles, ids) {
+    var parts = ['-style'];
+    styles.forEach(function(style) {
+      parts.push(style[0] + '=' + quoteCommandValue(style[1]));
+    });
+    addTargetOption(parts);
+    if (ids.length < internal.getFeatureCount(targetLayer)) {
+      parts.push('ids=' + ids.join(','));
+    }
+    return parts.join(' ');
+  }
+
+  function applyDefaultLineStyle() {
+    var styles = [];
+    if (!targetLayer || targetLayer.geometry_type != 'polyline' || editingNewShapes()) return;
+    if (styleFieldIsUnsetForTargets('stroke-width')) {
+      styles.push(['stroke-width', 1]);
+    }
+    if (styles.length > 0) {
+      runStyleCommand(styles);
+    }
+  }
+
+  // No button runs this for now; the Random fill button is waiting for a new
+  // place in the panel.
+  // Patterns keep their backgrounds in step with the fills, and the new fills
+  // are not known until -classify has chosen them, so the patterns are
+  // rewritten by an expression that reads each feature's fill when it runs.
+  function applyRandomFillColors() {
+    var cmd = '-classify colors=random non-adjacent';
+    var patternEdits;
+    syncTargetLayer();
+    if (!gui.console || !targetLayer || targetLayer.geometry_type != 'polygon') return;
+    if (getActiveLayer() != targetLayer) {
+      cmd += ' target=' + internal.formatOptionValue(internal.getLayerTargetId(gui.model, targetLayer));
+    }
+    patternEdits = patternControl.getRefillExpressionEdits(getAllFeatureIds(targetLayer));
+    if (patternEdits.length > 0) {
+      cmd += ' ' + formatStyleEditCommands(patternEdits);
+    }
+    runCommand(cmd, 'Random fill colors');
+  }
+
+  function runCommand(cmd, title) {
+    runGuiEditCommand(gui, cmd, {
+      title: title,
+      // the layer is the one the drawing tool edits in this mode
+      changesEditTarget: true,
+      onDone: updateControls
+    });
+  }
+
+  function applyStyleObject(style) {
+    var styles = [];
+    styleFields.forEach(function(field) {
+      if (field in style) {
+        styles.push([field, style[field]]);
+      }
+    });
+    if (styles.length > 0) {
+      runStyleEdits(patternControl.getStyleEdits(styles));
+    }
+  }
+
+  function getCurrentStyle() {
+    var style = {};
+    addStyleValue(style, 'stroke', getControlValue(strokeControl.input));
+    addStyleValue(style, 'stroke-width', strokeWidthField.getValue());
+    addStyleValue(style, 'stroke-opacity', parseOpacityValue(strokeControl.opacity.node().value));
+    if (targetLayer && targetLayer.geometry_type == 'polyline') {
+      addStyleValue(style, 'stroke-dasharray', getControlValue(dashControl.input));
+      addStyleValue(style, 'stroke-linecap', getCommonStyleValue('stroke-linecap'));
+      addArrowStyleValues(style);
+      casingControl.addStyleValues(style);
+    }
+    if (targetLayer && targetLayer.geometry_type == 'polygon') {
+      addStyleValue(style, 'fill', getControlValue(fillControl.input));
+      addStyleValue(style, 'fill-opacity', parseOpacityValue(fillControl.opacity.node().value));
+      addStyleValue(style, 'fill-pattern', patternControl.getCode(getControlValue(fillControl.input)));
+      glowControl.addStyleValues(style);
+    }
+    return style;
+  }
+
+  // Only when every target agrees, as with the other controls; a size is
+  // saved only if the lines have their own.
+  function addArrowStyleValues(style) {
+    ['line-start', 'line-end', 'line-end-size', 'line-fade', 'line-taper'].forEach(function(field) {
+      addStyleValue(style, field, getCommonStyleValue(field));
+    });
+  }
+
+  function addStyleValue(style, field, value) {
+    if (value || value === 0) {
+      style[field] = value;
+    }
+  }
+
+  function getControlValue(input) {
+    return input.node().value.trim();
+  }
+
+  function updateSavedStyleControls() {
+    presetControl.update();
+  }
+
+  function getStyleType() {
+    return targetLayer && targetLayer.geometry_type == 'polygon' ? 'polygon' : 'line';
+  }
+
+  function getSortKey(item) {
+    return (item.type || '') + '\t' + String(item.name || '').toLowerCase() + '\t' + (item.id || '');
+  }
+
+  function clearLayerStyle() {
+    var parts = ['-style clear'];
+    syncTargetLayer();
+    if (editingNewShapes()) {
+      clearNewShapeStyle(gui, targetLayer.geometry_type);
+      updateControls();
+      return;
+    }
+    if (!gui.console || !targetLayer) return;
+    addTargetOption(parts);
+    runCommand(parts.join(' '), 'Clear style');
+  }
+
+  function addTargetOption(parts) {
+    if (getActiveLayer() != targetLayer) {
+      parts.push('target=' + internal.formatOptionValue(internal.getLayerTargetId(gui.model, targetLayer)));
+    }
+  }
+
+  function getCommonStyleValue(field, idsArg) {
+    var records = editingNewShapes() || targetLayer && targetLayer.data ?
+      getTargetRecords() : null;
+    var ids;
+    var value, val;
+    if (!records) return '';
+    ids = idsArg || getTargetIds();
+    if (ids.length === 0) return '';
+    for (var i=0; i<ids.length; i++) {
+      val = records[ids[i]] && records[ids[i]][field];
+      if (i === 0) {
+        value = val;
+      } else if (val != value) {
+        return '';
+      }
+    }
+    return value;
+  }
+
+  function strokeWidthIsUnsetForTargets() {
+    return styleFieldIsUnsetForTargets('stroke-width');
+  }
+
+  function styleFieldIsUnsetForTargets(field) {
+    var records = editingNewShapes() || targetLayer && targetLayer.data ?
+      getTargetRecords() : null;
+    var ids = getTargetIds();
+    var val;
+    if (!records) return true;
+    for (var i=0; i<ids.length; i++) {
+      val = records[ids[i]] && records[ids[i]][field];
+      if (val !== undefined && val !== null && val !== '') {
+        return false;
+      }
+    }
+    return ids.length > 0;
+  }
+
+  function getDefaultStrokeWidth() {
+    return targetLayer && targetLayer.geometry_type == 'polyline' ? 1 : 0;
+  }
+
+  function getAllFeatureIds(lyr) {
+    var ids = [];
+    for (var i=0, n=internal.getFeatureCount(lyr); i<n; i++) {
+      ids.push(i);
+    }
+    return ids;
+  }
+
+  function getSelectionIds() {
+    return hit ? hit.getSelectionIds() : [];
+  }
+
+  function getTargetIds() {
+    var ids = getSelectionIds();
+    if (!targetLayer) return [];
+    if (editingNewShapes()) return [0];
+    return ids.length > 0 ? ids : getAllFeatureIds(targetLayer);
+  }
+
+  function clearSelection() {
+    if (hit) hit.clearSelection();
+    updateControls();
+  }
+
+  // An empty layer has nothing for the controls to act on, so they are shown
+  // disabled rather than left to do nothing.
+  function updateEditingStatus(count) {
+    var total = targetLayer ? internal.getFeatureCount(targetLayer) : 0;
+    var newShapes = editingNewShapes() ?
+      (targetLayer.geometry_type == 'polygon' ? 'polygons' : 'lines') : null;
+    editingStatus.text(formatEditingStatus({selected: count, total: total, newShapes: newShapes}));
+    clearLink.classed('hidden', count === 0);
+    panel.classed('no-targets', total === 0 && !newShapes);
+  }
+
+  function getActiveLayer() {
+    var active = gui.model.getActiveLayer();
+    return active && active.layer;
+  }
+
+  function syncTargetLayer() {
+    var lyr = getActiveLayer();
+    if (lyr == targetLayer) return;
+    schemePanel.close();
+    if (layerCanBeStyled(lyr)) {
+      targetLayer = lyr;
+      if (hit) hit.clearSelection();
+    } else {
+      targetLayer = null;
+    }
+  }
+
+  // The panel's close button hides the panel and leaves the mode on, so that
+  // the map can be drawn on without it; Done on the toolbar ends the mode.
+  function closePanel() {
+    setPanelShown(false);
+  }
+
+  function exitMode() {
+    turnOff();
+    if (gui.interaction.getMode() == 'line_style' || gui.interaction.getMode() == 'polygon_style') {
+      gui.interaction.turnOff();
+    }
+  }
+
+  function layerCanBeStyled(lyr) {
+    return !!(lyr && (lyr.geometry_type == 'polyline' || lyr.geometry_type == 'polygon'));
+  }
+
+  function modeMatchesActiveLayer(mode) {
+    var lyr = getActiveLayer();
+    return mode == 'line_style' && lyr && lyr.geometry_type == 'polyline' ||
+      mode == 'polygon_style' && lyr && lyr.geometry_type == 'polygon';
+  }
+
+  function modelSelectLayer(lyr, dataset) {
+    if (lyr) lyr.hidden = false;
+    gui.model.selectLayer(lyr, dataset);
+  }
+
+  function formatNumberValue(val) {
+    val = Number(val);
+    return isFinite(val) ? String(val) : '';
+  }
+
+}

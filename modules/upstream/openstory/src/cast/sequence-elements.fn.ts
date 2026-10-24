@@ -1,0 +1,366 @@
+import { mediaUrlSchema } from '@/platform/schemas/media-url.schemas';
+import { getSignedUploadUrl } from '#storage';
+import {
+  describeElementImage,
+  ELEMENT_VISION_MODEL,
+} from '@/cast/server/element-vision';
+import { reportMissingBillingCost } from '@/billing/billing-observability';
+import { estimateLLMCost } from '@/billing/cost-estimation';
+import { InsufficientCreditsError } from '@/platform/errors';
+import { generateId } from '@/platform/id';
+import { ulidSchema } from '@/platform/server/schemas/id.schemas';
+import {
+  deleteElement,
+  renameElementToken,
+  restoreElement,
+  setElementDescription,
+} from '@/cast/server/cast-edit';
+import {
+  attachElementUpload,
+  elementKindOrThrow,
+  replaceElementUpload,
+} from '@/cast/server/sequence-elements/attach-element-upload';
+import { DRAFT_ELEMENT_UPLOAD_PREFIX } from '@/cast/server/sequence-elements/storage-path';
+import { withMeasuredDurations } from '@/cast/server/sequence-elements/media-duration';
+import { STORAGE_BUCKETS } from '@/platform/server/storage/buckets';
+import {
+  getExtensionFromUrl,
+  getMimeTypeFromExtension,
+} from '@/platform/server/storage/file';
+import { createServerFn } from '@tanstack/react-start';
+import { zodValidator } from '@tanstack/zod-adapter';
+import { z } from 'zod';
+import {
+  authWithTeamMiddleware,
+  sequenceAccessMiddleware,
+} from '@/platform/middleware.fn';
+
+// ============================================================================
+// Presign upload — drafts go under the user's default team's `uploads/`
+// folder, a permanent sequence-agnostic key that attach points rows at without
+// moving anything (#1471). Persisted uploads (existing sequence) must use the
+// *sequence's* teamId in the path so the attach check passes for users whose
+// default team differs from the sequence's team (multi-team members and system
+// admins).
+// ============================================================================
+
+export const presignDraftElementUploadFn = createServerFn({ method: 'POST' })
+  .middleware([authWithTeamMiddleware])
+  .validator(zodValidator(z.object({ filename: z.string().min(1) })))
+  .handler(async ({ context, data }) => {
+    const ext = getExtensionFromUrl(data.filename);
+    const uploadId = generateId();
+    const contentType = getMimeTypeFromExtension(ext);
+    const storagePath = `${context.teamId}/${DRAFT_ELEMENT_UPLOAD_PREFIX}/${uploadId}.${ext}`;
+
+    return getSignedUploadUrl(
+      STORAGE_BUCKETS.ELEMENTS,
+      storagePath,
+      contentType
+    );
+  });
+
+export const presignElementUploadFn = createServerFn({ method: 'POST' })
+  .middleware([sequenceAccessMiddleware])
+  .validator(
+    zodValidator(
+      z.object({
+        sequenceId: ulidSchema,
+        filename: z.string().min(1),
+      })
+    )
+  )
+  .handler(async ({ context, data }) => {
+    const ext = getExtensionFromUrl(data.filename);
+    const uploadId = generateId();
+    const contentType = getMimeTypeFromExtension(ext);
+    const storagePath = `${context.teamId}/${data.sequenceId}/${uploadId}.${ext}`;
+
+    return getSignedUploadUrl(
+      STORAGE_BUCKETS.ELEMENTS,
+      storagePath,
+      contentType
+    );
+  });
+
+// ============================================================================
+// Synchronously analyze a draft (pre-sequence) element via vision LLM.
+//
+// Draft uploads can't trigger the persisted element-vision workflow because the
+// element row doesn't exist yet. Running vision inline here lets the Generate
+// button gate on the result so we never hand the LLM a token with no visual
+// context (the placeholder `(vision description pending)` path in
+// scene-split-workflow). On promotion, the description is written straight onto
+// the new row so we don't re-run vision twice.
+// ============================================================================
+
+export const analyzeDraftElementFn = createServerFn({ method: 'POST' })
+  .middleware([authWithTeamMiddleware])
+  .validator(
+    zodValidator(
+      z.object({
+        publicUrl: mediaUrlSchema,
+        filename: z.string().min(1),
+      })
+    )
+  )
+  .handler(async ({ context, data }) => {
+    const { scopedDb } = context;
+    const llmKeyInfo =
+      await scopedDb.apiKeys.resolveLlmKey(ELEMENT_VISION_MODEL);
+    if (llmKeyInfo.source !== 'team') {
+      const estimatedCost = estimateLLMCost(1);
+      const canAfford = await scopedDb.billing.hasEnoughCredits(estimatedCost);
+      if (!canAfford) {
+        throw new InsufficientCreditsError(
+          'Insufficient credits for element vision'
+        );
+      }
+    }
+
+    const result = await describeElementImage({
+      imageUrl: data.publicUrl,
+      filename: data.filename,
+      llmKey: llmKeyInfo,
+      resolveLlmKey: (model) => scopedDb.apiKeys.resolveLlmKey(model),
+      observability: {
+        userId: context.user.id,
+        tags: ['vision', 'draft'],
+        metadata: { draft: true },
+      },
+    });
+
+    if (!result.usedOwnKey) {
+      if (result.costMicros > 0) {
+        await scopedDb.billing.deductCredits(result.costMicros, {
+          description: `Element vision (${result.model})`,
+          metadata: { model: result.model, draft: true },
+          idempotencyKey: `draft-vision:${data.publicUrl}`,
+        });
+      } else {
+        reportMissingBillingCost({
+          source: 'draft-element-vision',
+          modelId: result.model,
+          metadata: { draft: true, publicUrl: data.publicUrl },
+        });
+      }
+    }
+    return {
+      description: result.description,
+      consistencyTag: result.consistencyTag,
+      suggestedToken: result.suggestedToken,
+    };
+  });
+
+// ============================================================================
+// Finalize upload to an existing sequence
+// ============================================================================
+
+/**
+ * `durationSeconds` is read in the browser and passed through: the worker
+ * would otherwise have to download and demux the file to learn a number that
+ * is only ever a prompt hint. Missing simply means the prompt goes without it.
+ */
+const durationInput = z.number().positive().max(86_400).nullable().optional();
+
+export const finalizeElementUploadFn = createServerFn({ method: 'POST' })
+  .middleware([sequenceAccessMiddleware])
+  .validator(
+    zodValidator(
+      z.object({
+        sequenceId: ulidSchema,
+        path: z.string().min(1),
+        filename: z.string().min(1),
+        durationSeconds: durationInput,
+      })
+    )
+  )
+  .handler(async ({ context, data }) => {
+    // Same core as a draft upload attached at creation time: the object is
+    // already in R2 and nothing moves it. The caller does not send a public
+    // URL — it is derived from the validated path (#1471).
+    //
+    // The kind is checked here rather than left to `attachElementUpload`,
+    // which tolerates an unknown extension as an image for drafts written
+    // before #1559. This upload is happening right now, so an unsupported file
+    // is a mistake the user can still fix — say so instead of silently
+    // storing an MP3 as an image.
+    elementKindOrThrow(data.filename);
+    return await attachElementUpload({
+      scopedDb: context.scopedDb,
+      teamId: context.teamId,
+      userId: context.user.id,
+      sequenceId: data.sequenceId,
+      path: data.path,
+      filename: data.filename,
+      durationSeconds: data.durationSeconds,
+    });
+  });
+
+/**
+ * Set an element's description by hand (#1559). Vision writes this for an
+ * image; for a clip or an audio file there is nothing to look at, so the user
+ * says what it is — a transcript, "upbeat synth bed", "puppet walk cycle".
+ * Shots that mention the element go stale, which is correct: the description
+ * is prompt input.
+ */
+export const setSequenceElementDescriptionFn = createServerFn({
+  method: 'POST',
+})
+  .middleware([sequenceAccessMiddleware])
+  .validator(
+    zodValidator(
+      z.object({
+        sequenceId: ulidSchema,
+        elementId: ulidSchema,
+        description: z.string().max(2000),
+      })
+    )
+  )
+  .handler(
+    async ({ context, data }) =>
+      await setElementDescription(
+        context.scopedDb,
+        context.sequence.id,
+        data.elementId,
+        data.description
+      )
+  );
+
+// ============================================================================
+// List / delete / rename
+// ============================================================================
+
+export const listSequenceElementsFn = createServerFn({ method: 'GET' })
+  .middleware([sequenceAccessMiddleware])
+  .validator(zodValidator(z.object({ sequenceId: ulidSchema })))
+  .handler(async ({ context }) => {
+    // Heals rows stored with no length (#1559) the first time the editor
+    // lists them, so the tile badge and every length gate see the real one.
+    return withMeasuredDurations(
+      context.scopedDb,
+      await context.scopedDb.sequenceElements.list(context.sequence.id)
+    );
+  });
+
+/**
+ * Product delete is a SOFT delete since #1108 — the element vanishes from the
+ * grid and the prompt-context bibles but keeps its row + R2 bytes, so the
+ * toast Undo (`restoreSequenceElementFn`) is lossless. The hard scoped
+ * `delete` remains admin/GC only.
+ */
+export const deleteSequenceElementFn = createServerFn({ method: 'POST' })
+  .middleware([sequenceAccessMiddleware])
+  .validator(
+    zodValidator(z.object({ sequenceId: ulidSchema, elementId: ulidSchema }))
+  )
+  .handler(
+    async ({ context, data }) =>
+      await deleteElement(
+        context.scopedDb,
+        { userId: context.user.id },
+        context.sequence.id,
+        data.elementId
+      )
+  );
+
+/** Undo an element soft-delete (toast Undo). */
+export const restoreSequenceElementFn = createServerFn({ method: 'POST' })
+  .middleware([sequenceAccessMiddleware])
+  .validator(
+    zodValidator(z.object({ sequenceId: ulidSchema, elementId: ulidSchema }))
+  )
+  .handler(
+    async ({ context, data }) =>
+      await restoreElement(
+        context.scopedDb,
+        { userId: context.user.id },
+        context.sequence.id,
+        data.elementId
+      )
+  );
+
+export const renameSequenceElementTokenFn = createServerFn({ method: 'POST' })
+  .middleware([sequenceAccessMiddleware])
+  .validator(
+    zodValidator(
+      z.object({
+        sequenceId: ulidSchema,
+        elementId: ulidSchema,
+        token: z.string().min(1).max(100),
+      })
+    )
+  )
+  .handler(
+    async ({ context, data }) =>
+      await renameElementToken(
+        context.scopedDb,
+        context.sequence.id,
+        data.elementId,
+        data.token
+      )
+  );
+
+// ============================================================================
+// Shot IDs / Replace
+// ============================================================================
+
+/** Get shot IDs for all shots that reference an element by token */
+export const getShotIdsForElementFn = createServerFn({ method: 'GET' })
+  .middleware([sequenceAccessMiddleware])
+  .validator(
+    zodValidator(z.object({ sequenceId: ulidSchema, elementId: ulidSchema }))
+  )
+  .handler(async ({ context, data }) => {
+    const shotIds =
+      await context.scopedDb.sequenceElements.getShotIdsForElement(
+        context.sequence.id,
+        data.elementId
+      );
+    return { shotIds, count: shotIds.length };
+  });
+
+/**
+ * Batched shot counts for every element in the sequence. Use this from the
+ * elements grid to avoid the N+1 where each card fetched its own shot IDs.
+ */
+export const getShotCountsByElementFn = createServerFn({ method: 'GET' })
+  .middleware([sequenceAccessMiddleware])
+  .validator(zodValidator(z.object({ sequenceId: ulidSchema })))
+  .handler(async ({ context }) => {
+    return await context.scopedDb.sequenceElements.getShotCountsByElement(
+      context.sequence.id
+    );
+  });
+
+/**
+ * Replace an element's image. Persists the new image and re-runs vision.
+ * Affected shots are left stale — the user updates them from the inspector
+ * (edit vs regen is a per-shot choice; replace-time is the wrong moment to
+ * pick one for the whole sequence).
+ */
+export const replaceSequenceElementFn = createServerFn({ method: 'POST' })
+  .middleware([sequenceAccessMiddleware])
+  .validator(
+    zodValidator(
+      z.object({
+        sequenceId: ulidSchema,
+        elementId: ulidSchema,
+        path: z.string().min(1),
+        filename: z.string().min(1),
+        durationSeconds: durationInput,
+      })
+    )
+  )
+  .handler(async ({ context, data }) => ({
+    element: await replaceElementUpload({
+      scopedDb: context.scopedDb,
+      teamId: context.teamId,
+      userId: context.user.id,
+      sequenceId: context.sequence.id,
+      elementId: data.elementId,
+      path: data.path,
+      filename: data.filename,
+      durationSeconds: data.durationSeconds,
+    }),
+  }));

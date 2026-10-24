@@ -1,0 +1,63 @@
+/**
+ * Upload rights (#1581) — the client-safe half.
+ *
+ * Every image a user brings in is checked for a real person before anything
+ * uses it, and a real person needs the uploader's portrait sign-off. The
+ * ledger row is keyed by the SHA-256 of the stored URL, so one still is
+ * checked once per team no matter where it is used next.
+ */
+
+import { PORTRAIT_RIGHTS_V1 } from '@/platform/compliance/attestations';
+import { getPublicAssetsDomain } from '@/platform/public-assets';
+import {
+  mediaUrlHasTraversal,
+  mediaUrlSchema,
+} from '@/platform/schemas/media-url.schemas';
+import { z } from 'zod';
+
+/** What the ledger says about one upload. `null` on the wire means unchecked. */
+export type UploadRights =
+  /** The check found no real person; nothing is asked of the user. */
+  | { status: 'cleared' }
+  /** A real person, and the portrait sign-off is on record. */
+  | { status: 'signed' }
+  /** A real person, and the sign-off is still owed. */
+  | { status: 'needs_portrait' };
+
+/** One image to check: the stored URL, plus the original filename as a hint. */
+export const uploadRefSchema = z.object({
+  url: mediaUrlSchema,
+  filename: z.string().max(255).optional(),
+});
+export type UploadRef = z.infer<typeof uploadRefSchema>;
+
+/** The portrait sign-off for one upload. The only statement a user signs. */
+export const portraitAttestationSchema = z.object({
+  url: mediaUrlSchema,
+  statementVersion: z.literal(PORTRAIT_RIGHTS_V1.version),
+  authorizationBasis: z.string().trim().min(1).max(500),
+});
+export type PortraitAttestation = z.infer<typeof portraitAttestationSchema>;
+
+/**
+ * Whether a URL used at generate time still needs a rights check (the
+ * studio composer, and anything else that takes a URL rather than a row).
+ *
+ * Gated: a raw http(s) URL, and anything under a folder a signed upload can
+ * write to and nothing gates on the way out — `uploads/` (talent, location,
+ * elements; the row points at this key forever, #1471/#1634) and leftover
+ * `temp/` keys from before that cutover. Exempt: generated stills, entity
+ * folders (sheets, headshots), and our public assets domain.
+ */
+export function needsLikenessCheck(url: string): boolean {
+  // A traversable URL is never a library still. The server refuses it
+  // outright (#2153); treating it as exempt would skip that refusal's twin,
+  // the ledger check, when a caller only filters on this predicate.
+  if (mediaUrlHasTraversal(url)) return true;
+  if (url.startsWith(`https://${getPublicAssetsDomain()}/`)) return false;
+  return (
+    /^https?:\/\//.test(url) ||
+    /^\/r2\/(talent|locations)\/[^/]+\/temp\//.test(url) ||
+    /^\/r2\/(talent|locations|elements)\/[^/]+\/uploads\//.test(url)
+  );
+}

@@ -1,0 +1,700 @@
+import type { StyleConfig } from '@/look/style-config';
+import { buildPackedMotionPrompt } from '@/motion/server/build-motion-render';
+/**
+ * Assembled request the scene editor's optimised-prompt inspector shows
+ * (#1242). Same builders submit uses, so the JSON cannot drift — but the
+ * browser must not run them. `previewShotPromptsFn` is the only client
+ * entry; this module is server-only.
+ */
+
+import type { AssemblableMotionPrompt } from '@/shots/scene-analysis.schema';
+import { isBytePlusConfigured } from '@/models/server/byteplus-config';
+import { toCdnUrl } from '@/platform/server/storage/buckets';
+import type {
+  CharacterMinimal,
+  SequenceElementMinimal,
+  SequenceLocationMinimal,
+} from '@/platform/server/db/schema';
+import { isNativeGeminiVideoModel } from '@/models/gemini-native';
+import { isNativeGrokVideoModel } from '@/models/grok-native';
+import { promptLengthFields } from '@/models/prompt-length';
+import type { PromptLengthUnit } from '@/models/prompt-length';
+import {
+  getBytePlusImageModelId,
+  getBytePlusVideoModelId,
+  getMotionReferenceEndpoint,
+  IMAGE_MODELS,
+  IMAGE_TO_VIDEO_MODELS,
+  videoPromptHardLimit,
+  videoModelSupportsAudio,
+  type ImageToVideoModel,
+  type TextToImageModel,
+} from '@/models/models';
+import {
+  aspectRatioToImageSize,
+  type AspectRatio,
+} from '@/models/aspect-ratios';
+import type { Resolution } from '@/models/resolutions';
+import { buildBytePlusImageRequest } from '@/stills/build-byteplus-image-request';
+import { buildImageRequest } from '@/stills/build-image-request';
+import {
+  packedPromptFitsLimit,
+  packedSceneFromScene,
+  type PackedMotionPromptShot,
+} from '@/motion/server/build-motion-render';
+import { buildBytePlusVideoRequest } from '@/motion/server/build-byteplus-video-request';
+import { seedanceEditSeconds } from '@/motion/seedance-edit';
+import { buildGeminiVideoRequest } from '@/motion/server/build-gemini-video-request';
+import { buildGrokVideoRequest } from '@/motion/server/build-grok-video-request';
+import { buildMotionRequest } from '@/motion/server/build-model-input';
+import {
+  buildMotionReferenceImages,
+  buildShotImageReferenceImages,
+} from '@/motion/server/build-motion-references';
+import { formatShotSpan } from '@/shots/scene-segments';
+import {
+  missingVoiceLines,
+  unusableShotReferenceLines,
+} from '@/motion/reference-support';
+import { resolveShotDuration } from '@/motion/resolve-shot-duration';
+import { dialogueClipsAsReferences } from '@/motion/server/synthesize-dialogue';
+import {
+  DIALOGUE_CLIP_TOKEN,
+  dialogueTtsToken,
+  voicedDialogueLines,
+  withVoicedLineTokens,
+} from '@/motion/dialogue-tts';
+import type { MotionAudioClip } from '@/platform/server/db/schema';
+import { buildReferenceImagePrompt } from '@/stills/reference-image-prompt';
+
+export type BoundPromptImage = {
+  label: string;
+  url: string;
+};
+
+export type OptimisedPromptPreview = {
+  modelName: string;
+  endpointId: string;
+  prompt: string;
+  json: string | null;
+  /**
+   * Length of `prompt` — the text above, measured (#1754). It used to be the
+   * pre-truncation length while the body shown was post-truncation, so the
+   * count and the body disagreed on every long prompt.
+   */
+  promptLength: number;
+  /**
+   * The model's documented RECOMMENDATION, in characters. Nothing enforces
+   * it: over is a warning and the prompt is still sent whole. Absent where
+   * the provider documents nothing (native Grok images).
+   */
+  maxPromptLength?: number;
+  /** Always characters. Seedance included (#1763). */
+  promptLengthUnit: PromptLengthUnit;
+  images?: BoundPromptImage[];
+  /**
+   * Reference clips and audio riding the request (#1559), each labelled with
+   * the tag the prompt binds it by — the same `@Video1` / `Audio 1` the
+   * provider reads, so the preview is the request and not an approximation.
+   */
+  videos?: BoundPromptImage[];
+  audio?: BoundPromptImage[];
+};
+
+export type ShotPromptPreview = {
+  image: OptimisedPromptPreview | null;
+  motion: OptimisedPromptPreview | null;
+  /**
+   * Why submit would refuse this shot on this model (#1559) — the same lines,
+   * from the same references and start-frame state, so the warning before
+   * Generate is exactly the refusal it prevents. Empty when it would render.
+   */
+  motionUnusable: string[];
+  assembledMotionPrompt: string | null;
+  motionHasReferenceImages: boolean;
+  /**
+   * Packed in-clip span this motion request covers ("Shots 1–2"), or null
+   * when the request is a single shot. The inspector footnote uses this so
+   * the packed payload is labelled as one generation.
+   */
+  packedSpanLabel: string | null;
+  /** Shot ids this packed generation covers, story order. Null when 1-shot. */
+  packedShotIds: string[] | null;
+  /** Sum of member durations for the packed generation. Null when 1-shot. */
+  packedDurationMs: number | null;
+  /**
+   * Why this clip covers fewer shots than the duration cap would allow,
+   * or why a persisted clip cannot generate on this model. Null when the
+   * packed request fits.
+   */
+  packedLimitWarning: string | null;
+  /**
+   * Persisted clip whose packed prompt exceeds this model's limit. Generate
+   * must not run — peeling a member would leave it on the old segment.
+   */
+  packedPromptOverflow: boolean;
+};
+
+/** One scene-sibling the packed motion request will cover (#1510). */
+export type PackedPreviewMember = {
+  shotId: string;
+  shotNumber: number;
+  durationMs: number | null;
+  motionPrompt: AssemblableMotionPrompt | null;
+  usesStartFrame: boolean;
+  startFrameUrl: string | null;
+};
+
+type SceneReferenceInput = {
+  continuity?: {
+    characterTags?: string[];
+    characterLooks?: Record<string, string>;
+    elementTags?: string[] | null;
+    environmentTag?: string | null;
+    lightingSetup?: string;
+    colorPalette?: string;
+    styleTag?: string;
+  } | null;
+  originalScript?: { extract?: string } | null;
+  metadata?: { location?: string; timeOfDay?: string } | null;
+} | null;
+
+export function boundPromptImages(
+  urls: readonly string[],
+  tag: (position: number) => string
+): BoundPromptImage[] {
+  return urls
+    .filter((url) => url.length > 0)
+    .map((url, index) => ({ label: tag(index + 1), url }));
+}
+
+function packedLimitWarning(
+  model: ImageToVideoModel,
+  packedNumbers: readonly number[],
+  durationNumbers: readonly number[] | undefined,
+  promptOverflow: boolean
+): string | null {
+  const config = IMAGE_TO_VIDEO_MODELS[model];
+  if (promptOverflow && packedNumbers.length > 1) {
+    return `This ${packedNumbers.length}-shot clip's prompt exceeds ${config.name}'s ${videoPromptHardLimit(model)}-character limit. Shorten a shot prompt to generate it as one clip.`;
+  }
+  if (!durationNumbers || durationNumbers.length <= packedNumbers.length) {
+    return null;
+  }
+  const packedSet = new Set(packedNumbers);
+  const excluded = durationNumbers.filter((n) => !packedSet.has(n));
+  if (excluded.length === 0) return null;
+  return `${config.name}'s ${videoPromptHardLimit(model)}-character prompt limit kept ${formatShotSpan(excluded)} out of this clip.`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+export function imageUrlsFromFalInput(input: unknown): string[] {
+  if (!isRecord(input)) return [];
+  const urls: string[] = [];
+  const push = (value: unknown) => {
+    if (typeof value === 'string' && value.length > 0) urls.push(value);
+  };
+  if (Array.isArray(input.image_urls)) {
+    for (const url of input.image_urls) push(url);
+  } else if (Array.isArray(input.reference_image_urls)) {
+    for (const url of input.reference_image_urls) push(url);
+  } else {
+    push(input.image_url);
+    push(input.start_image_url);
+  }
+  if (Array.isArray(input.elements)) {
+    for (const element of input.elements) {
+      if (isRecord(element)) push(element.frontal_image_url);
+    }
+  }
+  return urls;
+}
+
+/** The URL list in the first of `fields` the fal input carries. */
+function falUrlList(input: unknown, fields: readonly string[]): string[] {
+  if (!isRecord(input)) return [];
+  for (const field of fields) {
+    const value = input[field];
+    if (Array.isArray(value)) {
+      return value.filter(
+        (url): url is string => typeof url === 'string' && url.length > 0
+      );
+    }
+  }
+  return [];
+}
+
+export function imageUrlsFromPromptParts(
+  parts: unknown,
+  type: 'image' | 'video' | 'audio' = 'image'
+): string[] {
+  if (!Array.isArray(parts)) return [];
+  const urls: string[] = [];
+  for (const part of parts) {
+    if (!isRecord(part) || part.type !== type || !isRecord(part.source)) {
+      continue;
+    }
+    if (typeof part.source.value === 'string' && part.source.value.length > 0) {
+      urls.push(part.source.value);
+    }
+  }
+  return urls;
+}
+
+export function promptFromFalInput(input: unknown, fallback: string): string {
+  if (
+    input !== null &&
+    typeof input === 'object' &&
+    'prompt' in input &&
+    typeof input.prompt === 'string'
+  ) {
+    return input.prompt;
+  }
+  return fallback;
+}
+
+function absolutizePreviewUrl(url: string): string {
+  return toCdnUrl(url) ?? url;
+}
+
+function absolutizeRefs<T extends { referenceImageUrl: string }>(
+  refs: T[]
+): T[] {
+  return refs.map((ref) => ({
+    ...ref,
+    referenceImageUrl: absolutizePreviewUrl(ref.referenceImageUrl),
+  }));
+}
+
+export function buildShotPromptPreview(input: {
+  styleConfig: StyleConfig;
+  imageModel: TextToImageModel;
+  videoModel: ImageToVideoModel;
+  imagePrompt: string;
+  motionPrompt: AssemblableMotionPrompt | null;
+  shotDurationMs: number | null;
+  startFrameUrl: string | null;
+  usesStartFrame: boolean;
+  generateAudio: boolean;
+  aspectRatio?: AspectRatio;
+  resolution?: Resolution;
+  scene: SceneReferenceInput;
+  characters: CharacterMinimal[];
+  elements: SequenceElementMinimal[];
+  locations: SequenceLocationMinimal[];
+  byteplusEnabled?: boolean;
+  /** Dialogue TTS clips already parked for this prompt version (#1554). */
+  audioClips?: MotionAudioClip[];
+  /**
+   * Scene siblings this generation will cover when the model packs in-clip
+   * (#1510). Absent or length 1 keeps the single-shot request. The current
+   * shot's prompt/duration/still already sit on the top-level fields; members
+   * are story-ordered and include this shot.
+   */
+  packedMembers?: readonly PackedPreviewMember[];
+  /**
+   * Shot numbers duration tiling would have packed, used to explain a
+   * prompt-length shrink. Absent when duration and prompt membership match.
+   */
+  packedDurationShotNumbers?: readonly number[];
+}): ShotPromptPreview {
+  const byteplusEnabled = input.byteplusEnabled ?? isBytePlusConfigured();
+  const audioClips = input.audioClips ?? [];
+  const clipByToken = new Map(audioClips.map((clip) => [clip.token, clip]));
+  const conversation = clipByToken.get(DIALOGUE_CLIP_TOKEN);
+  const motionPrompt =
+    audioClips.length > 0 && input.motionPrompt?.dialogue
+      ? {
+          ...input.motionPrompt,
+          dialogue: conversation
+            ? withVoicedLineTokens(
+                input.motionPrompt.dialogue,
+                voicedDialogueLines(
+                  input.motionPrompt.dialogue,
+                  input.characters
+                )
+              )
+            : {
+                ...input.motionPrompt.dialogue,
+                lines: input.motionPrompt.dialogue.lines.map((line, index) => {
+                  if (line.voiceToken) return line;
+                  const token = dialogueTtsToken(line.character, index);
+                  return clipByToken.has(token)
+                    ? { ...line, voiceToken: token }
+                    : line;
+                }),
+              },
+        }
+      : input.motionPrompt;
+  const packedMembers = input.packedMembers ?? [];
+  const isPacked = packedMembers.length > 1;
+  const packedFirst = packedMembers[0];
+  const packed = isPacked
+    ? buildPackedMotionPrompt({
+        shots: packedMembers.map((member): PackedMotionPromptShot => ({
+          durationSeconds: Math.max(
+            1,
+            Math.round((member.durationMs ?? 3000) / 1000)
+          ),
+          motionPrompt: member.motionPrompt ?? undefined,
+          prompt: member.motionPrompt?.fullPrompt,
+          characterTags: input.scene?.continuity?.characterTags,
+          generateAudio: input.generateAudio,
+        })),
+        model: input.videoModel,
+        generateAudio: input.generateAudio,
+        scene: packedSceneFromScene(input.scene, input.styleConfig),
+      })
+    : null;
+  const assembledMotionPrompt = packed
+    ? packed.prompt
+    : motionPrompt || input.scene?.originalScript?.extract
+      ? buildPackedMotionPrompt({
+          shots: [
+            {
+              durationSeconds: (input.shotDurationMs ?? 3000) / 1000,
+              motionPrompt: motionPrompt ?? undefined,
+              prompt: input.scene?.originalScript?.extract,
+              characterTags: input.scene?.continuity?.characterTags,
+              attachSceneHeader: true,
+            },
+          ],
+          model: input.videoModel,
+          generateAudio: input.generateAudio,
+          scene: packedSceneFromScene(input.scene, input.styleConfig),
+        }).prompt
+      : '';
+  const motionUsesStartFrame = packedFirst
+    ? packedFirst.usesStartFrame
+    : input.usesStartFrame;
+  const motionStartFrameUrl = packedFirst
+    ? packedFirst.startFrameUrl
+    : input.startFrameUrl;
+  const motionDurationMs = isPacked
+    ? packedMembers.reduce(
+        (sum, member) => sum + (member.durationMs ?? 3000),
+        0
+      )
+    : input.shotDurationMs;
+  const packedPromptOverflow = Boolean(
+    packed &&
+    !packedPromptFitsLimit(packed, videoPromptHardLimit(input.videoModel))
+  );
+  const motionRefs = absolutizeRefs([
+    ...buildMotionReferenceImages({
+      scene: input.scene,
+      characters: input.characters,
+      elements: input.elements,
+      // The ASSEMBLED prompt, exactly as submit passes it (#1559). A voice
+      // bound to a dialogue line is named only in what assembly appends, so
+      // matching the raw text dropped it here while submit sent it — the
+      // preview showed `MATEO_SHOT_1` where the provider got `Audio 1`.
+      motionPrompt: assembledMotionPrompt,
+      referenceOnly: !motionUsesStartFrame,
+      locations: input.locations,
+    }),
+    ...dialogueClipsAsReferences(audioClips),
+  ]);
+
+  return {
+    image: buildImagePreview({
+      model: input.imageModel,
+      prompt: input.imagePrompt,
+      scene: input.scene,
+      characters: input.characters,
+      elements: input.elements,
+      locations: input.locations,
+      aspectRatio: input.aspectRatio,
+      resolution: input.resolution,
+      byteplusEnabled,
+    }),
+    motion: buildMotionPreview({
+      model: input.videoModel,
+      assembledPrompt: assembledMotionPrompt,
+      shotDurationMs: motionDurationMs,
+      startFrameUrl: motionStartFrameUrl,
+      usesStartFrame: motionUsesStartFrame,
+      generateAudio: input.generateAudio,
+      aspectRatio: input.aspectRatio,
+      resolution: input.resolution,
+      referenceImages: motionRefs,
+      byteplusEnabled,
+      multiPrompt: packed?.multiPrompt,
+    }),
+    assembledMotionPrompt,
+    motionHasReferenceImages: motionRefs.length > 0,
+    packedSpanLabel: isPacked
+      ? formatShotSpan(packedMembers.map((member) => member.shotNumber))
+      : null,
+    packedShotIds: isPacked
+      ? packedMembers.map((member) => member.shotId)
+      : null,
+    packedDurationMs: isPacked ? motionDurationMs : null,
+    packedPromptOverflow,
+    packedLimitWarning: packedLimitWarning(
+      input.videoModel,
+      packedMembers.map((member) => member.shotNumber),
+      input.packedDurationShotNumbers,
+      packedPromptOverflow
+    ),
+    motionUnusable: [
+      ...unusableShotReferenceLines(input.videoModel, motionRefs, {
+        hasStartFrame: motionUsesStartFrame,
+        prompt: assembledMotionPrompt,
+        onArk: byteplusEnabled,
+      }),
+      ...missingVoiceLines(
+        input.videoModel,
+        input.motionPrompt?.dialogue,
+        input.elements
+      ),
+    ],
+  };
+}
+
+function buildImagePreview(input: {
+  model: TextToImageModel;
+  prompt: string;
+  scene: SceneReferenceInput;
+  characters: CharacterMinimal[];
+  elements: SequenceElementMinimal[];
+  locations: SequenceLocationMinimal[];
+  aspectRatio?: AspectRatio;
+  resolution?: Resolution;
+  byteplusEnabled: boolean;
+}): OptimisedPromptPreview | null {
+  const basePrompt = input.prompt.trim();
+  if (!basePrompt) return null;
+  const config = IMAGE_MODELS[input.model];
+  const referenceImages = absolutizeRefs(
+    buildShotImageReferenceImages({
+      scene: input.scene,
+      visualPrompt: basePrompt,
+      characters: input.characters,
+      locations: input.locations,
+      elements: input.elements,
+    })
+  );
+  try {
+    const { prompt: enhancedPrompt, referenceUrls } = buildReferenceImagePrompt(
+      basePrompt,
+      referenceImages
+    );
+    const buildParams = {
+      model: input.model,
+      prompt: enhancedPrompt,
+      imageSize: input.aspectRatio
+        ? aspectRatioToImageSize(input.aspectRatio)
+        : undefined,
+      resolution: input.resolution,
+      numImages: 1,
+      referenceImageUrls: referenceUrls,
+    };
+    if (
+      input.byteplusEnabled &&
+      getBytePlusImageModelId(input.model) !== undefined
+    ) {
+      const { modelId, ...body } = buildBytePlusImageRequest(buildParams);
+      return {
+        modelName: config.name,
+        endpointId: modelId,
+        prompt: enhancedPrompt,
+        json: JSON.stringify(body, null, 2),
+        ...promptLengthFields(enhancedPrompt, config),
+        images: boundPromptImages(
+          referenceUrls,
+          (position) => `Image ${position}`
+        ),
+      };
+    }
+    const request = buildImageRequest(buildParams);
+    const falImageUrls = imageUrlsFromFalInput(request.input);
+    const shownPrompt = promptFromFalInput(request.input, enhancedPrompt);
+    return {
+      modelName: config.name,
+      endpointId: request.endpointId,
+      prompt: shownPrompt,
+      json: JSON.stringify(request.input, null, 2),
+      ...promptLengthFields(shownPrompt, config),
+      images: boundPromptImages(
+        falImageUrls.length > 0 ? falImageUrls : referenceUrls,
+        (position) => `Image ${position}`
+      ),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildMotionPreview(input: {
+  model: ImageToVideoModel;
+  assembledPrompt: string | null;
+  shotDurationMs: number | null;
+  startFrameUrl: string | null;
+  usesStartFrame: boolean;
+  generateAudio: boolean;
+  aspectRatio?: AspectRatio;
+  resolution?: Resolution;
+  referenceImages: ReturnType<typeof buildMotionReferenceImages>;
+  byteplusEnabled: boolean;
+  multiPrompt?: Array<{ prompt: string; duration: string }>;
+}): OptimisedPromptPreview | null {
+  const modelPrompt = input.assembledPrompt;
+  if (!modelPrompt) return null;
+  const config = IMAGE_TO_VIDEO_MODELS[input.model];
+  const duration = resolveShotDuration({
+    explicit: undefined,
+    durationMs: input.shotDurationMs,
+    model: input.model,
+  });
+  const imageUrl = input.usesStartFrame
+    ? absolutizePreviewUrl(input.startFrameUrl ?? '')
+    : undefined;
+  try {
+    if (isNativeGrokVideoModel(input.model)) {
+      const request = buildGrokVideoRequest({
+        prompt: modelPrompt,
+        imageUrl,
+        duration,
+        aspectRatio: input.aspectRatio,
+        referenceImages: input.referenceImages,
+        model: input.model,
+      });
+      const textPart = request.input.prompt.find(
+        (part) => part.type === 'text'
+      );
+      const prompt = textPart?.content ?? modelPrompt;
+      return {
+        modelName: config.name,
+        endpointId: request.endpointId,
+        prompt,
+        json: JSON.stringify(request.input, null, 2),
+        ...promptLengthFields(prompt, config),
+        images: boundPromptImages(
+          imageUrlsFromPromptParts(request.input.prompt),
+          (position) => `<IMAGE_${position - 1}>`
+        ),
+      };
+    }
+    if (
+      input.byteplusEnabled &&
+      getBytePlusVideoModelId(input.model) !== undefined
+    ) {
+      const ark = buildBytePlusVideoRequest(
+        {
+          prompt: modelPrompt,
+          imageUrl,
+          duration,
+          aspectRatio: input.aspectRatio,
+          generateAudio: videoModelSupportsAudio(input.model)
+            ? input.generateAudio
+            : undefined,
+          referenceImages: input.referenceImages,
+          // What a trigger would decide for this prompt (#2036).
+          heldSeedanceEditSeconds: seedanceEditSeconds({
+            model: input.model,
+            onArk: true,
+            prompt: modelPrompt,
+            references: input.referenceImages,
+          }),
+        },
+        input.model
+      );
+      const { modelId, ...body } = ark;
+      const textPart = ark.prompt.find((part) => part.type === 'text');
+      const prompt = textPart?.content ?? modelPrompt;
+      return {
+        modelName: config.name,
+        endpointId: modelId,
+        prompt,
+        json: JSON.stringify(body, null, 2),
+        ...promptLengthFields(prompt, config),
+        images: boundPromptImages(
+          imageUrlsFromPromptParts(ark.prompt),
+          (position) => `@Image${position}`
+        ),
+        videos: boundPromptImages(
+          imageUrlsFromPromptParts(ark.prompt, 'video'),
+          (position) => `@Video${position}`
+        ),
+        audio: boundPromptImages(
+          imageUrlsFromPromptParts(ark.prompt, 'audio'),
+          (position) => `@Audio${position}`
+        ),
+      };
+    }
+    if (isNativeGeminiVideoModel(input.model)) {
+      const request = buildGeminiVideoRequest({
+        prompt: modelPrompt,
+        imageUrl,
+        duration,
+        aspectRatio: input.aspectRatio,
+        referenceImages: input.referenceImages,
+        model: input.model,
+      });
+      const textPart = request.input.prompt.find(
+        (part) => part.type === 'text'
+      );
+      const prompt = textPart?.content ?? modelPrompt;
+      return {
+        modelName: config.name,
+        endpointId: request.endpointId,
+        prompt,
+        json: JSON.stringify(request.input, null, 2),
+        ...promptLengthFields(prompt, config),
+        images: boundPromptImages(
+          imageUrlsFromPromptParts(request.input.prompt),
+          (position) => `<IMAGE_REF_${position - 1}>`
+        ),
+      };
+    }
+    const request = buildMotionRequest(
+      {
+        prompt: modelPrompt,
+        imageUrl,
+        duration,
+        aspectRatio: input.aspectRatio,
+        resolution: input.resolution,
+        generateAudio: videoModelSupportsAudio(input.model)
+          ? input.generateAudio
+          : undefined,
+        referenceImages: input.referenceImages,
+        referenceOnly: !input.usesStartFrame,
+        multiPrompt: input.multiPrompt,
+      },
+      input.model
+    );
+    // Label with the tags of the endpoint the request actually hit: H3 Max
+    // binds `Image 1` / `Audio 1`, Seedance `@Image1` / `@Audio1`. A label
+    // the prompt does not use would make the preview lie about the binding.
+    const refConfig = getMotionReferenceEndpoint(input.model);
+    const onRefEndpoint = refConfig?.endpointId === request.endpointId;
+    const shownPrompt = promptFromFalInput(request.input, modelPrompt);
+    return {
+      modelName: config.name,
+      endpointId: request.endpointId,
+      prompt: shownPrompt,
+      json: JSON.stringify(request.input, null, 2),
+      ...promptLengthFields(shownPrompt, config),
+      images: boundPromptImages(
+        imageUrlsFromFalInput(request.input),
+        onRefEndpoint && refConfig
+          ? refConfig.tag
+          : (position) => `@Image${position}`
+      ),
+      videos: boundPromptImages(
+        falUrlList(request.input, ['video_urls', 'reference_video_urls']),
+        refConfig?.videoTag ?? ((position) => `@Video${position}`)
+      ),
+      audio: boundPromptImages(
+        falUrlList(request.input, ['audio_urls', 'reference_audio_urls']),
+        refConfig?.audioTag ?? ((position) => `@Audio${position}`)
+      ),
+    };
+  } catch {
+    return null;
+  }
+}

@@ -1,0 +1,48 @@
+/**
+ * Shared helper for resolving a stale workflow run via Cloudflare Workflows.
+ *
+ * Used by the cron-driven sweep in `src/platform/server/cron/reconcile-all.ts`, which
+ * is the single source of truth for healing rows stuck in 'generating' /
+ * 'merging' / 'analyzing'. Most failures self-heal — the workflow base class
+ * writes a terminal status on error — so this only catches rows whose
+ * workflow died without persisting its outcome.
+ */
+
+import { readInstanceStatus } from './run-outcome';
+
+export const STALE_THRESHOLD_MS = 5 * 60 * 1000;
+
+/**
+ * Resolve a stale workflow run via its Cloudflare Workflow instance status.
+ *
+ * Returns:
+ *   - 'failed'    when the runId is empty, or doesn't resolve to a known
+ *                 workflow binding (e.g. a legacy QStash run id from before the
+ *                 cutover — the row is already stale, so fail it for retry),
+ *                 the instance no longer exists (`instance.not_found`: it
+ *                 cannot be running), or it reports `errored` / `terminated`.
+ *   - 'completed' when the instance reports `complete`.
+ *   - null        when the instance is genuinely still in flight
+ *                 (queued/running/paused/waiting).
+ *   - 'unknown'   when the status lookup itself threw for any other reason
+ *                 (transient API blip) — we can't say whether a run is live.
+ *                 Errors are logged, not propagated.
+ *
+ * Both `null` and `'unknown'` mean "don't write a terminal status", but
+ * callers that surface state to users (the generation mutex) must not claim
+ * a run is in progress on `'unknown'` — there may be no run at all.
+ * Reconciler passes treat both as "skip and retry next sweep."
+ */
+export async function resolveRunState(
+  runId: string
+): Promise<'failed' | 'completed' | 'unknown' | null> {
+  if (runId === '') return 'failed';
+  const read = await readInstanceStatus(runId);
+  if (read.kind === 'no_binding') return 'failed';
+  if (read.kind === 'unreadable') return 'unknown';
+  if (read.status === 'complete') return 'completed';
+  if (read.status === 'errored' || read.status === 'terminated') {
+    return 'failed';
+  }
+  return null;
+}

@@ -1,0 +1,153 @@
+import { saveZipFile, saveFilesToServer, saveBlobToLocalFile } from './gui-save';
+import { internal, utils, cli, stop, require } from './gui-core';
+import { GUI } from './gui-lib';
+
+// replace default error, stop and message functions
+export function setLoggingForGUI(gui) {
+  function stop() {
+    // Show a popup error message, then throw an error
+    var msg = formatPopupMessage(arguments);
+    gui.alert(msg);
+    throw new internal.UserError(msg);
+  }
+
+  function error() {
+    var msg = GUI.formatMessageArgs(arguments);
+    console.error(msg);
+    gui.alert('An unknown error occured');
+    throw new Error(msg);
+  }
+
+  function message() {
+    var msg = formatPopupMessage(arguments);
+    if (gui.notify && messageShouldGoToInbox(msg)) {
+      gui.notify({
+        severity: 'info',
+        body: msg,
+        dedupKey: 'info:' + msg
+      });
+    } else if (!gui.notify) {
+      // Fallback for early messages before MessageControl is constructed
+      gui.message(msg);
+    } else {
+      internal.logArgs(arguments);
+    }
+  }
+
+  // CLI warnings used to surface as modal alerts, which interrupt the user
+  // and replace any previous popup. They now go to the Messages inbox so
+  // they can accumulate non-disruptively.
+  function warn() {
+    var msg = formatPopupMessage(arguments);
+    if (gui.notify) {
+      gui.notify({severity: 'warn', body: msg, dedupKey: 'warn:' + msg});
+    } else {
+      gui.alert(msg);
+    }
+  }
+
+  internal.setLoggingFunctions(message, error, stop, warn);
+}
+
+// Drops the "[command]" prefix that stop(), message() and warn() add for
+// CLI output; the console keeps it
+export function formatPopupMessage(args) {
+  return GUI.formatMessageArgs(args).replace(/^\[[^\]]+\] /, '');
+}
+
+// The raster importers' notes that a CRS-less raster was taken for lat-long
+// end with "so WGS 84 lat-long is assumed."
+function messageShouldGoToInbox(msg) {
+  return /^GeoTIFF renditions:/.test(msg) || /WGS 84 lat-long is assumed\.$/.test(msg);
+}
+
+export function WriteFilesProxy(gui) {
+  // replace CLI version of writeFiles()
+  internal.replaceWriteFiles(async function(files, opts) {
+    var filename;
+    if (!utils.isArray(files) || files.length === 0) {
+      throw Error("Nothing to export");
+    } else if (GUI.canSaveToServer() && !opts.save_to_download_folder) {
+      var paths = internal.getOutputPaths(utils.pluck(files, 'filename'), opts);
+      var data = utils.pluck(files, 'content');
+      var msg;
+      try {
+        await utils.promisify(saveFilesToServer)(paths, data);
+        if (files.length >= 1) {
+          if (gui.notify) {
+            gui.notify({severity: 'info', title: 'Saved', body: paths.join('\n')});
+          } else {
+            gui.alert('<b>Saved</b><br>' + paths.join('<br>'));
+          }
+        }
+      } catch(err) {
+        msg = "<b>Direct save failed</b><br>Reason: " + err.message + ".";
+        msg += "<br>Saving to download folder instead.";
+        gui.alert(msg);
+        // fall back to standard method if saving to server fails
+        await internal.writeFiles(files, {save_to_download_folder: true});
+      }
+    } else if (files.length == 1) {
+      await utils.promisify(saveBlobToLocalFile)(files[0].filename, new Blob([files[0].content]));
+    } else {
+      filename = internal.getCommonFileBase(utils.pluck(files, 'filename')) || "output";
+      await utils.promisify(saveZipFile)(filename + ".zip", files);
+    }
+  });
+}
+
+// Replaces functions for reading from files with functions that try to match
+// already-loaded datasets.
+//
+export function ImportFileProxy(gui) {
+  var model = gui.model;
+
+  // Try to match an imported dataset or layer.
+  // TODO: think about handling import options
+  function find(src) {
+    var datasets = model.getDatasets();
+    var retn = datasets.reduce(function(memo, d) {
+      var lyr;
+      if (memo) return memo; // already found a match
+      // try to match import filename of this dataset
+      if (d.info?.input_files?.[0] == src) return d;
+      // try to match name of a layer in this dataset
+      lyr = utils.find(d.layers, function(lyr) {return lyr.name == src;});
+      return lyr ? internal.isolateLayer(lyr, d) : null;
+    }, null);
+    if (!retn) stop("Missing data layer [" + src + "]");
+    return retn;
+  }
+
+  internal.replaceImportFile(function(src, opts) {
+    var dataset = find(src);
+    // Browser-side file references resolve to loaded data. Return a full copy
+    // so a command that imports and edits the match cannot mutate the original
+    // dataset through shared layers, tables, arcs or metadata.
+    var copy = internal.copyDataset(dataset);
+    copy.info = internal.copyDatasetInfo(dataset.info || {});
+    delete copy.info.frame; // imported data starts out unframed
+    return copy;
+  });
+}
+
+if (isBrowserProjectionLoaderAvailable()) {
+  internal.setProjectionLoader(loadProjLibs);
+}
+
+// load Proj.4 CRS definition files dynamically
+//
+async function loadProjLibs(opts) {
+  var mproj = require('mproj');
+  var libs = internal.findProjLibs([opts.init || '', opts.match || '', opts.crs || ''].join(' '));
+  libs = libs.filter(function(name) {return !mproj.internal.mproj_search_libcache(name);}); // skip loaded libs
+  for (var libName of libs) {
+    var content = await fetch('assets/' + libName).then(resp => resp.ok ? resp.text() : null);
+    if (!content) stop(`Unable to load projection resource [${libName}]`);
+    mproj.internal.mproj_insert_libcache(libName, content);
+  }
+}
+
+function isBrowserProjectionLoaderAvailable() {
+  return typeof window != 'undefined' && typeof window.fetch == 'function';
+}

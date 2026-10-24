@@ -1,0 +1,38 @@
+/**
+ * Seedance 2.5 / 2.0 reject a public URL or data URI that *may contain a
+ * real person* (`InputImageSensitiveContentDetected.PrivacyInformation`)
+ * before a task is created. Photorealistic **generated** faces trip this
+ * too — "may contain" is a classifier, not a legal finding.
+ *
+ * Advanced Creation Rights do not lift the check on a URL. They unlock the
+ * **virtual** portrait library (AIGC groups). Submit registers the still
+ * via the Assets API (`BYTEPLUS_ACCESS_KEY` / `BYTEPLUS_SECRET_KEY`) and
+ * sends `asset://<id>`. If ingest is not configured, Ark gets the public
+ * URL. A portrait-filter 400 becomes {@link BYTEPLUS_PORTRAIT_FILTER_MESSAGE};
+ * any other Ark error is the failure the user sees — never a quiet hop to
+ * fal. Do not fold this into the content-flag re-roll.
+ */
+
+/** Exact Ark code on the 400 the user sees. */
+const PORTRAIT_FILTER_CODE =
+  'InputImageSensitiveContentDetected.PrivacyInformation';
+
+/** Human half of the same 400, in case a wrapper drops the dotted code. */
+const PORTRAIT_FILTER_MESSAGE = /may contain real person/i;
+
+/**
+ * Thrown when Ark blocks the still. Surfaces on `sequence.statusError` /
+ * studio failure banners, so it is user copy: the raw Ark error rides on
+ * `cause` and in the logs.
+ */
+export const BYTEPLUS_PORTRAIT_FILTER_MESSAGE =
+  'Seedance blocked an image that may show a real person. Swap or regenerate it.';
+
+/** True when Ark refused the still as a possible real person. */
+export function isBytePlusPortraitFilterError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes(PORTRAIT_FILTER_CODE) ||
+    PORTRAIT_FILTER_MESSAGE.test(message)
+  );
+}

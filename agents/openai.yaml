@@ -1,0 +1,5 @@
+interface:
+  display_name: "jianji-zhushou 3.2 · Remotion"
+  short_description: "文案驱动分镜与高级视觉，用Remotion统一制作，按需调用动效与提示词参考"
+  brand_color: "#E8734A"
+  default_prompt: "使用 $jianji-zhushou，根据我的文案和素材设计鲜明的视觉风格与连贯动效，按本次要求完成计划或成片。"

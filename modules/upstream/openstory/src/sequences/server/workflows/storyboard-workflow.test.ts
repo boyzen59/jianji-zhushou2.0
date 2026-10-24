@@ -1,0 +1,556 @@
+/**
+ * Tests for `StoryboardWorkflow.onFailure` (#839).
+ *
+ * The June 6 incident: an earlier log-only onFailure left ~20 sequences
+ * stranded in 'processing' when await-analyze-script timed out. These tests
+ * pin the rewritten hook's three branches:
+ *
+ *   1. Normal failure → sequence marked 'failed' with the error message and
+ *      'generation.failed' emitted (failure summary + retry UI, not an
+ *      eternal spinner).
+ *   2. The analyze-script child already marked the sequence failed → no
+ *      write, no emit — the child's specific message ("Your OpenRouter API
+ *      key is invalid…") must not be clobbered by the parent's generic
+ *      wrapper ("Child workflow analyze-script… failed").
+ *   3. Payload without a sequenceId → no DB access at all.
+ */
+
+import { migrateStyleConfigV1ToV2 } from '@/look/style-config';
+import { describe, expect, test, vi } from 'vitest';
+import { DEFAULT_IMAGE_MODEL, DEFAULT_VIDEO_MODEL } from '@/models/models';
+import { DEFAULT_ANALYSIS_MODEL } from '@/models/models.config';
+import type { WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
+import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
+import type { StoryboardWorkflowInput } from '@/platform/server/workflow/types';
+import { WorkflowLoggedError } from '@/platform/server/workflow/errors';
+import { asStub } from '@/test/as-stub';
+
+vi.doMock('@/platform/server/db/scoped', () => ({
+  createScopedDb: vi.fn(),
+}));
+vi.doMock('@/models/server/fal-config', () => ({
+  configureFalProxyFromEnv: vi.fn(),
+}));
+vi.doMock('@/stills/server/image-generation', () => ({
+  generateImageWithProvider: vi.fn(),
+}));
+
+const emit = vi.fn();
+const getGenerationChannel = vi.fn(() => ({ emit }));
+vi.doMock('@/platform/realtime', () => ({ getGenerationChannel }));
+
+const spawnAndAwaitChild = vi.fn(async () => undefined);
+vi.doMock('@/platform/server/workflow/await-child', () => ({
+  spawnAndAwaitChild,
+}));
+
+const notifySequenceReady = vi.fn(async () => 'sent');
+vi.doMock('@/sequences/server/notify-sequence-ready', () => ({
+  notifySequenceReady,
+  sequenceScenesUrl: (id: string) =>
+    `https://openstory.so/sequences/${id}/scenes`,
+}));
+
+const freezeFreshGenerationPlan = vi.fn(async () => ({
+  plan: { targets: [], references: null, music: null },
+  remainingCost: 0,
+}));
+vi.doMock('@/sequences/server/freeze-fresh-generation-plan', () => ({
+  freezeFreshGenerationPlan,
+}));
+const gateStoryboardRenders = vi.fn(
+  async (): Promise<{
+    spawnRenders: boolean;
+    neededMicros: number;
+    remainingMicros: number;
+  }> => ({ spawnRenders: true, neededMicros: 0, remainingMicros: 0 })
+);
+vi.doMock('@/billing/server/storyboard-render-gate', () => ({
+  gateStoryboardRenders,
+}));
+
+// Dynamic import so the mocks above apply (vi.doMock is not hoisted).
+const { StoryboardWorkflow } = await import('./storyboard-workflow');
+
+/** Widens the protected hook so tests can invoke it directly. */
+class TestableStoryboardWorkflow extends StoryboardWorkflow {
+  invokeOnFailure(failure: {
+    event: Readonly<WorkflowEvent<StoryboardWorkflowInput>>;
+    error: string;
+    scopedDb: WorkflowScopedDb;
+  }): Promise<void> {
+    return this.onFailure(failure);
+  }
+
+  invokeRunImpl(
+    event: Readonly<WorkflowEvent<StoryboardWorkflowInput>>,
+    step: WorkflowStep,
+    scopedDb: WorkflowScopedDb
+  ): Promise<void> {
+    return this.runImpl(event, step, scopedDb);
+  }
+}
+
+function makeWorkflow(): TestableStoryboardWorkflow {
+  type Ctor = ConstructorParameters<typeof TestableStoryboardWorkflow>;
+  // tests construct the entrypoint directly; onFailure never reads ctx
+  const ctx = asStub<Ctor[0]>(undefined);
+  // minimal env stub; onFailure never reads bindings
+  const env = asStub<Ctor[1]>({});
+  return new TestableStoryboardWorkflow(ctx, env);
+}
+
+function makeEvent(
+  sequenceId: string | undefined,
+  extras: Partial<
+    Pick<
+      StoryboardWorkflowInput,
+      'notify' | 'stopAt' | 'resume' | 'userCountry' | 'plan'
+    >
+  > = {}
+): Readonly<WorkflowEvent<StoryboardWorkflowInput>> {
+  const payload: StoryboardWorkflowInput = {
+    userId: 'u1',
+    teamId: 't1',
+    includeMusic: true,
+    sequenceId,
+    title: 'The Long Walk',
+    script: 'INT. HALLWAY — NIGHT',
+    aspectRatio: '16:9',
+    stopAt: 'music',
+    musicPromptSource: 'ai-generated',
+    styleConfig: migrateStyleConfigV1ToV2({
+      mood: 'tense and hopeful',
+      artStyle: 'photoreal cinematic',
+      lighting: 'hard key, deep shadows',
+      colorPalette: ['#101020', '#e0d0b0'],
+      cameraWork: 'handheld, tight lenses',
+      referenceFilms: ['Children of Men'],
+      colorGrading: 'cool shadows, warm highlights',
+    }),
+    analysisModelId: DEFAULT_ANALYSIS_MODEL,
+    imageModel: DEFAULT_IMAGE_MODEL,
+    videoModel: DEFAULT_VIDEO_MODEL,
+    elementIds: [],
+    cast: [],
+    referenceOnly: false,
+    ownerEmail: 'owner@example.com',
+    sequenceUrl: 'https://openstory.so/sequences/seq_1/scenes',
+    ...extras,
+    options: {
+      shotsPerScene: 3,
+      generateThumbnails: true,
+      generateDescriptions: true,
+      aiProvider: 'openrouter',
+      regenerateAll: true,
+    },
+  };
+  // minimal WorkflowEvent stub: onFailure only reads payload
+  return {
+    payload,
+    instanceId: 'storyboard_run_A',
+    workflowName: 'storyboard',
+    timestamp: new Date(0),
+  };
+}
+
+function makeScopedDb(status: 'processing' | 'failed' | 'completed') {
+  const updateStatus = vi.fn();
+  const getForUser = vi.fn(async () => ({ id: 'seq_1', status }));
+  const stub = {
+    // The existence guard is a sanctioned live read (#1067).
+    liveRead: { sequences: { getForUser } },
+    sequence: vi.fn(() => ({ updateStatus })),
+  };
+  // minimal WorkflowScopedDb stub exposing only what onFailure touches
+  const scopedDb = asStub<WorkflowScopedDb>(stub);
+  return { scopedDb, updateStatus, getForUser };
+}
+
+describe('StoryboardWorkflow.onFailure', () => {
+  test('marks the sequence failed and emits generation.failed', async () => {
+    emit.mockReset();
+    getGenerationChannel.mockClear();
+    const { scopedDb, updateStatus } = makeScopedDb('processing');
+
+    await makeWorkflow().invokeOnFailure({
+      event: makeEvent('seq_1'),
+      error: 'Child workflow analyze-script timed out',
+      scopedDb,
+    });
+
+    expect(updateStatus).toHaveBeenCalledWith(
+      'failed',
+      'Child workflow analyze-script timed out'
+    );
+    expect(getGenerationChannel).toHaveBeenCalledWith('seq_1');
+    expect(emit).toHaveBeenCalledWith('generation.failed', {
+      message: 'Child workflow analyze-script timed out',
+    });
+  });
+
+  test('child already marked the sequence failed → no write, no emit', async () => {
+    emit.mockReset();
+    const { scopedDb, updateStatus } = makeScopedDb('failed');
+
+    await makeWorkflow().invokeOnFailure({
+      event: makeEvent('seq_1'),
+      error: 'Child workflow analyze-script… failed',
+      scopedDb,
+    });
+
+    expect(updateStatus).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  test('missing sequenceId → no DB access', async () => {
+    emit.mockReset();
+    const { scopedDb, updateStatus, getForUser } = makeScopedDb('processing');
+
+    await makeWorkflow().invokeOnFailure({
+      event: makeEvent(undefined),
+      error: 'boom',
+      scopedDb,
+    });
+
+    expect(getForUser).not.toHaveBeenCalled();
+    expect(updateStatus).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  test('completed sequence is not un-completed if a trailing step fails', async () => {
+    emit.mockReset();
+    const { scopedDb, updateStatus } = makeScopedDb('completed');
+
+    await makeWorkflow().invokeOnFailure({
+      event: makeEvent('seq_1'),
+      error: 'email-ready failed',
+      scopedDb,
+    });
+
+    expect(updateStatus).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+  });
+});
+
+function makeStep() {
+  const names: string[] = [];
+  // minimal WorkflowStep stub: runImpl only uses `do`
+  const step = asStub<WorkflowStep>({
+    do: vi.fn((_name: string, fn: () => Promise<unknown>) => {
+      names.push(_name);
+      return fn();
+    }),
+  });
+  return { step, names };
+}
+
+function makeRunImplDb() {
+  const updateStatus = vi.fn();
+  const deleteBySequence = vi.fn();
+  const getForUser = vi.fn(async () => ({ id: 'seq_1', status: 'processing' }));
+  const update = vi.fn();
+  const stub = {
+    liveRead: { sequences: { getForUser } },
+    sequence: vi.fn(() => ({ updateStatus })),
+    shots: { deleteBySequence },
+    credentials: {},
+    sequences: { update },
+  };
+  // stub covering only the runImpl surface
+  const scopedDb = asStub<WorkflowScopedDb>(stub);
+  return { scopedDb, updateStatus, deleteBySequence, update };
+}
+
+describe('StoryboardWorkflow email-ready', () => {
+  test('runs the email-ready step after emit-complete', async () => {
+    notifySequenceReady.mockReset();
+    notifySequenceReady.mockResolvedValue('sent');
+    spawnAndAwaitChild.mockReset();
+    spawnAndAwaitChild.mockResolvedValue(undefined);
+    emit.mockReset();
+
+    const { scopedDb, updateStatus } = makeRunImplDb();
+    const { step, names } = makeStep();
+
+    await makeWorkflow().invokeRunImpl(makeEvent('seq_1'), step, scopedDb);
+
+    expect(names).toEqual(
+      expect.arrayContaining(['mark-completed', 'emit-complete', 'email-ready'])
+    );
+    expect(names.indexOf('emit-complete')).toBeGreaterThan(
+      names.indexOf('mark-completed')
+    );
+    expect(names.indexOf('email-ready')).toBeGreaterThan(
+      names.indexOf('emit-complete')
+    );
+    expect(updateStatus).toHaveBeenCalledWith(
+      'completed',
+      null,
+      expect.objectContaining({
+        kind: 'storyboard.completed',
+        summary: 'Finished the storyboard',
+        id: expect.any(String),
+      })
+    );
+    expect(notifySequenceReady).toHaveBeenCalledTimes(1);
+    expect(notifySequenceReady).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sequenceId: 'seq_1',
+        ownerEmail: 'owner@example.com',
+        userId: 'u1',
+      })
+    );
+  });
+
+  test('notify: false still runs the step; helper skips the send', async () => {
+    notifySequenceReady.mockReset();
+    notifySequenceReady.mockResolvedValue('skipped');
+    spawnAndAwaitChild.mockReset();
+    spawnAndAwaitChild.mockResolvedValue(undefined);
+
+    const { scopedDb } = makeRunImplDb();
+    const { step, names } = makeStep();
+
+    await makeWorkflow().invokeRunImpl(
+      makeEvent('seq_1', { notify: false }),
+      step,
+      scopedDb
+    );
+
+    expect(names).toContain('email-ready');
+    expect(notifySequenceReady).toHaveBeenCalledWith(
+      expect.objectContaining({ notify: false })
+    );
+  });
+
+  test('a ready-email failure leaves the storyboard completed', async () => {
+    notifySequenceReady.mockReset();
+    notifySequenceReady.mockRejectedValue(new Error('smtp down'));
+    spawnAndAwaitChild.mockReset();
+    spawnAndAwaitChild.mockResolvedValue(undefined);
+    const { scopedDb, updateStatus } = makeRunImplDb();
+
+    await expect(
+      makeWorkflow().invokeRunImpl(
+        makeEvent('seq_1'),
+        makeStep().step,
+        scopedDb
+      )
+    ).resolves.toBeUndefined();
+
+    expect(updateStatus).toHaveBeenCalledWith(
+      'completed',
+      null,
+      expect.objectContaining({ kind: 'storyboard.completed' })
+    );
+    expect(updateStatus).not.toHaveBeenCalledWith(
+      'failed',
+      expect.anything(),
+      expect.anything()
+    );
+  });
+
+  test('an engine abort during the ready email still aborts', async () => {
+    notifySequenceReady.mockReset();
+    notifySequenceReady.mockRejectedValue(
+      new Error('Aborting engine: Grace period complete')
+    );
+    spawnAndAwaitChild.mockReset();
+    spawnAndAwaitChild.mockResolvedValue(undefined);
+    const { scopedDb } = makeRunImplDb();
+
+    await expect(
+      makeWorkflow().invokeRunImpl(
+        makeEvent('seq_1'),
+        makeStep().step,
+        scopedDb
+      )
+    ).rejects.toThrow('Aborting engine: Grace period complete');
+  });
+});
+
+describe('StoryboardWorkflow stop-at + resume (#1408)', () => {
+  const run = async (
+    extras: Parameters<typeof makeEvent>[1],
+    childResult: unknown = { failures: [] }
+  ) => {
+    notifySequenceReady.mockReset();
+    notifySequenceReady.mockResolvedValue('sent');
+    spawnAndAwaitChild.mockReset();
+    // the mock's inferred return is undefined
+    spawnAndAwaitChild.mockResolvedValue(asStub<undefined>(childResult));
+    const db = makeRunImplDb();
+    const { step, names } = makeStep();
+    await makeWorkflow().invokeRunImpl(
+      makeEvent('seq_1', extras),
+      step,
+      db.scopedDb
+    );
+    return { ...db, names };
+  };
+
+  test('a fresh run wipes shots', async () => {
+    const { deleteBySequence, update, names } = await run({ stopAt: 'music' });
+
+    expect(deleteBySequence).toHaveBeenCalledWith('seq_1');
+    expect(update).toHaveBeenCalledWith({
+      id: 'seq_1',
+      generationStopAt: 'music',
+    });
+    expect(names).toContain('generate-poster');
+  });
+
+  test('passes the captured user country to script analysis', async () => {
+    await run({ stopAt: 'script', userCountry: 'AU' });
+
+    expect(spawnAndAwaitChild).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        spawnStepName: 'spawn-analyze-script',
+        childPayload: expect.objectContaining({ userCountry: 'AU' }),
+      })
+    );
+  });
+
+  test('a resume keeps shots and poster', async () => {
+    const { deleteBySequence, update, names } = await run({
+      stopAt: 'images',
+      resume: true,
+    });
+
+    expect(deleteBySequence).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledWith({
+      id: 'seq_1',
+      generationStopAt: 'images',
+    });
+    expect(names).not.toContain('generate-poster');
+  });
+
+  test('fresh analysis hands its frozen plan to the same executor as a continue', async () => {
+    const freshPlan = {
+      targets: [{ shotId: 'new-shot' }],
+      references: null,
+      music: null,
+    };
+    freezeFreshGenerationPlan.mockResolvedValueOnce({
+      // only forwarding is tested here
+      plan: asStub<never>(freshPlan),
+      remainingCost: 0,
+    });
+    await run({ stopAt: 'motion' });
+    const freshCalls = spawnAndAwaitChild.mock.calls;
+    expect(freshCalls).toHaveLength(2);
+    expect(spawnAndAwaitChild).toHaveBeenNthCalledWith(
+      2,
+      expect.anything(),
+      expect.objectContaining({
+        spawnStepName: 'spawn-continue',
+        childPayload: expect.objectContaining({
+          plan: freshPlan,
+          announcePhases: true,
+          freshRun: true,
+        }),
+      })
+    );
+    // only forwarding is tested here
+    await run({
+      stopAt: 'motion',
+      resume: true,
+      plan: asStub<never>(freshPlan),
+    });
+    expect(spawnAndAwaitChild).toHaveBeenCalledTimes(1);
+    expect(spawnAndAwaitChild).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        spawnStepName: 'spawn-continue',
+        childPayload: expect.objectContaining({
+          plan: freshPlan,
+          announcePhases: true,
+          freshRun: false,
+        }),
+      })
+    );
+  });
+
+  test('a continue runs the plan through the unit executor, not the script run (#1818)', async () => {
+    // the wrapper only forwards it
+    const plan = asStub<NonNullable<StoryboardWorkflowInput['plan']>>({
+      targets: [],
+    });
+    await run({ stopAt: 'music', resume: true, plan });
+
+    expect(spawnAndAwaitChild).toHaveBeenCalledTimes(1);
+    expect(spawnAndAwaitChild).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        spawnStepName: 'spawn-continue',
+        childPayload: expect.objectContaining({ plan, announcePhases: true }),
+      })
+    );
+  });
+
+  test('a failed unit stays on the unit: the sequence completes and sends no ready email (#2104)', async () => {
+    // the wrapper only forwards it
+    const plan = asStub<NonNullable<StoryboardWorkflowInput['plan']>>({
+      targets: [],
+    });
+    const { updateStatus, names } = await run(
+      { stopAt: 'motion', resume: true, plan },
+      {
+        failures: [
+          { shotId: 'shot_1', stage: 'video', error: 'Insufficient credits' },
+        ],
+      }
+    );
+
+    expect(updateStatus).toHaveBeenCalledWith(
+      'completed',
+      null,
+      expect.objectContaining({ kind: 'storyboard.completed' })
+    );
+    expect(updateStatus).not.toHaveBeenCalledWith(
+      'failed',
+      expect.anything(),
+      expect.anything()
+    );
+    expect(names).toContain('emit-complete');
+    expect(names).not.toContain('email-ready');
+  });
+
+  test('an early stop completes without spending the ready email', async () => {
+    const { updateStatus, names } = await run({ stopAt: 'script' });
+
+    expect(updateStatus).toHaveBeenCalledWith(
+      'completed',
+      null,
+      expect.objectContaining({ kind: 'storyboard.completed' })
+    );
+    expect(names).toContain('emit-complete');
+    expect(names).not.toContain('email-ready');
+    expect(notifySequenceReady).not.toHaveBeenCalled();
+  });
+
+  test('a credits shortfall keeps the top-up sentence off the generic failure line', async () => {
+    gateStoryboardRenders.mockResolvedValueOnce({
+      spawnRenders: false,
+      neededMicros: 5_000_000,
+      remainingMicros: 0,
+    });
+    emit.mockReset();
+    const { scopedDb, updateStatus } = makeRunImplDb();
+    const { step, names } = makeStep();
+
+    await expect(
+      makeWorkflow().invokeRunImpl(makeEvent('seq_1'), step, scopedDb)
+    ).rejects.toBeInstanceOf(WorkflowLoggedError);
+
+    expect(updateStatus).toHaveBeenCalledWith(
+      'failed',
+      expect.stringMatching(/not enough credits to generate/i)
+    );
+    expect(names).toContain('emit-reservation-short');
+    expect(names).not.toContain('mark-completed');
+    expect(names).not.toContain('email-ready');
+  });
+});

@@ -1,0 +1,228 @@
+import { importDbfTable } from '../shapefile/dbf-import';
+import { importShp } from '../shapefile/shp-import';
+import { guessInputType } from '../io/mapshaper-file-types';
+import { importDelim2 } from '../text/mapshaper-delim-import';
+import { cleanPathsAfterImport } from '../paths/mapshaper-path-import';
+import utils from '../utils/mapshaper-utils';
+import { importJSON } from '../io/mapshaper-json-import';
+import { importKML } from '../kml/kml-import';
+import { buildTopology } from '../topology/mapshaper-topology';
+import { message, stop, error } from '../utils/mapshaper-logging';
+import { getFileBase, parseLocalPath } from '../utils/mapshaper-filename-utils';
+import { importFlatgeobuf } from '../flatgeobuf/mapshaper-flatgeobuf';
+import { importGeoPackage } from '../geopackage/mapshaper-geopackage-import';
+import { importGeoParquet } from '../geoparquet/mapshaper-geoparquet-import';
+import { auxCrsIsWkt, parseAuxCrsString } from '../geotiff/mapshaper-geotiff-aux';
+import { importGeoTIFF } from '../geotiff/mapshaper-geotiff-import';
+import { importImageRaster } from '../rasters/mapshaper-image-import';
+import { importSVG } from '../svg/mapshaper-svg-import';
+
+// Parse content of one or more input files and return a dataset
+// @obj: file data, indexed by file type
+// File data objects have two properties:
+//    content: Uint8Array, Buffer, ArrayBuffer, String or Object
+//    filename: String or null
+//
+export function importContent(obj, opts) {
+  var dataset, content, dataFmt, data;
+  opts = opts || {};
+  if (obj.json) {
+    data = importJSON(obj.json, opts);
+    dataFmt = data.format;
+    dataset = data.dataset;
+    cleanPathsAfterImport(dataset, opts);
+
+  } else if (obj.text) {
+    dataFmt = 'dsv';
+    data = obj.text;
+    dataset = importDelim2(data, opts);
+
+  } else if (obj.shp) {
+    dataFmt = 'shapefile';
+    data = obj.shp;
+    dataset = importShapefile(obj, opts);
+    cleanPathsAfterImport(dataset, opts);
+
+  } else if (obj.dbf) {
+    dataFmt = 'dbf';
+    data = obj.dbf;
+    dataset = importDbf(obj, opts);
+
+  } else if (obj.prj) {
+    // added for -proj command source
+    dataFmt = 'prj';
+    data = obj.prj;
+    dataset = {layers: [], info: {wkt1: data.content}};
+
+  } else if (obj.aux) {
+    // A sidecar on its own carries nothing but a CRS, which is still worth
+    // reading: it can be the source of a -proj command, and importing the
+    // raster it belongs to picks it up anyway.
+    dataFmt = 'aux';
+    data = obj.aux;
+    dataset = {layers: [], info: getAuxCrsInfo(data.content)};
+
+  } else if (obj.kml) {
+    dataFmt = 'kml';
+    data = obj.kml;
+    dataset = importKML(data.content, opts);
+
+  } else if (obj.svg) {
+    dataFmt = 'svg';
+    data = obj.svg;
+    dataset = importSVG(data.content, opts);
+
+  } else if (obj.fgb) {
+    stop("FlatGeobuf import requires async import path");
+  } else if (obj.gpkg) {
+    stop("GeoPackage import requires async import path");
+  } else if (obj.parquet) {
+    stop("GeoParquet import requires async import path");
+  } else if (obj.geotiff) {
+    stop("GeoTIFF import requires async import path");
+  } else if (obj.png || obj.jpeg) {
+    stop("Image raster import requires async import path");
+  }
+
+  return finalizeImportedDataset(dataset, dataFmt, data, opts);
+}
+
+// Canonical content import interface. Always resolves to an array because some
+// formats (notably GeoPackage) may contain datasets that cannot be merged.
+export async function importDatasetsFromContent(obj, opts) {
+  var dataset, dataFmt, data;
+  opts = opts || {};
+  if (obj.fgb) {
+    dataFmt = 'flatgeobuf';
+    data = obj.fgb;
+    dataset = await importFlatgeobuf(data.content, opts);
+  } else if (obj.gpkg) {
+    dataFmt = 'geopackage';
+    data = obj.gpkg;
+    dataset = await importGeoPackage(data, opts);
+  } else if (obj.parquet) {
+    dataFmt = 'geoparquet';
+    data = obj.parquet;
+    dataset = await importGeoParquet(data, opts);
+  } else if (obj.geotiff) {
+    dataFmt = 'geotiff';
+    data = obj.geotiff;
+    dataset = await importGeoTIFF(data, opts, obj.aux);
+  } else if (obj.png || obj.jpeg) {
+    dataFmt = obj.png ? 'png' : 'jpeg';
+    data = obj[dataFmt];
+    dataset = await importImageRaster(obj, opts);
+  } else {
+    return normalizeImportedDatasets(importContent(obj, opts));
+  }
+  return normalizeImportedDatasets(dataset).map(function(ds) {
+    return finalizeImportedDataset(ds, dataFmt, data, opts);
+  });
+}
+
+// Compatibility facade for callers that expect one dataset when possible.
+export async function importContentAsync(obj, opts) {
+  return denormalizeImportedDatasets(await importDatasetsFromContent(obj, opts));
+}
+
+// Deprecated (included for compatibility with older tests)
+export function importFileContent(content, filename, opts) {
+  var type = guessInputType(filename, content),
+      input = {};
+  input[type] = {filename: filename, content: content};
+  return importContent(input, opts);
+}
+
+function normalizeImportedDatasets(datasetOrArray) {
+  return Array.isArray(datasetOrArray) ? datasetOrArray : [datasetOrArray];
+}
+
+function denormalizeImportedDatasets(datasets) {
+  return datasets.length == 1 ? datasets[0] : datasets;
+}
+
+
+function importShapefile(obj, opts) {
+  var shpSrc = obj.shp.content || obj.shp.filename, // read from a file if (binary) content is missing
+      shxSrc = obj.shx ? obj.shx.content || obj.shx.filename : null,
+      dataset = importShp(shpSrc, shxSrc, opts),
+      lyr = dataset.layers[0],
+      dbf;
+  if (obj.dbf) {
+    dbf = importDbf(obj, opts);
+    utils.extend(dataset.info, dbf.info);
+    lyr.data = dbf.layers[0].data;
+    if (lyr.shapes && lyr.data.size() != lyr.shapes.length) {
+      message("Mismatched .dbf and .shp record count -- possible data loss.");
+    }
+  }
+  if (obj.prj) {
+    dataset.info.wkt1 = obj.prj.content;
+  }
+  if (obj.cpg) {
+    // TODO: consider using the input encoding as the default output encoding
+    dataset.info.cpg = obj.cpg.content;
+    if (typeof dataset.info.cpg != 'string') {
+      error('Invalid encoding argument, expected a string');
+    }
+  }
+  return dataset;
+}
+
+// What a raster sidecar amounts to on its own: a projection, stated where the
+// contents of a .prj file would go if it is WKT, as a CRS string otherwise.
+function getAuxCrsInfo(content) {
+  var srs = parseAuxCrsString(content);
+  if (!srs) return {};
+  return auxCrsIsWkt(srs) ? {wkt1: srs} : {crs_string: srs};
+}
+
+function importDbf(input, opts) {
+  var table;
+  opts = utils.extend({}, opts);
+  if (input.cpg && !opts.encoding) {
+    opts.encoding = input.cpg.content;
+  }
+  table = importDbfTable(input.dbf.content || input.dbf.filename, opts);
+  return {
+    info: {},
+    layers: [{data: table}]
+  };
+}
+
+function filenameToLayerName(path) {
+  var name = 'layer1';
+  var obj = parseLocalPath(path);
+  if (obj.basename && obj.extension) { // exclude paths like '/dev/stdin'
+    name = obj.basename;
+  }
+  return name;
+}
+
+function finalizeImportedDataset(dataset, dataFmt, data, opts) {
+  if (!dataset) {
+    stop("Missing an expected input type");
+  }
+
+  // Convert to topological format, if needed
+  if (dataset.arcs && !opts.no_topology && dataFmt != 'topojson') {
+    buildTopology(dataset);
+  }
+
+  // Use file basename for layer name, except TopoJSON, which uses object names
+  if (dataFmt != 'topojson') {
+    dataset.layers.forEach(function(lyr) {
+      if (!lyr.name) {
+        lyr.name = filenameToLayerName(data.filename || '');
+      }
+    });
+  }
+
+  // Add input filename and format to the dataset's 'info' object
+  // (this is useful when exporting if format or name has not been specified.)
+  if (data.filename) {
+    dataset.info.input_files = [data.filename];
+  }
+  dataset.info.input_formats = [dataFmt];
+  return dataset;
+}

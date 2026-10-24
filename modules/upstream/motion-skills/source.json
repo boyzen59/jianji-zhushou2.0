@@ -1,0 +1,36 @@
+{
+  "id": "motion-skills",
+  "url": "https://github.com/iart-ai/motion-skills.git",
+  "revision": "bb5a3ce666110855a3437de2f70e9968c408e005",
+  "checked_at": "2026-10-24T03:16:04.503978+00:00",
+  "package_complete": true,
+  "scope": "Complete selected Git package except video files, generated dependencies, private env files and excluded runtime directories.",
+  "files": {
+    "LICENSE": "b6eaaaefcb0592110ab8116392e0cf417ad1f47beaf5e2f1d19f349adfb24ac9",
+    "README.md": "a281d23d2497859216bbb66a3c2aae886f4974cefa1f558e72b35e56b8742c2f",
+    "showcase.gif": "9c2ae57c8682acab0076a642682c1a5520d3126fc08b8ab45bf29e76b05a18da",
+    "showcase.html": "ae7f2c86e8a85eb33fc12599badfd616183f0cdafdecd6c3044c9be09e61b666",
+    "tools/showcase-to-gif.mjs": "0bfc1042850ba1a3ced633b76f6d15ddb470746fba44a0dc4883c5183a60e032",
+    "tools/verify/README.md": "34a4ff952b3b01d0d3445bbc9f5a3eca7b4daeac58712df582e5bd4e4739ecd6",
+    "tools/verify/contact-sheet.sh": "0094dcc21346da26cbd81776c1cfe2ec1e351f7ba7cfb28b73a9125d9923bf6a",
+    "tools/verify/probe-mp4.sh": "8a8df35130e9158ce517e49a32f1d18cd57bc0b047bd1402849e28e6facafd49",
+    "tools/verify/seek-shot.sh": "6c4fe0ba9349e518ed9eb274e0311d27a38f8c872f7b97be4f6cc786eef7ecff"
+  },
+  "upstream_files": {
+    "LICENSE": "b6eaaaefcb0592110ab8116392e0cf417ad1f47beaf5e2f1d19f349adfb24ac9",
+    "README.md": "a281d23d2497859216bbb66a3c2aae886f4974cefa1f558e72b35e56b8742c2f",
+    "showcase.gif": "9c2ae57c8682acab0076a642682c1a5520d3126fc08b8ab45bf29e76b05a18da",
+    "showcase.html": "ae7f2c86e8a85eb33fc12599badfd616183f0cdafdecd6c3044c9be09e61b666",
+    "tools/showcase-to-gif.mjs": "0bfc1042850ba1a3ced633b76f6d15ddb470746fba44a0dc4883c5183a60e032",
+    "tools/verify/README.md": "34a4ff952b3b01d0d3445bbc9f5a3eca7b4daeac58712df582e5bd4e4739ecd6",
+    "tools/verify/contact-sheet.sh": "0094dcc21346da26cbd81776c1cfe2ec1e351f7ba7cfb28b73a9125d9923bf6a",
+    "tools/verify/probe-mp4.sh": "8a8df35130e9158ce517e49a32f1d18cd57bc0b047bd1402849e28e6facafd49",
+    "tools/verify/seek-shot.sh": "6c4fe0ba9349e518ed9eb274e0311d27a38f8c872f7b97be4f6cc786eef7ecff"
+  },
+  "omitted_paths": [],
+  "missing_paths": [],
+  "git_submodules": [],
+  "git_lfs_assets": [],
+  "local_edits_retained": [],
+  "retired_paths_archived": []
+}

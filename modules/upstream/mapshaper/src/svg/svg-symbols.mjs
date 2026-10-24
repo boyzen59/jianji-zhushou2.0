@@ -1,0 +1,325 @@
+// convert data records (properties like svg-symbol, label-text, fill, r) to svg symbols
+//
+import { importLineString, importMultiLineString, importPolygon } from '../svg/svg-geom-primitives';
+import { featureHasSvgSymbol, featureHasLabel } from '../svg/svg-feature-utils';
+import { renderStyledLabel } from './svg-labels';
+import { labelHasCallout, renderLabelCallout } from './svg-label-callout';
+import { labelHasBackground } from './svg-label-box';
+import { renderLabelBackground } from './svg-label-background';
+import utils from '../utils/mapshaper-utils';
+import { applyStyleAttributes, isSvgNumber } from '../svg/svg-properties';
+import { message } from '../utils/mapshaper-logging';
+import { roundToTenths } from '../geom/mapshaper-rounding';
+import { getIconSymbol, getIconRadius, getIconStarCoords, getIconPaint,
+  RING_STROKE_WIDTH } from '../symbols/mapshaper-icon-symbols';
+
+export { getIconRadius, RING_STROKE_WIDTH };
+
+export function getTransform(xy, scale) {
+  var str = 'translate(' + roundToTenths(xy[0]) + ' ' + roundToTenths(xy[1]) + ')';
+  if (scale && scale != 1) {
+    str += ' scale(' + scale + ')';
+  }
+  return str;
+}
+
+export var symbolRenderers = {
+  line: line,
+  polygon: polygon,
+  polyline: polyline,
+  circle: circle,
+  square: square,
+  image: image,
+  group: group,
+  label: label,
+  offset: offset
+};
+
+// render label and/or point symbol
+// opts.omit_label_text: leave out the label's text and background, which HTML
+//   output can draw as HTML; its callout and icon are still drawn
+export function renderPoint(rec, opts) {
+  var children = [];
+  var omitLabel = !!(opts && opts.omit_label_text);
+  var callout, background;
+  // var halfSize = rec.r || 0; // radius or half of symbol size
+  // Under the callout, which would lose half its width where it runs along
+  // the box's edge, and under the symbol, which a centred label's box would
+  // otherwise hide.
+  if (featureHasLabel(rec) && labelHasBackground(rec) && !omitLabel) {
+    background = renderLabelBackground(rec);
+    if (background) children.push(background);
+  }
+  // Beneath the symbol and the text, which it runs between.
+  if (featureHasLabel(rec) && labelHasCallout(rec)) {
+    callout = renderLabelCallout(rec, getAnchorSymbolRadius(rec));
+    if (callout) children.push(callout);
+  }
+  if (featureHasSvgSymbol(rec)) {
+    children.push(renderSymbol(rec));
+  }
+  if (featureHasLabel(rec) && !omitLabel) {
+    children.push(renderStyledLabel(rec));
+  }
+  var o = children.length > 1 ? {tag: 'g', children: children} : children[0];
+  if (!o) return null;
+  o.properties = o.properties || {};
+  return o;
+}
+
+function renderSymbol(d) {
+  if (d['svg-symbol']) {
+    return renderComplexSymbol(d['svg-symbol']);
+  }
+  if (featureHasIcon(d)) {
+    return renderIcon(d);
+  }
+  if (d.r > 0) {
+    return circle(d);
+  }
+  return empty();
+}
+
+// How far the symbol at a label's anchor reaches from it, which a callout's
+// default gap clears. A composite svg-symbol has no single radius, and gets no
+// clearance.
+export function getAnchorSymbolRadius(d) {
+  if (!featureHasSvgSymbol(d) || d['svg-symbol']) return 0;
+  if (featureHasIcon(d)) return getIconRadius(d, d.icon || 'circle');
+  return d.r > 0 ? d.r : 0;
+}
+
+export function featureHasIcon(d) {
+  return !!(d && (d.icon || d['icon-size'] ||
+    (d.r > 0 && (d['icon-color'] || d['icon-fill'] || d['icon-stroke']))));
+}
+
+// An unsupported icon name renders as nothing, without a message -- this
+// function runs once per feature per render, so warning here would repeat the
+// same message for every feature (and on every redraw in the GUI). The -style
+// command warns about unsupported names when they are assigned instead.
+function renderIcon(d) {
+  var type = d.icon || 'circle';
+  var sym = getIconSymbol(d);
+  if (sym) return renderComplexSymbol(sym);
+  var r = getIconRadius(d, type);
+  if (r > 0 === false) return empty();
+  if (type == 'circle' || type == 'ring') return circle(getIconStyleData(d, r, type));
+  if (type == 'square') return square(getIconStyleData(d, r, type), 0, 0);
+  if (type == 'star') return star(getIconStyleData(d, r, type));
+  if (type == 'nyt-star') return nytStar(getIconStyleData(d, r, type));
+  return empty();
+}
+
+// A label with a symbol renders two elements from one record, and every opacity
+// property in commonProperties is applied to both, so the text's opacity fades
+// the symbol with it. The icon's paint (see getIconPaint()) and icon-opacity
+// are how a symbol is styled apart from the text: each overrides its
+// counterpart here.
+//
+// icon-opacity maps to opacity rather than fill-opacity because a ring is drawn
+// as a stroked circle with no fill, which a fill opacity would leave alone.
+function getIconStyleData(d, r, type) {
+  var o = utils.extend({}, d);
+  var paint = getIconPaint(d, type);
+  o.r = r;
+  o.fill = paint.fill;
+  delete o.stroke;
+  delete o['stroke-width'];
+  if (paint.stroke != 'none') {
+    o.stroke = paint.stroke;
+    o['stroke-width'] = paint.strokeWidth;
+  }
+  if (isSvgNumber(d['icon-opacity'])) {
+    o.opacity = Number(d['icon-opacity']);
+  }
+  return o;
+}
+
+function renderComplexSymbol(sym, x, y) {
+  if (utils.isString(sym)) {
+    sym = JSON.parse(sym);
+  }
+  if (sym.tag) {
+    // symbol appears to already use mapshaper's svg notation... pass through
+    return sym;
+  }
+  var renderer = symbolRenderers[sym.type];
+  if (!renderer) {
+    message(sym.type ? 'Unknown symbol type: ' + sym.type : 'Symbol is missing a type property');
+    return empty();
+  }
+  var o = renderer(sym, x || 0, y || 0);
+  if (sym.opacity) {
+    if (!o.properties) o.properties = {}; // a group of several parts has none
+    o.properties.opacity = sym.opacity;
+  }
+  return o;
+}
+
+function empty() {
+  return {tag: 'g', properties: {}, children: []};
+}
+
+function circle(d, x, y) {
+  var o = {
+    tag: 'circle',
+    properties: {
+      cx: x || 0,
+      cy: y || 0
+    }
+  };
+  applyStyleAttributes(o, 'point', d);
+  return o;
+}
+
+function label(d, x, y) {
+  var o = renderStyledLabel(d);
+  if (x || y) {
+    // set x, y here, rather than adding to dx, dy -- so dy, dy can
+    // have CSS units (like ems)
+    o.properties.transform = getTransform([x, y]);
+  }
+  return o;
+}
+
+function image(d, x, y) {
+  var w = d.width || 20,
+      h = d.height || 20;
+  var o = {
+    tag: 'image',
+    properties: {
+      width: w,
+      height: h,
+      x: (x || 0) - w / 2,
+      y: (y || 0) - h / 2,
+      href: d.href || ''
+    }
+  };
+  if (d.fill) o.properties.fill = d.fill;
+  return o;
+}
+
+function square(d, x, y) {
+  var r = d.r || 0;
+  var o = {
+    tag: 'rect',
+    properties: {
+      x: x - r,
+      y: y - r,
+      width: r * 2,
+      height: r * 2
+    }
+  };
+  applyStyleAttributes(o, 'point', d, nonCirclePointFilter);
+  return o;
+}
+
+function star(d) {
+  var coords = getIconStarCoords(d.r);
+  var o = importPolygon([coords]);
+  applyStyleAttributes(o, 'point', d, nonCirclePointFilter);
+  return o;
+}
+
+// A nine-pointed star with a heavy outline, white inside unless icon-fill says
+// otherwise, drawn from the source artwork's 40-unit box. The box includes the
+// outline and its mitred points, so icon-size is the width of the whole
+// symbol, and the outline's width is fixed (see getIconPaint()).
+var NYT_STAR_BOX = 40;
+var NYT_STAR_STROKE = 5;
+var NYT_STAR_POINTS = [19.9843, 5.7196, 23.1494, 11.7629, 29.4528, 9.1512,
+  27.9924, 15.8152, 34.5, 17.8645, 29.0961, 22.0321, 32.7631, 27.7841,
+  25.9457, 27.504, 25.0572, 34.2675, 20.0149, 29.6714, 14.9847, 34.2804,
+  14.0769, 27.5192, 7.2619, 27.8167, 10.9166, 22.0553, 5.5, 17.9016,
+  12.0024, 15.8357, 10.527, 9.1754, 16.835, 11.771];
+
+function nytStar(d) {
+  var k = d.r * 2 / NYT_STAR_BOX;
+  var o = importPolygon([getNytStarCoords(k)]);
+  applyStyleAttributes(o, 'point', d, nonCirclePointFilter);
+  if (d.stroke) {
+    o.properties['stroke-width'] = roundToHundredths(NYT_STAR_STROKE * k);
+    o.properties['stroke-miterlimit'] = 10;
+  }
+  return o;
+}
+
+function getNytStarCoords(k) {
+  var c = NYT_STAR_BOX / 2;
+  var coords = [];
+  for (var i=0; i<NYT_STAR_POINTS.length; i+=2) {
+    coords.push([roundToHundredths((NYT_STAR_POINTS[i] - c) * k),
+      roundToHundredths((NYT_STAR_POINTS[i + 1] - c) * k)]);
+  }
+  coords.push(coords[0].concat());
+  return coords;
+}
+
+function roundToHundredths(n) {
+  return Math.round(n * 100) / 100;
+}
+
+function nonCirclePointFilter(k) {
+  return k != 'r';
+}
+
+function line(d, x, y) {
+  var coords, o;
+  coords = [[x, y], [x + (d.dx || 0), y + (d.dy || 0)]];
+  o = importLineString(coords);
+  applyStyleAttributes(o, 'polyline', d);
+  return o;
+}
+
+// polyline coords are like GeoJSON MultiLineString coords: an array of 0 or more paths
+function polyline(d) {
+  var coords = d.coordinates || [];
+  var o = importMultiLineString(coords);
+  applyStyleAttributes(o, 'polyline', d);
+  return o;
+}
+
+// polygon coords are an array of rings (and holes), like flattened MultiPolygon coords
+function polygon(d) {
+  var coords = d.coordinates || [];
+  var o = importPolygon(coords);
+  applyStyleAttributes(o, 'polygon', d);
+  return o;
+}
+
+function offset(d, x, y) {
+  var dx = (x || 0) + (d.dx || 0);
+  var dy = (y || 0) + (d.dy || 0);
+  return {
+    tag: 'g',
+    properties: {
+      transform: getTransform([dx, dy])
+    },
+    children: []
+  };
+}
+
+function group(d, x, y) {
+  var o = {
+    tag: 'g',
+    children: []
+  };
+  var children = o.children;
+  (d.parts || []).forEach(function(o) {
+    var sym = renderComplexSymbol(o, x, y);
+    children.push(sym);
+    //if (d.chained) {
+    //if (o.chained) {
+    if (o.type == 'line') {
+      x += (o.dx || 0);
+      y += (o.dy || 0);
+    }
+    if (o.type == 'offset') {
+      children = sym.children;
+      x = y = 0;
+    }
+  });
+  if (o.children.length == 1 && !o.properties) return o.children[0];
+  return o;
+}

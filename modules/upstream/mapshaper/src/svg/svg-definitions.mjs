@@ -1,0 +1,148 @@
+import { sha1 } from '../utils/mapshaper-sha1';
+import { convertFillPattern } from '../svg/svg-hatch';
+import { LABEL_PATH_PROPERTY } from '../svg/svg-label-paths';
+import { convertFillEffect } from '../svg/svg-effect';
+import { convertGlowFilter } from '../svg/svg-glow';
+import { convertLineFade } from '../svg/svg-line-arrows';
+import { stop } from '../utils/mapshaper-logging';
+import utils from '../utils/mapshaper-utils';
+import require from '../mapshaper-require';
+
+// convert object properties to definitions for images and hatch fills
+export function convertPropertiesToDefinitions(obj, defs) {
+  procNode(obj);
+
+  function procNode(obj) {
+    if (obj.glowFilter) {
+      convertGlowFilter(obj, defs);
+    }
+    if (obj.lineFade) {
+      convertLineFade(obj, defs);
+    }
+    if (obj.tag == 'textPath' && obj.properties && obj.properties[LABEL_PATH_PROPERTY]) {
+      convertLabelPath(obj.properties, defs);
+    }
+    if (obj.tag == 'path' && obj.properties['fill-pattern']) {
+      convertFillPattern(obj.properties, defs);
+    }
+    if (obj.tag == 'path' && obj.properties['fill-effect']) {
+      convertFillEffect(obj.properties, defs);
+    }
+    if (obj.tag == 'image') {
+      if (/\.svg/.test(obj.properties.href || '')) {
+        convertSvgImage(obj, defs);
+      }
+    } else if (obj.children) {
+      obj.children.forEach(procNode);
+    }
+  }
+}
+
+// Moves a label's baseline into <defs>, where it is referenced but never
+// painted. It must not be left in the document body: a <path> with no stroke or
+// fill of its own picks up SVG's defaults -- no stroke and *black fill* -- and
+// renders as a filled blob instead of a line.
+//
+// The id is derived from the path data, so identical paths share one
+// definition and repeated exports of the same map produce identical output.
+function convertLabelPath(properties, defs) {
+  var d = properties[LABEL_PATH_PROPERTY];
+  var item = utils.find(defs, function(item) {return item.labelPath === d;});
+  delete properties[LABEL_PATH_PROPERTY];
+  if (!item) {
+    item = {
+      labelPath: d,
+      id: 'label-path-' + sha1(d).substr(0, 12)
+    };
+    item.svg = '<path id="' + item.id + '" d="' + d + '"/>\n';
+    defs.push(item);
+  }
+  properties.href = '#' + item.id;
+}
+
+function convertSvgImage(obj, defs) {
+  // Same-origin policy prevents embedding images in the web UI
+  var href = obj.properties.href;
+  // Remote URLs were previously fetched at export time so the SVG could be
+  // embedded inline. That capability has been removed (it required a
+  // synchronous-HTTP dependency built on a child-process hack); download
+  // the asset first and reference it by local path instead.
+  if (href.indexOf('http') === 0) {
+    stop('Remote SVG asset references are not supported. Download the file first and reference it by a local path:', href);
+  }
+  // look for a previously added definition to use
+  // (assumes that images that share the same href can also use the same defn)
+  var item = utils.find(defs, function(item) {return item.href == href;});
+  if (!item) {
+    item = {
+      href: href,
+      id: urlToId(href) // generating id from href, to try to support multiple inline svgs on page
+    };
+    item.svg = serializeSvgImage(href, item.id);
+    defs.push(item);
+  }
+  if (item.svg) {
+    obj.tag = 'use';
+    obj.properties.href = '#' + item.id;
+  } else {
+    // no svg property means the image was not able to be converted to a defn
+    // -- it will be serialized as a regular inline image
+  }
+}
+
+// Returns the content of an SVG file from a local path.
+// Returns '' if unable to get the content; the caller leaves the original
+// <image> tag in the output so the SVG renderer can attempt to load it.
+function serializeSvgImage(href, id) {
+  var svg = '';
+  try {
+    svg = convertSvgToDefn(getSvgContent(href), id) + '\n';
+    svg = '<!-- ' + href + '-->\n' + svg; // add href as a comment, to aid in debugging
+  } catch(e) {
+    // tried creating a symbol as a fallback... encounted problems with icon
+    // size and placement, giving up on this for now
+    // svg = `<symbol><image xlink:href="${obj.properties.href}" id="${id}"></image></symbol>`;
+  }
+  return svg;
+}
+
+// href: A local path
+function getSvgContent(href) {
+  if (require('fs').existsSync(href)) {
+    return require('fs').readFileSync(href, 'utf8');
+  }
+  stop("Invalid SVG location:", href);
+}
+
+function convertSvgToDefn(svg, id) {
+  // Remove stuff before <svg> tag
+  svg = svg.replace(/[^]*<svg/, '<svg');
+  return svg.replace(/^<svg[^>]*>/, function(a) {
+    // set id property of <svg>
+    a = a.replace(/ id="[^"]*"/, '');
+    a = a.replace(/<svg/, '<svg id="' + id + '"');
+    return a;
+  });
+}
+
+function urlToId(url) {
+  return sha1(url).substr(0, 12);
+}
+
+/*
+function convertSvgToSymbol(svg, id) {
+  svg = svg.replace(/[^]*<svg/, '<svg');
+  // Remove inkscape tags (there were errors caused when namespaces were
+  // stripped when converting <svg> to <symbol> ... this may be futile, may
+  // have to go back to embedding entire SVG document instead of using symbols)
+  svg = svg.replace(/<metadata[^]*?metadata>/, '');
+  svg = svg.replace(/<sodipodi[^>]*>/, '');
+  // convert <svg> to <symbol>
+  svg = svg.replace(/^<svg[^>]*>/, function(a) {
+    var viewBox = a.match(/viewBox=".*?"/)[0];
+    return '<symbol id="' + id + '" ' + viewBox + '>';
+  });
+  svg = svg.replace('svg>', 'symbol>');
+  return svg;
+}
+*/

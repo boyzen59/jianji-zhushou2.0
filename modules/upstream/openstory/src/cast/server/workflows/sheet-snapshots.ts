@@ -1,0 +1,536 @@
+/**
+ * Snapshot DTO hashers for content-generation workflows that opt into the
+ * snapshot pattern.
+ *
+ * The `compute*FromDto` helpers hash the inlined payload. Mid-run divergence
+ * is not detected by re-hashing live state: the sheet workflows land through
+ * a claim that every input edit revokes (#1113).
+ *
+ * See docs/architecture/workflow-snapshots-and-content-hash-staleness.md
+ * § "Per-workflow input surface".
+ */
+
+import { USER_UPLOAD_MODEL } from '@/shots/user-upload-model';
+import {
+  characterSheetInputHashMatches,
+  computeCharacterSheetInputHashLegacy,
+  computeCharacterSheetInputHash,
+  computeShotImageInputHash,
+  computeLocationSheetInputHash,
+  locationSheetInputHashMatches,
+  sha256Hex,
+  type CharacterBibleHashFields,
+  type CharacterSheetInputHash,
+  type LegacyStylingParts,
+  type LocationSheetBibleHashFields,
+  type LocationSheetInputHash,
+  type ShotImageHashInput,
+  type ShotImageInputHash,
+} from '@/shots/input-hash';
+import { DEFAULT_IMAGE_MODEL } from '@/models/models';
+import { WorkflowValidationError } from '@/platform/server/workflow/errors';
+import { styleConfigHashBody } from '@/look/style-config';
+import type {
+  CharacterMinimal,
+  SequenceElementMinimal,
+  SequenceLocationMinimal,
+  StyleConfig,
+} from '@/platform/server/db/schema';
+import type {
+  CharacterSheetWorkflowInput,
+  ShotImageSceneSnapshot,
+  ShotImagesWorkflowInput,
+  LocationSheetWorkflowInput,
+  StillHashInput,
+} from '@/platform/server/workflow/types';
+import {
+  matchCharactersToShotImage,
+  matchElementsToShotImage,
+  matchLocationsToScene,
+} from '@/shots/scene-matching';
+
+export type { ShotImageSceneSnapshot } from '@/platform/server/workflow/types';
+
+/**
+ * A sheet payload before its trigger stamps the hash and takes the claim
+ * (#1113): what the hashers read.
+ */
+export type SheetPayload<T> = Omit<
+  T,
+  | 'sheetVersionId'
+  | 'referenceVersionId'
+  | 'sheetId'
+  | 'referenceClaimId'
+  | 'snapshotInputHash'
+>;
+
+/**
+ * A run queued, or a step result cached, before character looks shipped
+ * (#2015) names no look. It is failed here, once, at the top of the run —
+ * never patched up field by field further down.
+ */
+export function assertQueuedWithLooks(
+  ...carriers: readonly { lookId?: unknown }[]
+): void {
+  if (carriers.some((carrier) => typeof carrier.lookId !== 'string')) {
+    throw queuedBeforeLooks();
+  }
+}
+
+/** The failure `assertQueuedWithLooks` raises, for a check of another shape. */
+export const queuedBeforeLooks = () =>
+  new WorkflowValidationError(
+    'Queued before character looks shipped. Run it again.'
+  );
+
+/**
+ * An analysis payload queued before the trigger snapshotted the cast (#2050):
+ * the one check, at the top of the run, so no step defaults it.
+ */
+export const queuedBeforeCast = () =>
+  new WorkflowValidationError(
+    'Queued before character references shipped. Run it again.'
+  );
+
+/**
+ * A sheet payload queued before every look carried `face` (#2015): the one
+ * check, at the top of the run, so no field below defaults it.
+ */
+export function assertQueuedWithFace(input: object): void {
+  if (!('face' in input)) {
+    throw new WorkflowValidationError(
+      'Queued before looks were drawn from the default look. Run it again.'
+    );
+  }
+}
+
+/**
+ * A sheet payload queued before the bible carried `rendering` (#2017): the
+ * sheet would read the sequence's style, which is no longer on the payload.
+ */
+export function assertQueuedWithRendering(input: {
+  characterMetadata: object;
+}): void {
+  if (!('rendering' in input.characterMetadata)) {
+    throw new WorkflowValidationError(
+      'Queued before character rendering shipped. Run it again.'
+    );
+  }
+}
+
+/**
+ * A character sheet payload before its face: everything the trigger
+ * snapshots except the default look's sheet and the hash that covers it.
+ * A look whose default sheet the same run makes waits in this shape.
+ */
+export type CharacterSheetDraft = Omit<
+  SheetPayload<CharacterSheetWorkflowInput>,
+  'face'
+>;
+
+/** Give a draft its face and stamp the hash, which covers the face. */
+export async function finishCharacterSheetPayload(
+  draft: CharacterSheetDraft,
+  face: CharacterSheetWorkflowInput['face']
+): Promise<Omit<CharacterSheetWorkflowInput, 'sheetVersionId'>> {
+  const fields = { ...draft, face };
+  return {
+    ...fields,
+    snapshotInputHash: await computeCharacterSheetHashFromDto(fields),
+  };
+}
+
+/** Hash a `StyleConfig` deterministically. `null`/`undefined` → 'no-style'. */
+export async function computeStyleConfigHash(
+  styleConfig: StyleConfig | null | undefined
+): Promise<string> {
+  if (!styleConfig) return 'no-style';
+  // styleConfigHashBody keeps the legacy flat key names, so hashes stored
+  // before the v2 reshape stay valid — see its doc comment.
+  return sha256Hex({
+    artifact: 'style-config',
+    ...styleConfigHashBody(styleConfig),
+  });
+}
+
+function characterBibleFields(
+  metadata: CharacterSheetWorkflowInput['characterMetadata']
+): CharacterBibleHashFields {
+  return {
+    name: metadata.name,
+    age: metadata.age,
+    gender: metadata.gender,
+    ethnicity: metadata.ethnicity,
+    physicalDescription: metadata.physicalDescription,
+    standardClothing: metadata.standardClothing,
+    rendering: metadata.rendering,
+    consistencyTag: metadata.consistencyTag,
+  };
+}
+
+/**
+ * Hash the character-sheet workflow payload. The `talentSheetHash` and
+ * `talent` keys stay, always null, so existing digests still verify.
+ */
+function characterSheetHashInput(
+  input: SheetPayload<CharacterSheetWorkflowInput>
+) {
+  return {
+    characterBible: characterBibleFields(input.characterMetadata),
+    styling: input.lookStyling,
+    faceSheetVersionId: input.face === null ? null : input.face.versionId,
+    talentSheetHash: null,
+    talent: null,
+    imageModel: input.imageModel ?? DEFAULT_IMAGE_MODEL,
+  };
+}
+
+export async function computeCharacterSheetHashFromDto(
+  input: SheetPayload<CharacterSheetWorkflowInput>
+): Promise<CharacterSheetInputHash> {
+  return computeCharacterSheetInputHash({
+    ...characterSheetHashInput(input),
+    styleConfigHash: null,
+  });
+}
+
+/**
+ * Verify a stored sheet digest against the DTO, in the current shape or a
+ * legacy one. `legacy` is the look's stored parts (#2065): off the rows for
+ * a live verify (`legacyStylingParts`), off the payload for a run's own
+ * snapshot ({@link queuedLegacyStyling}). `styleConfigHash` is the sequence
+ * style's digest (`computeStyleConfigHash`), read only by the shapes stamped
+ * before `rendering` (#2017); a run's own snapshot check passes `null` and
+ * verifies the current shape alone.
+ */
+export async function characterSheetHashMatchesStored(
+  stored: string | null,
+  input: SheetPayload<CharacterSheetWorkflowInput>,
+  legacy: LegacyStylingParts,
+  styleConfigHash: string | null
+): Promise<boolean> {
+  return characterSheetInputHashMatches(
+    stored,
+    { ...characterSheetHashInput(input), styleConfigHash },
+    legacy
+  );
+}
+
+/**
+ * The check for a sheet the user uploaded. It is stamped with the upload
+ * marker in place of an image model, so it verifies alike from every
+ * sequence that casts the character. The second arm is an upload stamped
+ * with its own sequence's image model, as they were until #2087; it holds
+ * only from a sequence on that model.
+ */
+export async function uploadedCharacterSheetHashMatchesStored(
+  stored: string | null,
+  input: SheetPayload<CharacterSheetWorkflowInput>,
+  legacy: LegacyStylingParts,
+  styleConfigHash: string | null
+): Promise<boolean> {
+  const body = { ...characterSheetHashInput(input), styleConfigHash };
+  return (
+    (await characterSheetInputHashMatches(
+      stored,
+      { ...body, imageModel: USER_UPLOAD_MODEL },
+      legacy
+    )) || (await characterSheetInputHashMatches(stored, body, legacy))
+  );
+}
+
+/**
+ * The digest a sheet payload was stamped with before #2065, with the
+ * sequence style it read then. Verify/tests only — delete after
+ * `LEGACY_HASH_UNTIL`.
+ */
+export async function computeCharacterSheetHashFromDtoBefore2065(
+  input: SheetPayload<CharacterSheetWorkflowInput>,
+  legacy: LegacyStylingParts,
+  styleConfigHash: string
+): Promise<string> {
+  return computeCharacterSheetInputHashLegacy(
+    { ...characterSheetHashInput(input), styleConfigHash },
+    legacy,
+    'pre-2065'
+  );
+}
+
+/**
+ * The legacy parts of a sheet payload's OWN snapshot hash. A run queued
+ * before #2065 carried the bible's features beside the look's styling; the
+ * payload seam (`foldLegacyFeaturesInPayload`) folds them into `lookStyling`
+ * and keeps the two as they were queued here. A payload of the current shape
+ * has none, and was stamped in the current shape.
+ */
+export const queuedLegacyStyling = (
+  input: Pick<
+    CharacterSheetWorkflowInput,
+    'lookStyling' | 'queuedLegacyStyling'
+  >
+): LegacyStylingParts =>
+  input.queuedLegacyStyling ?? {
+    distinguishingFeatures: null,
+    styling: input.lookStyling,
+  };
+
+/** Every bible field the location-sheet prompt reads (#1785, #1695). */
+export function locationSheetBibleFields(
+  metadata: LocationSheetWorkflowInput['locationMetadata']
+): LocationSheetBibleHashFields {
+  return {
+    name: metadata.name,
+    type: metadata.type,
+    description: metadata.description,
+    architecturalStyle: metadata.architecturalStyle,
+    keyFeatures: metadata.keyFeatures,
+    ambiance: metadata.ambiance,
+    rendering: metadata.rendering,
+  };
+}
+
+/**
+ * A sheet payload queued before the location's bible carried `rendering`
+ * (#1695): the sheet would read the sequence's style, which is no longer on
+ * the payload. Failed once, at the top of the run.
+ */
+export function assertQueuedWithLocationRendering(input: {
+  locationMetadata: object;
+}): void {
+  if (
+    !('rendering' in input.locationMetadata) ||
+    !('referencePhotoUrls' in input)
+  ) {
+    throw new WorkflowValidationError(
+      'Queued before team locations shipped. Run it again.'
+    );
+  }
+}
+
+/** What the location-sheet hash reads off the workflow payload. */
+function locationSheetHashInput(
+  input: SheetPayload<LocationSheetWorkflowInput>
+) {
+  return {
+    locationBible: locationSheetBibleFields(input.locationMetadata),
+    referencePhotoHashes: input.referencePhotoUrls,
+    imageModel: input.imageModel ?? DEFAULT_IMAGE_MODEL,
+  };
+}
+
+export async function computeLocationSheetHashFromDto(
+  input: SheetPayload<LocationSheetWorkflowInput>
+): Promise<LocationSheetInputHash> {
+  return computeLocationSheetInputHash(locationSheetHashInput(input));
+}
+
+/**
+ * What a location's sheet may have been stamped with before #1695: the
+ * library reference it was drawn from and, when the check is made from a
+ * sequence, that sequence's style. A run's own snapshot check passes
+ * {@link NO_LEGACY_LOCATION_SHEET} and verifies the current shape alone.
+ */
+export type LegacyLocationSheet = {
+  libraryLocationReferenceHash: string | null;
+  /** The style of the sequence the check is made from; null from none. */
+  styleConfig: StyleConfig | null;
+};
+
+/** A run's own snapshot: stamped in the current shape, nothing legacy to read. */
+export const NO_LEGACY_LOCATION_SHEET: LegacyLocationSheet = {
+  libraryLocationReferenceHash: null,
+  styleConfig: null,
+};
+
+const legacyLocationSheetParts = async (legacy: LegacyLocationSheet) => ({
+  libraryLocationReferenceHash: legacy.libraryLocationReferenceHash,
+  styleConfigHash:
+    legacy.styleConfig === null
+      ? null
+      : await computeStyleConfigHash(legacy.styleConfig),
+  unstyledConfigHash: await computeStyleConfigHash(null),
+});
+
+/**
+ * Verify a stored location-sheet digest against the DTO, in the current
+ * shape or one stamped before #1695 (accepted until `LEGACY_HASH_UNTIL`).
+ */
+export async function locationSheetHashMatchesStored(
+  stored: string | null,
+  input: SheetPayload<LocationSheetWorkflowInput>,
+  legacy: LegacyLocationSheet
+): Promise<boolean> {
+  return locationSheetInputHashMatches(
+    stored,
+    locationSheetHashInput(input),
+    await legacyLocationSheetParts(legacy)
+  );
+}
+
+/**
+ * The check for a sheet the user uploaded: stamped with the upload marker in
+ * place of an image model, so it verifies alike from every sequence that
+ * uses the location. The second arm is an upload stamped with its own
+ * sequence's image model, as they were before #1695.
+ */
+export async function uploadedLocationSheetHashMatchesStored(
+  stored: string | null,
+  input: SheetPayload<LocationSheetWorkflowInput>,
+  legacy: LegacyLocationSheet
+): Promise<boolean> {
+  const body = locationSheetHashInput(input);
+  const parts = await legacyLocationSheetParts(legacy);
+  return (
+    (await locationSheetInputHashMatches(
+      stored,
+      { ...body, imageModel: USER_UPLOAD_MODEL },
+      parts
+    )) || (await locationSheetInputHashMatches(stored, body, parts))
+  );
+}
+
+/** Drop nulls/empties and sort so order-insensitive comparisons match. */
+function sortedRefHashes(values: Array<string | null | undefined>): string[] {
+  return values
+    .filter((v): v is string => typeof v === 'string' && v.length > 0)
+    .sort();
+}
+
+/**
+ * Match a scene's referenced characters / locations / elements from live DB
+ * rows and resolve the three reference-hash sets that feed the shot-image
+ * input hash: the selected sheet version id when present (so a new sheet
+ * image re-stales stills even with identical bible inputs), else the parent
+ * `sheetInputHash` / `referenceInputHash`; plus element `imageUrl`.
+ *
+ * A character's sheet is the one of the look the scene picks for it (#2015):
+ * the returned characters are dressed, so `lookId` names that look. Editing a
+ * look moves only the shots of the scenes that pick it, and switching a
+ * scene's look moves only that scene's shots.
+ *
+ * Character and element matching use the still's visual prompt when
+ * `visualPrompt` is passed (the same text the image model generated from)
+ * so a regenerated prompt that names `SCARLETT` still attaches her sheet
+ * when continuity tags are empty (#1432). Scene extract / `elementTags`
+ * are the element fallback only when no prompt exists.
+ *
+ * Single source of truth so the image-generation trigger **stamp**
+ * (`computeShotImageInputHash` via `prepareShotImageWorkflowInput`) and the staleness **verify**
+ * (`buildRegenerateShotSnapshot`) cannot drift — drift on the element /
+ * location sets (verify hard-coded them to `[]` and used a different location
+ * matcher) made every element- or location-bearing shot report permanently
+ * "Inputs changed". See #867.
+ */
+export function resolveSceneShotImageReferences(params: {
+  // Structural (not `Scene`) so it accepts both the strict scene and the
+  // looser `shot.metadata` shapes callers hold; only these fields are read.
+  scene: {
+    continuity?: {
+      characterTags?: string[];
+      characterLooks?: Record<string, string>;
+      environmentTag?: string;
+      elementTags?: string[] | null;
+    } | null;
+    metadata?: { location?: string } | null;
+    originalScript?: { extract?: string } | null;
+  } | null;
+  /**
+   * The still's visual prompt. When present, element matching uses this
+   * text (not scene extract / tags) so a replace only stales stills that
+   * actually named the element. See `matchElementsToShotImage`.
+   */
+  visualPrompt?: string | null;
+  characters: CharacterMinimal[];
+  locations: SequenceLocationMinimal[];
+  elements: SequenceElementMinimal[];
+}): {
+  characters: CharacterMinimal[];
+  locations: SequenceLocationMinimal[];
+  elements: SequenceElementMinimal[];
+  characterSheetHashes: string[];
+  locationSheetHashes: string[];
+  elementReferenceHashes: string[];
+} {
+  const { scene, visualPrompt, characters, locations, elements } = params;
+  const matchedCharacters = matchCharactersToShotImage(characters, {
+    characterTags: scene?.continuity?.characterTags,
+    characterLooks: scene?.continuity?.characterLooks,
+    visualPrompt,
+  });
+  const matchedLocations = matchLocationsToScene(
+    locations,
+    scene?.continuity?.environmentTag ?? '',
+    scene?.metadata?.location ?? '',
+    scene?.originalScript?.extract,
+    visualPrompt
+  );
+  const matchedElements = matchElementsToShotImage(elements, {
+    visualPrompt,
+    elementTags: scene?.continuity?.elementTags,
+    sceneExtract: scene?.originalScript?.extract,
+  });
+  return {
+    characters: matchedCharacters,
+    locations: matchedLocations,
+    elements: matchedElements,
+    characterSheetHashes: sortedRefHashes(
+      matchedCharacters.map((c) => c.selectedSheetVersionId ?? c.sheetInputHash)
+    ),
+    locationSheetHashes: sortedRefHashes(
+      matchedLocations.map(
+        (l) => l.selectedReferenceVersionId ?? l.referenceInputHash
+      )
+    ),
+    elementReferenceHashes: sortedRefHashes(
+      matchedElements.map((e) => e.imageUrl)
+    ),
+  };
+}
+
+/**
+ * Hash one scene's snapshot — used to populate `thumbnail_input_hash` on the
+ * shot row and `input_hash` on the matching primary `shot_variants` row.
+ */
+export function computeShotImageSceneHash(
+  scene: StillHashInput,
+  imageModel: string,
+  aspectRatio: string
+): Promise<ShotImageInputHash> {
+  const hashInput: ShotImageHashInput = {
+    kind: 'thumbnail',
+    visualPrompt: scene.visualPrompt,
+    imageModel,
+    aspectRatio,
+    size: null,
+    seed: null,
+    characterSheetHashes: scene.characterSheetHashes,
+    locationSheetHashes: scene.locationSheetHashes,
+    elementReferenceHashes: scene.elementReferenceHashes,
+  };
+  return computeShotImageInputHash(hashInput);
+}
+
+/**
+ * Hash the full shot-images payload. Binds every scene snapshot — including
+ * the upstream sheet hashes alongside each URL — so a payload that preserves
+ * only `snapshotInputHash` cannot smuggle replaced reference images past
+ * validation.
+ */
+export async function computeShotImagesHashFromDto(
+  input: ShotImagesWorkflowInput & {
+    sceneSnapshots: ShotImageSceneSnapshot[];
+  }
+): Promise<string> {
+  return sha256Hex({
+    artifact: 'shot-images:batch',
+    sequenceId: input.sequenceId ?? null,
+    imageModel: input.imageModel ?? null,
+    imageModels: input.imageModels ?? null,
+    aspectRatio: input.aspectRatio,
+    scenes: [...input.sceneSnapshots].sort(
+      (a, b) =>
+        a.sceneId.localeCompare(b.sceneId) ||
+        (a.shotId ?? '').localeCompare(b.shotId ?? '')
+    ),
+  });
+}

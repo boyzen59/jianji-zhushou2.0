@@ -1,0 +1,2286 @@
+v0.7.98
+* [web] Add copy style and paste style to context menus while editing symbols, labels and shapes.
+* [web] Style editing UI improvements
+
+v0.7.97
+* [web] Fixed: the left and right arrow keys selected layers in their original order instead of the order shown in the layers panel.
+* [web] Another robustness fix for layer menu UI.
+
+v0.7.96
+* [web] Fixed a bug that could cause layer dragging to fail.
+
+v0.7.95
+* [web] Added zoom-to-layer to context menus in the layers panel.
+* [web] UI improvements for line drawing and layer styling
+
+v0.7.94
+* [web] Interface improvements
+* Fixed: clipping bug in butterfly projections.
+
+v0.7.93
+* [web] Added an opacity slider to color pickers.
+* [web] Scale bar UI improvements
+* Added `-scalebar style=c`, a bar of segments with alternating fill, with an optional metric bar above an imperial bar (`dual-units`) and an `align=` option for lining up the two bars.
+* `-scalebar style=a` supports `dual-units`: a second, shorter bar below the first.
+* Fixed: projecting a world map frame to some projections could fail with "Densification error".
+
+v0.7.92
+* Scalebar fixes and UI improvements.
+
+v0.7.91
+* [web] A snapshot (.msx) that starts a session restores the same preview setting and layers panel settings as when it was saved.
+* [web] UI updates.
+
+v0.7.90
+* Exporting multiple frames of different widths to HTML creates one HTML file that shows the frame that fits the width of its container (like ai2html's artboards).
+* HTML output with `responsiveness=fixed` (the default) shrinks to fit a container narrower than the map.
+* `-graticule` adds its output to the frame of its target layer, and accepts the `+` option (it always creates a new layer).
+* `-shape` accepts the `+` option (before, `+` was used as the layer name).
+* Fixed: `-calc +` deleted its target layer.
+* `-rectangle +` names its output layer `rectangle` (before, the layer was unnamed).
+* Added the NYT dot-and-ring icons `nyt-target` and `nyt-target2` (`icon=` and `-symbols type=`).
+* Added two-hemisphere world projections: `-proj hemispheres` (Lambert Azimuthal Equal-Area) and `-proj hemispheres2` (orthographic). The hemispheres are stacked vertically (or side by side with `+horizontal`) and can have separate centers (`+lon_0 +lat_0`, `+lon_1 +lat_1`) and a gap or overlap (`+gap=`; with a negative gap, the lower or right disk overlaps the other). Each disk shows a whole hemisphere, so when the centers are not opposite each other, the places visible from both centers appear in both disks (vector and raster layers). `-graticule outline` and `-graticule polygon` follow the two disks.
+* `-projections` lists the projections that only mapshaper supports (e.g. `dymaxion`, `cupola`, `hemispheres`) separately from the PROJ projections.
+
+v0.7.89
+* [web] Added previews of overlay frames (before they only appeared as rectangles overlaid on the main frame).
+* [web] Various UI improvements to support multiple frames.
+
+v0.7.88
+* Added support for multiple map frames. Frames can be overlaid on other frames to make locators or insets.
+* Added corners to the curve drawing tool (Option-click creates a corner knot or toggles a knot between smooth and corner).
+* Improved curve interpolation.
+
+v0.7.87
+* Added a curve drawing tool to the line editing toolbar, similar to the curve tool on the symbol toolbar (but for creating curved polylines not symbols).
+* mapshaper-xl now exits with code 1 on errors, like the standard mapshaper program.
+
+v0.7.86
+* Added icon labels to the symbols panel.
+* `wide-arrow` arrowheads have a slightly narrower 55° point (was 60°).
+
+v0.7.85
+* Added `line-taper=` (0-1) to `-style` and `-symbols type=curve`, which narrows a line toward its tail, to a point at `line-taper=1`, with or without arrowheads. Tapered lines can be dashed.
+* [web] Tapered lines and curves are drawn on the map. The line style panel and the symbol tool's curve section both have a Taper % control.
+* [web] Fixed curve symbols with `line-fade=`, which were drawn without their fade.
+* Added a `wide-arrow` marker to `line-start=`, `line-end=` and `callout-end=`: a solid arrowhead with a 60° point, blunter than `arrow`'s 35°.
+* [web] The line style panel, the symbol tool's curve section and the label callout End buttons offer the wide arrowhead.
+* [web] Drawing sessions use much less memory.
+
+v0.7.84
+* Added line casings (outlines): `-style casing-color= casing-width= casing-opacity=`. `casing-width=` is how far the casing extends past each edge of the line (default 1px). All of a layer's casings are drawn beneath all of its lines, so that lines join cleanly where they cross.
+* [web] The line style panel has a Casing section, with a color, opacity and width.
+* `-symbols` writes each symbol as attribute fields instead of an `svg-symbol` object: `icon=` (square, star, polygon, ring, pie or arrow) with `icon-size=`, `icon-color=`, `icon-rotation=` and parameters like `icon-sides=`, `icon-values=` and `arrow-head-width=`. The new `ids=` option gives only the listed points new symbols, so that some of a layer's symbols can be restyled.
+* Added curve symbols: `-symbols type=curve` draws a smooth curve through the points of a multipoint feature, fitted with Hobby's algorithm like a path label. A curve whose last point repeats its first is closed and can take a fill; an open curve can take arrowheads.
+* In quantized TopoJSON output, `-o precision=` now sets an exact quantization grid anchored at the origin (0, 0), so files exported with the same precision share a grid (e.g. adjacent map tiles). Decoded coordinates match the output of `precision=` with `no-quantization`.
+* [web] Added a symbol tool ("edit symbols" in the pointer menu, or "Draw: symbols" in the layer panel) for placing circles, squares, triangles and stars and drawing curves and arrows by hand.
+* Icons have a fill and a stroke of their own: `icon-fill=`, `icon-stroke=` and `icon-stroke-width=` (written by `-symbols`, and accepted by `-labels`). A ring is a stroke with no fill by default, and can now be given a fill, and its thickness is its `icon-stroke-width=`; the other shapes are filled and can be given a stroke. On a label, these style the icon apart from the text.
+
+v0.7.83
+* Added -o html-labels option, which renders labels as HTML instead of SVG text in HTML-formatted output.
+
+v0.7.82
+* Added padding and background color options for labels.
+* Changed open/close behavior of collapsable sections of style panels.
+
+v0.7.81
+* Added PNG and JPEG output (e.g. `-o map.png`): an image of the whole map, labels included, at twice the map frame's display size by default (set with `pixel-ratio=`. From the command line, labels are drawn with installed fonts, with warnings about missing fonts and characters.
+* In PNG, JPEG and HMTL output formats, images of opaque polygons with a solid fill and no stroke are drawn with a hairline stroke in their fill color, which hides the faint seams that can appear between adjacent polygons.
+* Fixed several web UI style panel glitches.
+
+v0.7.80
+* [web] Line, polygon and label styling panels can now be minimized to make more room for editing symbols on the map.
+* [web] Adjust toolbar placement to intrude less into the main map area.
+* A map frame fitted to layers now makes room for the strokes of lines and polygons and the outer glows of polygons, so that with no margin, everything drawn falls inside the frame. `ignore-symbols` fits to coordinates alone, as before.
+* [web] The Add map frame dialog no longer adds a 2% margin by default when fitting a frame to the visible layers.
+
+v0.7.79
+* `-add-shape` and `-add-layer` are now documented editing commands. `-add-shape` takes the `-style` options, `closed` (to make a polygon from an open path) and `extend` (to join a new line to the line that ends where it starts or ends).
+* [web] Drawing and styling lines and polygons happen in the same panel. Draw and Reshape buttons open the drawing and vertex-editing tools, and each new shape is added with an `-add-shape` command that records it in the session history.
+* [web] Clicking a line or polygon selects it for restyling, with or without a tool selected. Esc or clicking off deselects it. Drawing from the end of a line extends that line; with Option/Alt, drawing starts a new line at the nearest vertex.
+
+v0.7.78
+* [web] Color palettes can be exported as GMT (.cpt) or JSON files, and imported from these files (including GMT files from other programs) or from a list of colors. The JSON includes a style expression for Mapbox GL and MapLibre maps.
+
+v0.7.77
+* `-classify continuous method=quantile` places each value on the color gradient by its rank among the data, so the number of colors affects only the gradient's shape.
+* [web] Added a custom class breaks panel, with histogram view and editable class breaks.
+
+v0.7.76
+* [web] Interface tweaks
+
+v0.7.75
+* Added 18 of Fabio Crameri's Scientific colour maps to the built-in color schemes: sequential `batlow`, `batlowW`, `acton`, `bamako`, `bilbao`, `davos`, `devon`, `lajolla`, `lapaz`, `oslo`, `tokyo` and `turku`; diverging `bam`, `broc`, `cork`, `roma` and `vik`; and categorical `batlowS`. `-colors` now lists the schemes by source (ColorBrewer, Tableau, Matplotlib, Crameri, d3).
+* [web] The Color palettes preset menu groups the presets by source.
+* [web] Sequential and diverging presets can be limited to part of their range, by dragging handles on a strip of the whole ramp, and a sequential preset's end colors can be removed.
+
+v0.7.74
+* Added `-style` options `stroke-linecap=` (`round`, `butt` or `square`; dashed lines default to `butt`) and `line-fade=`, which fades a line in from transparent along its tail.
+* [web] Added line cap and fade controls to the line style panel.
+* Added diverging classification to `-classify`: `pivot=` (a value, `median`, `mean` or `auto`), `pivot-range=`, `no-pivot-class`, `pivot-class` and `classes=<below>,<above>`. Each side of the pivot is classified separately, with an optional pivot class in the center color.
+* Added `interpolation=oklch` and `vibrance=` options to `-classify`, for interpolating colors in the OKLCH color space.
+* `-classify continuous` now works with `pivot=`. A list of N colors now gives N-1 intervals, so that each color is a stop to guide the interpolation (previously N colors made N intervals).
+* `-classify method=categorical` now repeats a list of colors that is shorter than the list of categories, and empty values are no longer categories (they get the null value).
+* [web] Added a Color palettes panel, opened by the Palettes button beside the polygon fill color. It colors polygons by a data field using sequential, diverging or categorical schemes, preset or custom color ramps, and classed or continuous colors.
+
+v0.7.73
+* Added a `margin=` option to `-frame` and `-update-frame`, taking one to four values in CSS order (top right bottom left), e.g. `margin=5%` or `margin=10%,2%`. It replaces `offset=` and `offsets=` (which still work and keep their l,b,r,t order).
+* Percentage margins in `-frame` and `-update-frame` are now a share of the frame's width on every side, as in CSS, so that `margin=5%` gives an even margin. Previously the top and bottom margins were a share of the frame's height. This also applies to percentages given to `offset=` and `offsets=`.
+* [web] The Margin fields in the Add map frame dialog and the frame resize toolbar accept one to four values in CSS order.
+* Added HTML output (`-o format=html` or `-o map.html`): an image of the map's shapes, with labels and other point symbols drawn over it as inline SVG and anchored to positions in the image. New `-o` options: `responsiveness=fixed|dynamic`, `image-format=png|jpg` and `pixel-ratio=`.
+* [web] Added HTML to the export formats. HTML output is downloaded as a .zip file.
+
+v0.7.72
+* New callout terminator: `callout-end=ring`, a hollow circle around the anchor.
+* Added inner and outer glows to polygons: new `-style` options `outer-glow-color=`, `outer-glow-width=`, `outer-glow-opacity=`, `inner-glow-color=`, `inner-glow-width=` and `inner-glow-opacity=`. Glows are rendered as SVG filters on export.
+* [web] Added an Effects section with glow controls to the polygon style panel.
+* [web] Emptying a color field in a style panel now removes the color (or restores the default, for colors that can't be removed).
+
+v0.7.71
+* Added arrowheads to line features: new `-style` options `line-start=`, `line-end=` (`arrow`, `open-arrow`, `dot` or `none`) and `line-end-size=`.
+* [web] Added arrowhead controls to the line style panel.
+* [web] Improved smoothing of hand-drawn curves when drawing lines and polygons.
+
+v0.7.70
+* Added -labels command, with more options for labelling than the -style command.
+* [web] Added the ability to select portions of a label and make the text bold.
+* [web] Added pattern fill configuration to the polygon style panel.
+
+v0.7.69
+* [web] Add scalebar configuration to the map frame interface.
+* [web] Add dashes to the line style panel.
+
+v0.7.68
+* [web] UI updates to the layers menu, sidebar tabs and arrow menu.
+* [web] Changed the console prompt from `$` to `>`.
+* A map frame fitted to visible layers now makes room for the rendered size of symbols and labels (these could previously be cut off at the edges of the frame). Add `ignore-symbols` to `-frame` to fit to point locations as before.
+* The `line-height` label style now treats a bare number as a multiple of the font size, as in CSS (e.g. `line-height=1.3`). Previously a bare number was read as pixels; add `px` to use pixels (e.g. `line-height=16px`).
+
+v0.7.67
+* [web] New label type: area text. A text block that wraps at a user-defined width.
+* [web] Callout lines can be added to labels in the label styles panel. Curved, straight and elbow callouts are supported, with or without arrowheads.
+* New label style option: halos
+* [web] All layers are now visible by default, so a layer used as a guide stays on the map when a new layer is created or imported. The `-a/--display-all` option of `mapshaper-gui` and the `display-all` URL variable are no longer needed, and are ignored.
+
+v0.7.66
+* Added the ability to select groups of labels according to various criteria to the right-click context menu. Cmd-A selects all labels.
+* Interface improvements
+
+v0.7.65
+* Fixed label dragging bugs.
+
+v0.7.64
+* Modify Hobby's algorithm to remove the tendency for the text path spline to balloon out under certain geometries.
+
+v0.7.63
+* [web] Added new UI for setting and updating a map frame. (Map frames set the output size and geographical extent of a map.) Support for multiple frames per project is planned for the future.
+* [web] New preview mode. Symbols and labels are scaled in proportion to map zoom.
+
+v0.7.62
+* Added `-graticule base=` to align meridians to a longitude other than 0 (same idea as `-contours base=`).
+* [web] On the layers panel, "Draw: labels · points · lines · polygons" replaces "Add empty layer". Each link creates a new layer and opens the tool that draws into it.
+* [web] A new "add/edit labels" tool replaces the old layer styling tools, with a revamped label styling panel.
+* [web] A new label creation interface supports both point-anchored labels and labels on drawn paths.
+* Fix for issue #704.
+
+v0.7.60
+* `-clean`’s default `gap-width=auto` is now equivalent to the former `gap-fill-area=auto` + `sliver-control=1` test, restoring the more effective cleanup from before v0.7.53.
+* `-filter-slivers` now accepts `gap-width=`, like `-clean`. `min-area=` and `sliver-control=` still work.
+
+v0.7.59
+* Added `-grid type=cairo` (the Cairo tesselation).
+* Added `-grid rotate=` to rotate any grid by a given number of degrees.
+* Fix for a page scrolling bug in the web UI.
+
+
+v0.7.58
+* Added `-symbols type=pie` for making pie and donut chart symbols. Wedge sizes come from `values=`, wedge colors from `fills=` and the size of the symbol from `radius=`. Adding `hole=` makes a donut; a negative `hole=` is measured inward from the outer radius, for a band of wedges of a fixed width.
+* `-repel` now supports pie, donut and ring symbols, in addition to circles.
+* Fixed parsing of shorthand hex colors (e.g. `#f90`) and of the alpha channel of 8-digit hex colors (e.g. `#ff000080`).
+* Handle missing layers in .gpkg files with a warning.
+* Added support for importing zipped datasets from stdin, including .kmz (e.g. `cat data.shp.zip | mapshaper -i - -o out.json`). Previously, a .zip had to be unpacked into files on disk before importing.
+
+v0.7.57
+* Added `-repel margin=` option, which gives the minimum spacing between two symbols. If two symbols have different margin values, the *greater* of their two margins is used.
+
+v0.7.56
+* Added `-repel` command, which removes or reduces collisions between circles. Requires a projected layer containing circle symbols.
+* The `-repel polygons=` option takes a polygon layer or file. The center of each symbol is prevented from migrating outside its starting polygon.
+
+v0.7.55
+* Use layer name as the dataset name in the FlatGeobuf header, instead of "L1".
+
+v0.7.54
+* Added `-contours closed` for creating polygon bands with `upper` and `lower` attributes.
+* Switched to a higher-quality and better-performing algorithm for placing anchor points within polygons (see -points inner).
+* Handle collapsed geometry from `-o precision=` in geopackage and geoparquet output.
+
+v0.7.53
+* Added `gap-width=` to `-clean` and `-dissolve`, for filling gaps narrower than a given distance (e.g. `gap-width=2m`). A gap's width is estimated from its area and perimeter, so slender cracks are filled while more compact holes of similar area, such as small lakes, are more likely to be kept. `-clean` now applies this width test by default, in place of the area test it used before; `gap-fill-area=` and `sliver-control=` are deprecated, but still accepted.
+* Added `-clean close-outer-gaps`, which closes cracks that open onto the outside of a polygon mosaic, up to the width set by `gap-width=`, so that they are filled like enclosed gaps. It is opt-in because a narrow opening in a coverage is not always a mistake.
+* Robustness and quality improvements in `-buffer` and `-clean`.
+* Fixed `TypeError: Cannot read properties of null` when exporting FlatGeobuf with a `precision=` value that collapses a feature's geometry.
+* Features with null geometry are now written to (and read back from) FlatGeobuf files as records with no geometry, matching what the GeoJSON and Shapefile exporters do.
+
+v0.7.52
+* Added a "snip" tool to the web UI for interactively dividing polyline features.
+
+v0.7.51
+* Undo is now on by default in the web UI. Untick **enable undo** in the History menu to turn it off, which you may want to do when working with very large datasets.
+* Mapshaper now correctly re-imports the `.aux.xml` sidecar it writes when saving a GeoTIFF in a projection that standard GeoTIFF metadata cannot describe.
+* A GeoTIFF with no CRS metadata is treated as WGS84 lat-long if the coordinates are in the decimal-degree range (this is consistent with how vector data is handled).
+* GeoTIFF is now the default format for exporting rasters in the web UI.
+
+v0.7.50
+* Fixed `-contours` creating intersecting lines on certain inputs.
+* The web UI now shows a raster's own pixels as squares once they are magnified to two screen pixels or more, instead of smoothing them into a blur.
+* GeoJSON import uses about a quarter less memory.
+* GeoParquet and FlatGeobuf export use much less memory and run faster, by skipping conversion to GeoJSON.
+* GeoParquet row groups are now sized by their estimated size in bytes instead of by a fixed row count. Groups target 16MB of uncompressed data, so that a typical file is split into several groups that a reader can scan in parallel and skip past when filtering. Added `-o rowgroup=` to set the number of rows per row group explicitly.
+* Improved CRS support for GeoParquet.
+* Improved GeoTIFF CRS parsing and writing.
+* Fixed import of GeoTIFFs lacking readable CRS metadata.
+
+v0.7.49
+* Added GeoTIFF output for raster layers (`-o out.tif` or `-o format=geotiff`), keeping the pixels in their source data type, with Deflate compression by default (`compression=none` to store them uncompressed) and the layer's nodata value. A projection without an EPSG code is written out parameter by parameter in the file's geo keys; the few projections that GeoTIFF cannot describe at all are written to an `.aux.xml` sidecar file instead.
+* Removed the ten-state limit on undo history in the web UI. Undo states are now discarded only when their restore data exceeds the storage limit.
+* The web UI's right-click menu now stays open after copying a value, so several values can be copied from the same point.
+* The web UI's right-click menu now reports the band values of the raster pixel under the cursor, plus a color tile and hex value for color images.
+* `-blur` now accepts a real-world distance as well as a pixel count (e.g. `-blur 500m`), takes its radius as a bare argument (e.g. `-blur 5px`), and appears in the command list printed by `mapshaper -h`.
+* Added `-contours` command for tracing contour lines from a raster layer, with `interval=`, `levels=`, `base=`, `band=` and `field=` options. Traced lines are smoothed at an auto-selected one-pixel interval; use `no-smoothing` to skip that step.
+* Added `-i raster-type=continuous` for measurement rasters like elevation models, which use bilinear resampling but keep the source nodata value instead of a fill color when projected (ordinarily the correct type should be auto-detected).
+* Fixed loss of precision when projecting a floating point raster: bilinear resampling was rounding every sample to a whole number.
+* Fixed bilinear resampling averaging nodata samples together with real values along the edges of a raster's valid data.
+
+v0.7.48
+* Fixes for `markley` and `calm` projections
+
+v0.7.47
+* Added raster support for interrupted and polyhedral projections.
+* Added `markley` and `calm` -- two conformal rectangular world projections using tetrahedral geometry.
+
+v0.7.46
+* Removed projected distance from the ruler tool unless great-circle distance can not be calculated. Added explanatory text to the readout.
+* Added support for running command files in the web UI (via -run command in the console).
+* Added narukawa2022 projection (a version of the AuthaGraph projection).
+
+v0.7.45
+* Added support for more interrupted projections: Buckminster Fuller's Dymaxion map projection, the Cahill-Keyes projection and two butterfly projections.
+
+v0.7.44
+* Added support for several interrupted projections.
+* Added `-graticule outline` option, for creating a neatline around a bounded world map projection.
+
+v0.7.43
+* Most commands can now target layers in different datasets.
+
+v0.7.42
+* The ruler tool can measure the length of several connected segments by shift-clicking.
+* Fixed several projection formula issues by updating the mproj library.
+
+v0.7.41
+* Added a ruler tool under the arrow menu.
+
+v0.7.40
+* Import non-standard top-level GeoJSON metadata, so it can be re-exported by adding the `-o metadata` flag. This includes top-level `crs`, `id` and any other properties that are not part of the GeoJSON spec.
+* Improved smoothness of medial lines (used in `topological` and `fill-gaps` buffer modes).
+* Improved quality of `-buffer fill-gaps` output.
+* Added `-buffer fill-gaps merge-islands` option.
+
+v0.7.39
+* Added the `-densify` command, for adding vertices along path segments using geodesic, rhumb or planar interpolation.
+* Improved support for polar and antimeridian-spanning buffers.
+
+v0.7.38
+* `-smooth` now thins vertices along straight/low-curvature runs, giving the whole output more consistent vertex density.
+* Improvements to `-smooth` corner detection, including automatic adjustment of corner-detection sensitivity for geometry that is sparse relative to the smoothing distance, which previously produced spurious corners.
+
+v0.7.37
+* Removed a performance bottleneck in -smooth.
+
+v0.7.36
+* Improved `-smooth` corner detection.
+* Added the `-smooth corner-bias=` option, for adjusting the senstitivity of corner detection.
+* Fixed a `-smooth` hang on very large rings, by making corner detection and culling scale linearly (three O(n^2) hot spots were removed).
+* Fixed several `-smooth` bugs.
+* Recalibrated `-smooth` so the default effect is ~5x stronger: the distance now roughly corresponds to the maximum displacement of the smoothed line from the original at sharp bends.
+* Added an undocumented `-smooth strength=` option: a multiplier on the smoothing kernel relative to the distance (default 1).
+
+v0.7.35
+* Added `compare with original` to the GUI Display menu, for comparing the output of simplify, buffer and smooth with the original lines.
+* Removed `show reference lines` from the Display menu.
+* Improved performance of `-buffer`.
+
+v0.7.34
+* Improved `-buffer` command robustness.
+
+v0.7.33
+* Fixed `-buffer` bugs that could leave an inward notch in a buffered polygon near clusters of concave corners (both at the ring-closure seam and across deeply serrated boundaries at larger buffer distances).
+* Made corner preservation the default in the `-smooth` command.
+* `no-corners` disables corner preservation.
+* Added an undocumented `corner-bias=` option for increasing or decreasing the sensitivity of corner detection.
+
+v0.7.32
+* Added the `-smooth max-bend-angle=` option to control the output vertex density (max bend between output segments in degrees; default is 8, higher values keep fewer vertices).
+
+v0.7.31
+* Improvements to the `-smooth` prefilter.
+
+v0.7.30
+* Added the `-smooth` command for scale-aware smoothing of polygon and polyline features, using a Gaussian (Savitzky–Golay) low-pass filter. The `<distance>` parameter sets the resolution of the result (detail finer than this is removed; larger features are preserved). Options include `gain=` (strength of the curvature-shrinkage correction; 0 disables it, >1 exaggerates bends), `no-prefilter` (skip the default detail-removal preprocessing step), and `planar`.
+
+v0.7.29
+* Fixed a `-buffer topological`/`fill-gaps` bug.
+
+v0.7.28
+* The `-buffer topological` option now partitions overlapping buffer space by proximity to the source polygons (the nearest polygon wins), instead of assigning each overlap to the largest-area polygon.
+* The new `-buffer fill-gaps` mode fills gaps that are narrower than the given distance parameter, including both interior holes and gaps along the outside of a polygon mosaic (such as coastal inlets and rivers).
+* Added the `-buffer fill-gaps max-widening=` option (see docs).
+
+v0.7.27
+* Security fix: prevent a malicious input file's layer names from causing output files to be written outside the intended directory (path traversal).
+
+v0.7.26
+* Added `geodesic` option to `-buffer` command, for buffering projected data using geodesic distances rather than projected planar distances.
+
+v0.7.25
+* Fixed a rare buffer construction error.
+
+v0.7.24
+* `-buffer` performance improvements
+* Added undocumented `band-method` option for slower but possibly more robust buffer creation.
+
+v0.7.23
+* Added a `-buffer` command for buffering points, lines and polygons.
+* The `-buffer topological` option is for buffering groups of adjacent polygons so the buffers extend into the empty space around the polygons without overlapping any of the original polygon rings.
+* The web UI sidebar can be split vertically to show both the layers menu and the console.
+
+v0.7.22
+* Fixed a regression (introduced in v0.7.10) that caused some large GeoJSON files to fail on import with an "Unexpected end of JSON input" error.
+
+v0.7.21
+* Added mapshaper-gui --watch/-w flag, which refreshes the browser when a file imported from the command line changes on disk.
+* Bug fixes.
+
+v0.7.20
+* Breaking change to -rename-layers. When target= option is missing, the command now uses the target layer(s) inherited from previous commands instead of all of the available layers. This change makes -rename-layers behave like other commands. Another change: when the number of names and the number of layers do not match, the program halts.
+* Added (undocumented) -blur command.
+
+v0.7.19
+* Added -proj background= option as an alias for nodata-color=.
+* Made white the default background color when reprojecting image rasters (for when the projected image is not rectangular).
+* Added -o jpeg-quality=<1..100> when generating JPEGs as image layers in SVG output files (default is 85).
+* Added -o linked-images, which saves embedded images as external files linked-to from an SVG file.
+
+v0.7.18
+* Added styling panels for points, lines and polygons.
+* Improved the label style panel.
+* Added a "style layer" link to layers in the layers panel.
+* Made randomly picked categorical color schemes more varied and more random.
+
+v0.7.17
+* Added a new interface for creating and styling labels in the web UI.
+* Added a "show info" link to layer entries in the layers panel.
+
+v0.7.16
+* Support for raster reprojection. Works with the -proj command and on-the-fly reprojection in the web UI.
+* Added `-i raster-type=image|categorical` option for setting the raster type, which determines if bilinear or nearest-neighbor resampling is used when projecting (`image` is the default).
+* Added `-proj resampling=nearest|bilinear` to override the default.
+* Added `-proj nodata-color=` for setting the color of parts of the image that are outside of the projection area.
+
+v0.7.15
+* Improved support for GeoTIFF CRS metadata.
+
+v0.7.14
+* Added support for importing GeoTIFFs and also PNGs and JPEGs with world file and .prj sidecar files.
+* Rasters can only be exported as layers in an SVG.
+* The only supported raster editing operation is clipping to a rectangle.
+* Raster reprojection is not yet supported.
+
+v0.7.13
+* Moved the layers panel in the web UI to the left sidebar, which it now shares with the console.
+* Added options to the `-style` command: `icon`, `icon-size` and `icon-color`. This lets you add a variety of icons to a label layer.
+* Added a warning when SVG exports contain paths with more than Adobe Illustrator's per-path limit of 32,000 vertices.
+
+v0.7.12
+* Auto-fit parameters for UTM, so running `-proj utm` finds an appropriate UTM zone.
+* Account for datasets that cross the antimeridian when auto-fitting projection parameters (e.g. New Zealand).
+
+v0.7.11
+* Fixed bugs affecting GeoParquet i/o.
+* Added a `-o reverse-winding` option to help create D3-compatible GeoJSON files.
+
+v0.7.10
+* Added web UI undo and redo.
+* Added a History menu to the web UI's top bar for turning on undo (disabled by default), moved the console button to a tab on the left side.
+* Added new cell shapes to the -grid command: triangle, triangle2, rhombus, rhombus2, square2.
+* Added cell-scale= option to -grid. Takes a value between 0 and 2 for scaling each grid cell shape.
+
+v0.7.9
+* Support ZSTD compression in GeoParquet files with the new output option: `compression="snappy,zstd,none"` (snappy is default).
+* Added the `-o level=` option for setting ZSTD compression level (range is 1-22).
+* Allow exporting tabular `.parquet` files (with no geometry).
+
+v0.7.8
+* Support for reading/writing GeoParquet files.
+* Added support for PROJJSON and WKT2 CRS definitions (used by GeoParquet and FlatGeobuf).
+* Improved FlatGeobuf i/o.
+
+v0.7.7
+* Support for reading NDJSON-formatted GeoJSON features and JSON data records.
+* -points command uses WKT-formatted coordinates if found in the attribute table.
+* Exporting SVG with the -o metadata flag writes metadata into the SVG file that can survive a round trip through Adobe Illustrator. If the SVG is re-imported into Mapshaper, the original geographic coordinates are restored.
+* Made web UI and docs pages more mobile friendly.
+
+v0.7.6
+* Added a warning if -proj and -simplify affect non-targeted layers. (These commands modify all layers in a dataset, not just the targeted layer(s), because they modify the dataset's shared geometry.)
+* When projection parameters are calculated from a bounding box, the bbox of the targeted layer(s) should be used, not the bbox of all the layers in the dataset.
+* Start exporting a .cpg (codepage/text encoding) along with other Shapefile component files.
+
+v0.7.5
+* Added warnings for a number of common user errors.
+* Added more usage examples to `mapshaper -help <command>`.
+* Improved the summary message after running `-join`.
+* Various other small UI improvements.
+
+v0.7.4
+* Removed support for fetching remote SVG assets at export time.
+* Bumped the minimum supported Node.js version from 12 to 20.11 (Maintenance LTS).
+* Updated dependencies.
+* `mapshaper-gui` improvements.
+* Snapshot cleanup in the web UI is now more dependable.
+* Added a Messages inbox to the web UI for warnings and non-urgent info messages.
+
+v0.7.2
+* Added undo/redo toolbar to the web UI. The toolbar appears in interactive editing modes where undo/redo is supported.
+* Added hamburger menu to the web UI with links to Docs, GitHub, etc.
+
+v0.7.1
+* Added documentation pages and a build script.
+* The -i command can now import a string of inline CSV data on the command line.
+* When exporting snapshot files from the CLI, targeted layers will all be visible when the snapshot is opened in the web UI.
+* Improved support for exporting CRS metadata in FlatGeobuf files.
+* Writing to a `.kmz` output filename now produces a real KMZ (zipped KML) instead of uncompressed KML.
+* The -vars and -defaults commands now write to a separate templating-scope store, distinct from the expression-scope store used by -define, -calc and -include. Values set by -vars are reachable from `{{X}}` substitution but no longer silently leak into JS expressions as bare names. Use -define for values you want visible in both contexts. `{{X}}` substitution falls back to the expression scope, so existing patterns like -calc 'N = count()' followed by `{{N}}` continue to work.
+
+v0.7.0
+* Added support for command files: a sequence of mapshaper commands stored in a `.txt` file, with `#` comments and no need for shell quoting or backslash line continuations. Run a command file with `-run <file>` (or just `mapshaper commands.txt`).
+* Added `{{VAR}}` variable interpolation for mapshaper command options, resolved at run time against environment variables (`{{env.HOME}}`), variables set by `-vars` and `-defaults`, and variables defined dynamically by commands like `-calc`, `-define` and `-each`.
+* Added the -vars command to assign variables (from key=value pairs or a JSON file) and the -defaults command to set variables only if they are not already defined.
+* The -dissolve command now repairs polygon topology by default, producing correct output on inputs that contain overlaps, gaps or other topology errors. The legacy fast algorithm is still available via -dissolve no-repair, which prints a warning if it detects segment intersections in the input.
+* The -dissolve2 command is now a deprecated alias for -dissolve.
+* Added a `batch-mode` flag to the -i command, which makes batch processing of multiple input files explicit (mapshaper \*.shp batch-mode -o dest/). Implicit batch mode (triggered by passing multiple files without a flag) is now deprecated and will print a notice; the default will change in a future release so multiple files are imported together unless `batch-mode` is given.
+
+v0.6.121
+* Added session history to snapshots. This history is imported into a new session only if the session starts by opening the snapshot file.
+* Added a "view session history" link to the snapshot menu (ribbon icon) (an alternative to typing "history" in the console).
+
+v0.6.120
+* Optimized GUI rendering of large datasets
+
+v0.6.119
+* Performance optimizations
+
+v0.6.118
+* Added a selectable list of GeoPackage layers to the "advanced options" import menu in the web UI.
+* Added a layers= option to the -i command to allow importing a subset of GeoPackage layers.
+* Improved GeoPackage i/o. Topologically related layers are imported together, so -simplify and other commands can edit them together. Unrelated layers are imported separately (with a different arc table), which allows -simplify to be applied more selectively.
+
+v0.6.117
+* Partial support for importing SVG files.
+
+v0.6.116
+* Fixed GeoPackage i/o bugs.
+
+v0.6.114
+* Support for reading and writing FlatGeobuf files.
+* Support for reading and writing GeoPackage files.
+
+v0.6.113
+* Support for adding Mapbox vector tile and raster tile basemaps.
+
+v0.6.112
+* Support for drag-dropping or pasting datafile hyperlinks from a web page onto the web UI.
+* Added -o show-all option for exporting snapshots from the CLI with all layers visible in GUI.
+
+v0.6.111
+* Switched to better-performing robust segment geometry functions using BigInt (instead of big.js).
+
+v0.6.110
+* Switched to arbitrary-precision math to improve reliability of -clean, -dissolve2 and several other commands.
+* Added keep-shapes option to -filter-slivers to retain one ring in multipart polygon features that would otherwise be removed completely.
+* Removed the -q/--quick-view option from mapshaper-gui. Now, "quick view" (skipping the import prompt) is the default.
+* Added -i/--import-prompt option to mapshaper-gui, to display the import prompt if desired.
+* Now, SVG coordinate precision is settable using the -o precision= option (previously SVG precision was always two decimals).
+
+v0.6.109
+* Fixed a geometry error
+
+v0.6.108
+* [web] Fix for coordinate precision of drawn rectangles
+
+v0.6.107
+* [web] Added Display menu to configure basemaps and several other settings.
+
+v0.6.106
+* Bug fixes
+
+v0.6.105
+* Updated basemap api keys
+
+v0.6.104
+* Updated rollup
+
+v0.6.103
+* Added -join min-overlap-pct= and min-overlap-area= options for polygon-polygon joins.
+* Added support for interpolating categorical data fields using `join interpolate=`.
+* Switched from browserify to rollup for bundling Node.js libraries for the web UI.
+
+v0.6.102
+* Added Nicolosi Globular (nicol) projection.
+
+v0.6.101
+* Added -affine fit-bbox= option, for transforming data to fit within a bounding box.
+* Improved arrow symbols.
+
+v0.6.100
+* Added -frame command, for creating a rectangular map frame layer with a defined display size. Used to set SVG output size and on-screen symbol scale.
+* Added -o no-null-props option, which uses "properties":{} instead of "properties":null when outputting GeoJSON features with no attribute data.
+* Added support for sub-pixel sizes of pattern fills like hatches and dots (see the -style fill-effect= option).
+* Bug fixes
+
+v0.6.99
+* Bug fixes
+
+v0.6.98
+* Added remove-empty flag for -filter-slivers command.
+
+v0.6.97
+* [web] Prompt user to project imported files to match selected layer, when relevant.
+* [svg] Add fill="none" to unstyled rectangle layers, to prevent map frame rectangles from displaying with SVG default black polygon fill.
+
+v0.6.96
+* Bug fix
+
+v0.6.95
+* Rename "shift/drag box tool" to "rectangle tool" and show instructions when first turned on.
+* Bug fixes
+
+v0.6.94
+* Bug fixes
+
+v0.6.93
+* Bug fix
+
+v0.6.92
+* Bug fix
+
+v0.6.91
+* Bug fix
+
+v0.6.90
+* [cli] Support for writing files up to 4gb on most computers (2gb was the previous limit).
+
+v0.6.89
+* Bug fixes
+
+v0.6.88
+* Bug fixes
+
+v0.6.87
+* Bug fixes
+
+v0.6.86
+* Bug fixes
+
+v0.6.85
+* Added -rectangles bbox=<expression> option, which uses an expression to generate rectangle coords for each feature.
+
+v0.6.84
+* Catch a polygon drawing error.
+
+v0.6.83
+* Added basemap buttons to the map.
+
+v0.6.82
+* Added geos (Geostationary Satellite View) projection.
+
+v0.6.81
+* [web] Add feature deletion to the context menu.
+* [web] Automatically close polygons when using Alt/Cmd-drag to draw paths.
+
+v0.6.80
+* [web] Added pencil-style path drawing using Alt-drag or Cmd-drag.
+
+v0.6.79
+* [web] Added "delete point" to the point editing context menu.
+
+v0.6.78
+* [web] Combined "drag points" and "add points" tools into a single "add/edit points" tool.
+* [web] Enable point and path drawing when no layers have been added.
+
+v0.6.77
+* [web] Updated import interface.
+* [web] Users can turn on the basemap, use the console and more without first importing a file.
+* [web] Added undo to "add points" tool.
+
+v0.6.76
+* [web] Added right-click/ctrl-click context menu.
+
+v0.6.75
+* Added auto-detection of GB18030 text encoding (used in some Chinese language Shapefiles).
+* Improvements to polygon drawing.
+
+v0.6.74
+* Bug fixes
+
+v0.6.73
+* Added drawing/reshaping to polygon layer editing menu.
+* Added info box with drawing instructions.
+
+v0.6.72
+* Bug fix
+
+v0.6.71
+* [web] Added a new edit mode for polyline layers: line drawing combined with line reshaping (by adding and dragging vertices), removed the old "edit vertices" menu item.
+* [web] Added attribute editing to the inspection control, removed the "edit attributes" menu item.
+* [web] Added a new button ("Frame") to the box tool buttons, which creates a rectangular map frame.
+
+v0.6.70
+* Fix for bug affecting -mosaic and -polygon commands (they incorrectly incorporated paths from other layers).
+
+v0.6.69
+* Web UI bug fixes
+
+v0.6.68
+* [scalebar] giving a pair of distances creates a dual-unit scale bar (style b only).
+* [web] minor bug fixes and improvements.
+
+v0.6.67
+* -rectangle command with width=<size> option creates a "frame" layer to use as the extent of an SVG map by setting the size of the SVG viewport (an alternative to using -o fit-extent=<size> option).
+* [web] Map symbols scale as the map zooms when a frame layer is visible.
+* [web] Draggable box tool resizes symmetrically with the shift key pressed.
+* [web] Allow selected layer to be temporarily hidden (via layers menu).
+
+v0.6.66
+* [web] Added ability to edit attribute data of multiple selected features ("select features" tool).
+* [web] Added interactive tool for adding points to point-type layer by clicking on the map.
+* [web] Added "Add empty layer" button to the layers menu.
+* [web] Added center handle for dragging the interactive box tool.
+* Added -o fit-extent= option, to use a layer extent (typically a layer containing a single rectangle) for setting the extent of SVG output.
+
+v0.6.65
+* Added "drag-to-resize" editing mode for resizing rectangles interactively.
+
+v0.6.64
+* Added more options for the -scalebar command, including two styles, a and b.
+
+v0.6.63
+* Add support for nested -if/-elif/-else/-endif commands.
+
+v0.6.62
+* Removed restrictions on the allowable size of the graticule interval (in degrees).
+* Added `targets` object to the `-run` command expression context, giving access to multiple target layers.
+
+v0.6.61
+* Introduced the `fix-geometry` option to the `-snap` and `-o` commands, for removing segment intersections caused by coordinate rounding and TopoJSON quantization.
+
+v0.6.60
+* Officially added the previously undocumented -scalebar command.
+
+v0.6.59
+* Second attempted fix for -require error on Windows.
+
+v0.6.58
+* Fix for -require error on Windows.
+
+v0.6.57
+* Added io.ifile() method for creating dynamic input files in the run command
+
+v0.6.56
+* Added support for importing ES modules using the -require command.
+* Removed the -require init= function.
+
+v0.6.55
+* Improvements to the web UI intersections tool.
+
+v0.6.54
+* Only check for line self-intersections in web UI if user clicks the "Check line intersections" label.
+* Added support for curly-bracket delimited expressions to -run command strings.
+
+v0.6.53
+* Added -classify outer-breaks=<min,max> option, for limiting the effective data range when calculating equal-interval breaks and continuous color ramps.
+
+v0.6.52
+* Added -calc + option, which saves calc output to a new layer.
+* Added -info + option, which saves info output to a new layer.
+
+v0.6.51
+* Improved support for running applyCommands() api function in a web browser.
+
+v0.6.50
+* Fix for label dragging bug.
+
+v0.6.49
+* Fix for issue #610 (geojson getters in -run and -each should return polygons with RFC 7946 winding order).
+* -join interpolate now works correctly when the source layer contains overlapping polygons.
+
+v0.6.48
+* Added `target.geojson` getter that returns the contents of the target layer as a GeoJSON `FeatureCollection`. Useful in the `-run` command for passing layer data to an external script.
+
+v0.6.47
+* Added support for using JSON data as an argument to the -i command.
+* Added an `io` object with an `io.addInputFile()` method to the `-run` command's expression context, to support loading dynamically generated datasets.
+
+v0.6.46
+* Added save to clipboard option to web UI export menu.
+* In -each expressions, `this.geojson` setter now accepts nulls and FeatureCollections in addition to single Features.
+
+v0.6.45
+* Added -o hoist=<fields> option for moving GeoJSON Feature properties to the root of each Feature.
+* Simplification data is removed from snapshot files (except for temporary snapshots in the web UI).
+
+v0.6.44
+* Added -style css= option for adding inline CSS to SVG symbols.
+* Bug fixes
+
+v0.6.43
+* Bug fixes
+
+v0.6.42
+* Added "+ add field" button to web ui inspector in attribute editing mode.
+
+v0.6.41
+* Bug fixes
+
+v0.6.40
+* Added support for decimal degree formats in DMS functions, e.g. `"[-]DDD.DDDDD°"`.
+* Added `-o svg-bbox=` option, for specifying the extent of SVG maps in projected map units.
+* Started adding version numbers to snapshots exported from the ribbon menu (e.g. "snapshot-01.msx").
+
+v0.6.39
+* Added `format_dms()` and `parse_dms()` functions to `-each` expressions, for working with DMS-formatted coordinates.
+
+v0.6.38
+* Added `-symbols opacity=` option.
+
+v0.6.37
+* Support for simple line symbols using `type-arrow head-length=0`.
+
+v0.6.36
+* Improved `fill-effect=sphere` gradient.
+* Sphere effect can be previewed in the web UI.
+
+v0.6.35
+* Bug fixes
+
+v0.6.34
+* Added -style fill-effect=sphere to apply a gradient effect to the outline of a globe.
+
+v0.6.33
+* Bug fixes
+
+v0.6.32
+* Web UI improvements
+
+v0.6.31
+* Updates to gui file import dialog
+* Updated projections library to fix a bug.
+
+v0.6.30
+* Added -filter-fields invert option.
+
+v0.6.29
+* Bug fixes
+
+v0.6.28
+* Fix for bug that prevented importing data from stdin
+
+v0.6.27
+* Bug fix
+
+v0.6.26
+* Updated projections library to fix a bug.
+* Added getters partCount, isNull, bounds, width, and height to "this" object for point features in expressions.
+* Added undocumented "blacki" classification method.
+* Added collectIds() function to calc= expressions of the -join command.
+
+v0.6.25
+* Added "Erase" button to box tool in web UI.
+* Bug fixes and optimizations.
+
+v0.6.24
+* Added -info save-to=<filename> option, for saving layer information to a JSON file.
+* Apply the same amount of compression to all exported snapshots.
+* Bug fixes
+
+v0.6.23
+* Update to web UI export options.
+
+v0.6.22
+* Bug fixes
+
+v0.6.21
+* Bug fixes
+
+v0.6.20
+* Added "Snapshot file" export option to web UI.
+* Updated the layers menu in the web UI.
+* Use more compression when exporting snapshots via export menu or -o command.
+
+v0.6.19
+* Added support for a new file format (.msx) for saving and restoring mapshaper sessions.
+* Added a web UI widget for working with session snapshots.
+
+v0.6.18
+* Fix for bug preventing some zipped Shapefiles from being imported in the web UI.
+
+v0.6.17
+* Commands -require, -run, -define can now be used before data is loaded.
+
+v0.6.16
+* Added support for saving output files to a user-selected directory in the web UI, if supported by the browser.
+* Added support to the web UI for reading and writing gzipped (.gz) files.
+* Improved support for .zip and .gz files in both web and cli programs.
+* Minor update to dbf text encoding detection.
+
+v0.6.15
+* Added support to the CLI for reading .kml and .kmz files.
+* Added support to the CLI for writing .kml files.
+* Added support to the web UI for writing .kml files.
+
+v0.6.14
+* Added support to the CLI for reading and writing .zip files.
+
+v0.6.13
+* Gzipped output is inferred if output filename ends in ".gz".
+
+v0.6.12
+* Support for reading larger .gz files (up to 2GB unzipped GeoJSON and CSV files).
+
+v0.6.11
+* Added support to the CLI and Node interface for reading and writing gzipped files with the .gz extension.
+
+v0.6.10
+* Added draggable handles to the box tool in the web UI.
+
+v0.6.9
+* Added bboxContainsRectangle(), bboxIntersectsRectangle(), bboxContainedByRectangle() and bboxContainsPoint() functions to the "this" object in expressions used by -each, -filter, -each where= and other contexts.
+
+v0.6.8
+* Fix: support fill color for svg image symbols.
+* Added range=<min,max> option to -classify command.
+
+v0.6.7
+* Give users running mapshaper-gui on localhost access to basemaps.
+
+v0.6.5
+* Fixed an error using -classify command in the web UI console.
+
+v0.6.4
+* Added quartile1(), quartile2(), quartile3(), iqr() (interquartile range), and mean() to -calc and calc= expressions.
+
+v0.6.3
+* Added quantile() function to -calc command and calc= expressions.
+
+v0.6.2
+* Added -stop command (can be used in combination with -if/-elif/-else to halt processing under various conditions).
+
+v0.6.0
+* Internal changes that shouldn't affect Mapshaper users.
+
+v0.5.118
+* Added -comment command, as a way to add inline comments in long sequences of commands.
+* Added support for importing .cpg files (Shapefile text encoding) in the web UI.
+
+v0.5.117
+* Support reading DBF files larger than 2GB (command line program only).
+
+v0.5.116
+* Prevent 0-length DBF string fields, for interoperability with PostGIS.
+
+v0.5.115
+* Scalebar tweaks.
+
+v0.5.114
+* Bug fixes
+
+v0.5.113
+* Added -symbols arrow-style=stick option, for making stick arrows
+* Added -symbols stroke= and -symbols stroke-width= options for styling stick arrows
+
+v0.5.112
+* Added support for labels with symbols.
+* Symbols created with the -symbols command have a default size (e.g. `-symbols type=star` creates star symbols with a default size).
+* Mapshaper no longer outputs SVG circles with radius 0.
+
+v0.5.111
+* Added -snap endpoints option, for snapping together line endpoints that don't quite meet.
+* Added buttons to the basemaps menu.
+* -if/-elif commands work (with limited functionality) with zero or multiple target layers.
+
+v0.5.110
+* Preliminary support for importing .kml files
+* Support for .kmz files in the browser UI
+* Bug fixes
+
+v0.5.109
+* Support setting linejoin and linecap for individual SVG features.
+
+v0.5.108
+* Bug fixes
+* Added file_exists() to -if/-elif expressions
+
+v0.5.106
+* More basemap fixes.
+
+v0.5.105
+* More basemap improvements.
+
+v0.5.104
+* Improvements to the basemap feature.
+
+v0.5.103
+* Bug fixes
+
+v0.5.102
+* Fix for bug in -v/--version command.
+
+v0.5.101
+* Update dependency.
+
+v0.5.100
+* Added support for using the basemap feature with datasets in a wide variety of projections.
+
+v0.5.99
+* Added support for viewing data against a Mapbox basemap (enabled on the mapshaper.org site).
+
+v0.5.98
+* Better handling of null data by the -classify command.
+
+v0.5.97
+* Better warnings and error messages.
+
+v0.5.96
+* Added colors=random option to the -classify command.
+* Added more sensible default behavior to the -classify command.
+
+v0.5.95
+* Added vertex deletion in "edit vertices" mode by double-clicking on non-endpoint vertices.
+
+v0.5.94
+* Added file_exists() test to -if/-elif expression context.
+
+v0.5.93
+* Add a vertex in "edit vertices" mode by dragging the midpoint of a segment.
+
+v0.5.92
+* Show vertices in the "drag vertices" editing mode.
+* Added -c/--commands option to mapshaper-gui, for running console commands when data is first imported.
+
+v0.5.91
+* Added -print command, for printing messages to the console or terminal. Useful in conjunction with the -if/-elif/-else commands.
+* Added field_exists(), field_type() and field_includes() functions to -if expressions.
+
+v0.5.89
+* Added help documentation for -symbols command.
+* Added --name option to mapshaper-gui, for setting the layer names of imported files.
+
+v0.5.88
+* Added -if/-elif/-else/-endif commands for running commands selectively.
+* Bug fixes
+
+v0.5.87
+* Added undo/redo to the "drag vertices" interactive editing mode.
+
+v0.5.86
+* Added keyboard commands for undo/redo for interactive point and label positioning.
+
+v0.5.85
+* Improved arrow and star symbols.
+
+v0.5.84
+* Bug fixes
+
+v0.5.83
+* Added support for importing GeoJSON features with GeometryCollection type geometries.
+* Added "ring" symbol type.
+
+v0.5.82
+* More options for arrow styling.
+
+v0.5.81
+* Bug fixes
+
+v0.5.80
+* Added arrows, stars and polygons to undocumented -symbols command.
+
+v0.5.79
+* More permissive importing of some non-standard Shapefiles.
+
+v0.5.78
+* Added support for reading and writing fixed-width text files.
+* Bug fixes.
+
+v0.5.77
+* Added -dashlines command (formerly -split-lines).
+* Added support for joining polyline and polygon layers using point-method
+
+v0.5.76
+* Fixed bug in mapshaper-gui -q.
+* Added undocumented -split-lines command.
+
+v0.5.75
+* Added support for importing data by copy-pasting files onto the web UI (works in Chrome and Safari but not Firefox).
+
+v0.5.74
+* Added support for importing data in the GUI by pasting JSON and delimited text onto the browser window.
+* Sped up drawing shapes in the GUI.
+
+v0.5.73
+* Added this.geojson getter/setter to -each expressions. This can be used in combination with -require to transform the geometry of individual features using an external script.
+
+v0.5.72
+* Improved performance of non-adjacent polygon coloring using DSATUR algorithm.
+
+v0.5.71
+* Added -classify non-adjacent option, for assigning non-adjacent colors to a polygon layer in a randomish pattern.
+
+v0.5.70
+* Added -join duplication option, which duplicates features in the target layer when many-to-one joins occur.
+
+v0.5.69
+* Added undocumented -ignore command.
+* Bug fix
+
+v0.5.68
+* Bug fix
+
+v0.5.67
+* Bug fix
+
+v0.5.66
+* Improve interactive selection.
+* Added undocumented -define command.
+
+v0.5.65
+* Web UI zoom buttons respond to variable-length clicks.
+* Bug fixes
+
+v0.5.64
+* Bug fixes
+
+v0.5.63
+* Added -o decimal-comma option, for exporting CSV numbers with decimal commas.
+* Fix for issue #497 (error erasing with overlapping polygons).
+
+v0.5.62
+* Added -i decimal-comma option, for importing numbers from CSV files with numbers formatted like 1.000,23 or 1 000,23
+
+v0.5.61
+* Bug fixes
+
+v0.5.60
+* Added save-as= and values= options to -dots command (like -classify).
+
+v0.5.59
+* Added -merge-layers flatten option, for removing overlaps when merging multiple polygon layers.
+* Added -clean overlap-rule=[min-id|max-id|min-area|max-area] option.
+* Added -join max-distance= option for point-to-point spatial joins.
+* Added support for many-to-one point-to-point spatial joins.
+* Added -join largest-overlap option for polygon-to-polygon spatial joins, to select a single polygon to join when multiple source polygons overlap a target polygon, based on area of overlap.
+* Added undocumented -filter-points command.
+
+v0.5.58
+* Bug fixes
+
+v0.5.57
+* Added "allow-overlaps" option to -dissolve2 and -clean, which allows polygon features to overlap.
+* Added "Hill Eucyclic" projection (+proj=hill).
+* Fixed bug that removed overlapping polygons when projecting polygon layers.
+
+v0.5.56
+* Added "-graticule polygon" option, which creates a polygon matching the outline of the projected graticule.
+* Allow bare PROJ projection names in CRS definitions (e.g. "robin +lon_0=120").
+* Web UI style updates.
+
+v0.5.55
+* Improved support for projected graticules.
+* Fixed shape clipping for the bertin1953 projection.
+
+v0.5.54
+* Fix for issue #485 (error when using * wildcard to match all files in a directory)
+
+v0.5.53
+* Fixed clipping area of nsper (Near Side Perspective).
+
+v0.5.52
+* Automatically clip content to an appropriate circle when applying most of the azimuthal projections (including stere,ortho,gnom,laea,nsper).
+* Added the -proj clip-angle= option to override the default clipping circle.
+* Automatically clip away the poles when projecting to Mercator.
+* Added the -proj clip-bbox= to clip content to a lat-long bounding box before projecting.
+* Added the -graticule interval= option, for customizing the spacing of graticule lines.
+* Added a circular outline to the graticule when creating a graticule for an azimuthal projection.
+
+v0.5.51
+* Apply antimeridian cutting to more projections.
+* Assign categorical colors automatically using -classify categories=\*.
+* Add several 20-color categorical color schemes.
+
+v0.5.50
+* Bug fix for an argument parsing error.
+
+v0.5.49
+* Split polylines and lines that cross the rotated antimeridan when applying a world projection with a non-zero central meridian.
+* Fixed error when sending output to /dev/stdout.
+
+v0.5.48
+* Update to Cupola projection.
+
+v0.5.47
+* Updated projections library to include the "Cupola" projection.
+
+v0.5.46
+* Fix for issue #476.
+
+v0.5.45
+* [web ui] Made layer names in the export dialog settable.
+* Tuned parameters in the -dots command.
+
+v0.5.44
+* Added "per-dot=" option to the -dots command, for setting the value-to-dot ratio. To represent 100 people per dot on a population map, you would use per-dot=100.
+* Added "copy-fields=" option to -dots, to copy one or more data fields from the original polygon layer to the generated dot features.
+* Added "multipart" option to -dots, which combines groups of same-color dots into multi-part features.
+
+v0.5.43
+* Improved evenness of dot placement.
+* Replaced "random" and "spacing=" options with a single "evenness=" option, which varies from 0 (random placement) to 1 (very even).
+
+v0.5.42
+* Added -dots command for making dot density maps.
+
+v0.5.41
+* Fixed error parsing .prj files for southern UTM zones.
+
+v0.5.40
+* Added stops= option to the -classify command. This accepts a pair of percentages (e.g. stops=10,90) for reducing the range of a color ramp.
+* Deprecated -classify color-scheme= option. Instead, -classify colors= accepts color scheme names (e.g. -classify colors=Blues).
+* Added every() and some() functions to -calc and calc= expressions.
+* Added options for generating SVG map keys to the -classify command.
+
+v0.5.39
+* Added mapshaper-gui -t/--target option, for setting the initially selected layer.
+* Added query-string variables a/display-all, q/quick-view and target=, for customizing the initial view when sending someone a mapshaper url containing a list of files to display.
+
+v0.5.38
+* Added "-points midpoints" flag, to find the midpoints of polyline features.
+
+v0.5.37
+* Performance improvements for GeoJSON parsing.
+
+v0.5.36
+* Improved support for reading large GeoJSON files.
+
+v0.5.35
+* Calculate projection params based on data extent for four projections, by running -proj lcc|aea|tmerc|etmerc (experimental).
+
+v0.5.34
+* Add -o ndjson flag, to output GeoJSON and JSON records in NDJSON format.
+* Improvements to -classify command
+
+v0.5.33
+* Add -classify hybrid, which picks evenly spaced internal class breaks and quantiles for the first and last buckets
+* Add -classify nice, which is similar to the "hybrid" classification scheme, but tries to pick round class break values.
+* Bug fixes
+
+v0.5.32
+* Bug fixes
+
+v0.5.31
+* Now, -clean command can merge contiguous parts of polyline features, for example, sections of roadway in which each (sub-feature) part is a simple line segment.
+* Added `int_median()` function to the expression context, for calculating medians using piecewise linear interpolation (e.g. median income from range data).
+
+v0.5.30
+* Improved support in -classify for interpolation, including interpolation of numbers as well as colors.
+
+v0.5.29
+* Added -classify command, with support for classifying data values using sequential (quantile and equal-area) and categorical methods. Built-in support for named color schemes from d3.
+* Added -colors command, which prints the names of built-in d3 color schemes.
+
+v0.5.28
+* Fixed a performance bug that caused importing of some large GeoJSON files to be very slow.
+
+v0.5.27
+* Added layer.bbox property to JS expression context.
+* Added support for listing class breaks in descending order in -colorizer command.
+* Improvements to (undocumented) arrow symbols.
+
+v0.5.26
+* Added support for assignment syntax to -rename-layers, like the -rename-fields syntax (e.g. -rename-layers states=adm1,counties=adm2).
+* Added -o fit-bbox= option for TopoJSON export, which scales and shifts the coordinates of the exported data to fit within a given bounding box.
+
+v0.5.25
+* Added -snap command, with both interval= and precision= options.
+
+v0.5.24
+* Performance improvements
+
+v0.5.23
+* Added "dashes" fill pattern. The pattern "dashes 5px 4px 1px black 5px white" creates 1-pixel dashed lines spaced 5px apart, with 5px dashes at 4px intervals.
+
+v0.5.22
+* Added a "Select All" checkbox to the web UI export menu when there are more than two layers.
+* Improved -info display and interactive editing of Date objects.
+
+v0.5.21
+* Renamed -style fill-hatch= option to -style fill-pattern=
+* Reversed order of hatch fill arguments. "black 2px white 2px" changes to "2px black 2px white".
+* Added patterns for dots and squares. "dots 2px black 5px white" gives 2px black dots with 5px spacing on a white background. "squares 2px black 5px white" gives squares instead of round dots. Both patterns can take multiple colors and an optional rotation: "squares 45deg 2px black red blue 5px white".
+
+v0.5.20
+* Fix for bug introduced in previous version
+
+v0.5.19
+* Bug fix and UI tweaks
+
+v0.5.18
+* Added support for hatches with more than two colors.
+* Added 'drag vertices' interaction mode for line layers, as a precursor to a future callout line tool.
+* Tried to make the arrow menu more intuitive by not preselecting any of the items.
+
+v0.5.17
+* Added support for rotation parameter to "fill-hatch=" style, e.g. fill-hatch="-45deg #eee 2px #999 2px"
+* Renamed -proj "from=" option to "init=". This better describes the option's function, which is to set the coordinate system of a dataset without touching the coordinates.
+
+v0.5.16
+* Updated dependencies
+
+v0.5.15
+* Added experimental "blend()" function to the expression context, for doing weighted-average blending of two or more rgb colors. Function signature is: blend(col1, weight1, col2, weight2, ...)
+* Added limited support for hatched polygon fills, using -style fill-hatch="" syntax. Example hatch string: "black 2px #eee 2px"
+
+v0.5.14
+* Added -i csv-dedup-fields to deduplicate CSV fields with identical names.
+* Added -style stroke-opacity and -style fill-opacity options.
+
+v0.5.13
+* Bug fixes
+
+v0.5.12
+* Bug fixes
+
+v0.5.11
+* Added "-uniq index" option, which adds an "index" property for indexing duplicate features instead of deleting them.
+* Added support for reading and writing non-ascii field names in Shapefiles.
+* Now, the -o command can create new subdirectories for output files.
+
+v0.5.10
+* Added -inlay command, for inscribing the contents of a second polygon layer into the target polygon layer.
+
+v0.5.9
+* Added "where=" option to the -dissolve command, for dissolving a subset of features in a layer.
+
+v0.5.8
+* Automatically detect encoding of CSV files when byte-order-mark (BOM) is present.
+* Extend "json-path" option to support importing GeoJSON and TopoJSON data that is nested inside a larger JSON object.
+
+v0.5.7
+* Added "rewind" flag to the -clean command. This option fixes winding-order errors by converting holes that are outside of any ring into space-enclosing rings, and rings that are nested directly inside of other rings into donut holes.
+
+v0.5.6
+* Default GeoJSON output now complies with RFC 7946 with respect to polygon winding order and antimeridian-crossing bounding boxes. This means that space-enclosing rings are CCW and holes are CW. This is the opposite of how mapshaper used to output polygon rings without the rfc7946 flag.
+* Added a gj2008 flag to the output command (-o gj2008). This flag maintains compatibility with the way Mapshaper used to output GeoJSON: CW rings, CCW holes, and bbox arrays that are always [xmin, ymin, xmax, ymax].
+* The old rfc7946 flag is no longer useful, but is retained for backwards compatibility. This flag (as before) truncates coordinates to 6 decimal places. Now, using this flag is equivalent to adding precision=0.000001 to the output command.
+
+v0.5.5
+* Prompt the user before closing the browser tab, if data has changed since the session began or since the last export.
+* Include interactive data edits in the web ui console's "history" output.
+
+v0.5.4
+* Bug fixes
+
+v0.5.3
+* An error is triggered if a layer id from a target= option or the -target command does not match any layer.
+
+v0.5.2
+* Web interface bug fixes.
+
+v0.5.1
+* Web interface tweaks.
+
+v0.5.0
+* Refactored the codebase to use ES modules.
+* Switched to the "rollup" module bundler.
+
+v0.4.163
+* Updated dependences, increased minimum Node version to 6.0.
+
+v0.4.162
+* Added -dissolve multipart option, for grouping parts without modifying geometry.
+* Added -polygons from-rings option, for creating polygons when the original layer contains polyline rings.
+* -filter-fields now sets the order of fields in CSV output.
+
+v0.4.161
+* Tweaked the pointer interaction interface.
+
+v0.4.160
+* Bug fixes
+
+v0.4.159
+* Changed GUI icon and user interaction for switching interaction modes.
+* Added feature-selection interaction mode to the Web UI, for selecting features with the mouse.
+* Added box-select (using shift-drag) to feature-selection mode.
+* Added 'random' option to the -colorizer command, for assigning colors randomly.
+
+v0.4.158
+* Support bracket notation in -i json-path= option, for targetting datasets nested inside JSON arrays.
+
+v0.4.157
+* Fixes and other improvements to the interactive box tool.
+* Fixes to the web console "history" command.
+* Added -filter bbox= option, to retain features that intersect a bbox.
+* Added -filter invert option, to retain the features that would have been deleted.
+
+v0.4.156
+* Added box tool to the GUI, activated by shift-drag. The box tool supports clipping, feature selection + filtering, bbox coordinate lookup and zoom-to-box.
+
+v0.4.155
+* Added mapshaper-gui -q/--quick-view option, for bypassing the import dialog.
+* Added -join prefix= option, to add a prefix to the names of fields joined from the source dataset.
+* Updated CLI -info command to show only target layer(s) by default. Use -info target=* for information about all layers.
+
+v0.4.154
+* Added -divide command, for dividing a polyline layer by a polygon layer. Also joins data from the polygon layer to the divided polyline layer.
+
+v0.4.153
+* Allow setting empty layer names using -rename-layers "".
+* Fixed bug affecting polygon-to-polygon spatial joins using the "point-method" flag.
+
+v0.4.152
+* Rename json-subtree option json-path.
+
+v0.4.151
+* Added -i json-subtree=<path> option, for importing a nested array of JSON data records.
+* Added -dissolve group-points option, to convert groups of point/multipoint features to multipoint features, instead of converting groups to centroids.
+
+v0.4.150
+* Fixed a bug affecting the calc=[expression] option when performing polygon-to-polygon spatial joins.
+
+v0.4.149
+* Improve OGC Simple Features compliance of cleaned polygons.
+
+v0.4.148
+* Added sliver-control=[0-1] option to -clean -dissolve2 and -filter-slivers commands, for variable sliver control.
+* Made sliver-control=1 the default value for these commands.
+* Tweaked the default area threshold for gap/sliver removal to use a larger threshold for more detailed datasets (detail is estimated using average segments per ring).
+* Changed name of min-gap-area option to gap-fill-area (original name also works).
+* Added tests of -clean command polygon output to verify OGC Simple Features compatibility.
+
+v0.4.147
+* Improved robustness of path intersection (used by many commands, including -clean -dissolve2 -clip -erase -union).
+
+v0.4.146
+* Added support for line and point type features to the -clean command.
+* Added (undocumented) -snap command, for snapping vertices post-import.
+
+v0.4.145
+* Added -grid command for creating grids of square or hexagonal polygons. Assumes target layer is projected. Creates a grid layer that entirely contains the bounding box of the target layer.
+* Added polygon-to-polygon spatial joins to the -join command.
+* Added "interpolate=" option to the -join command, for reassigning attribute values of the listed fields using simple areal interpolation (assumes even distribution of data within polygon areas) (polygon-polygon spatial joins only).
+* Added "point-method" option to the -join command, for performing polygon-polygon spatial joins using an alternate method.
+* Added "-lines segments" option, to explode a polygon or polyline layer into individual segments.
+
+v0.4.144
+* Change -union command syntax to use two or more target layers as input
+* Added -union fields= option for selecting which fields from the input layers to retain.
+
+v0.4.143
+* Fix for web UI bug that caused command line options to be ignored.
+
+v0.4.142
+* Added -union command for creating a mosaic from two polygon layers, preserving data from both layers.
+* Added -mosaic calc= option, which provides options for transferring data from source polygons to mosaic polygons.
+* Allow -merge-layers to combine a shape layer with a layer that has null geometry.
+
+v0.4.141
+* Added "history" command to browser console, for displaying browser session as a command line shell command.
+* Added -mosaic as a documented command (flattens overlapping polygons by converting overlaps to separate features).
+
+v0.4.140
+* Fix error in web UI.
+
+v0.4.139
+* Send output of -version, -help and some other informational commands to stdout, not stderr.
+
+v0.4.138
+* Added runCommandsXL() function to Mapshaper's Node API, for running commands with more memory.
+
+v0.4.137
+* Further improvements to -data-fill and -fuzzy-join. Added 'contiguous' flag to ensure that only the most important one of multiple same-value areas is retained.
+
+v0.4.136
+* Improvements to -data-fill and -fuzzy-join
+
+v0.4.135
+* [shapefile] If a projection has no known WKT definition, generate a fallback .prj file with an embedded Proj.4 string (readable by QGIS and gdal but not ArcGIS).
+
+v0.4.134
+* Fixed "npm run build" on Windows
+
+v0.4.133
+* Performance improvements for CSV importing
+
+v0.4.132
+* Added -i csv-lines=[integer] option, for importing the first n records from a CSV file
+* Added -i csv-skip-lines=[integer] option, for skipping lines at the top of a CSV file
+* Added -i csv-field-names=[list] option, for assigning field names to the columns of a CSV file.
+
+v0.4.131
+* Added optional size parameter to mapshaper-xl (e.g. mapshaper-xl 16gb)
+* Improve performance of -i csv-fields=  option.
+
+v0.4.130
+* Input of GeoJSON and TopoJSON is more fault-tolerant.
+
+v0.4.129
+* Work around layer menu issue caused by Chrome update.
+
+v0.4.128
+* Fix Travis build.
+
+v0.4.127
+* Updates to albersusa hybrid projection: new Alaska projection (lon_0 is at 148W) and support for customization. Customization examples: "albersusa +PR" "albersusa +AK.lon_0=-141 +AK.scale=0.4 +AK.dx=10000".
+* "-proj" command no longer throws an error if one or more coordinates fail to project. Instead, the points or arcs containing projection errors are removed.
+* Added an npm "prepare" script for users who are installing mapshaper from source code.
+* Added an "npm run build" script
+
+v0.4.126
+* The -simplify command now ignores datasets containing no paths instead of stopping with an error. This is useful in scripts, when clipping creates an empty layer.
+
+v0.4.125
+* API functions applyCommands() and runCommands() return a Promise if called without a callback argument.
+
+v0.4.124
+* Added -lines groupby=[field] option, for converting points into multiple lines.
+* Added -clip bbox2=[bbox] option, which uses a higher-performance (but experimental) bounding box clip function.
+
+v0.4.123
+* Now, -lines command converts a layer of points to a single polyline.
+
+v0.4.122
+* Added -drop holes option, for removing holes from polygons.
+
+v0.4.120
+* Fix for several GUI glitches
+
+v0.4.119
+* Fix Travis build error
+
+v0.4.118
+* Added string interpolation to source layer name in -clip/-erase, using template literal syntax (e.g. -clip source='${target}-clip')
+
+v0.4.117
+* Added -o svg-data= option for exporting data fields as SVG data-* attributes.
+
+v0.4.116
+* Bug fixes
+
+v0.4.115
+* Improved -dissolve2 to handle polygons that overlap each other in complex ways.
+
+v0.4.114
+* Fix: using -join with the "unjoined" and "unmatched" flags no longer adds debugging layers to the next command's default target layer(s).
+* Added layer names to tab completion in the web UI console.
+
+v0.4.113
+* Fix for issue #339 (no .prj output after projecting to +proj=stere)
+
+v0.4.112
+* Fix for issue #337 (error when clipping or erasing polygon rings inside holes)
+
+v0.4.111
+* Added $.length accessor to -each expressions with polyline features
+
+v0.4.110
+* Added +proj=patterson projection
+
+v0.4.109
+* Updated format of -info command output, for better legibility.
+* Fixed layer duplication bug when running -clip/-erase with the "+" option.
+
+v0.4.108
+* Now you can import all CSV fields as string data using '-i string-fields=\*' option.
+* Now the -points command auto-detects commonly used names for x and y coordinates (e.g. longitude,latitude,lon,lng,lat,x,y) when converting tabular data to points. It is no longer necessary to add x= and y= parameters to the -points command.
+
+v0.4.107
+* Preliminary work on new -symbols command.
+
+v0.4.106
+* Automatic DMS parsing in -points x= y=.
+* Added a reference to the target record to -join where= expressions, named "target".
+
+v0.4.105
+* [gui] Added separate interface modes for inspecting attributes, editing attributes, dragging labels to change offset from anchor, and dragging point symbols to change coordinates.
+* [cli] Improved error message when trying to read unsupported file types.
+
+v0.4.104
+* Added "-uniq invert" option, for retaining non-unique records (useful e.g. for troubleshooting many-to-one joins).
+* Improved some error messages.
+
+v0.4.103
+* Added "weighted" option to the "-filter-slivers" command. When used with the "min-area=" option, the "weighted" flag multiplies the area of each polygon ring by the "Polsby-Popper" compactness metric, so sliver-shaped rings have a lower effective area.
+* Added "this.perimeter" to the JS expression context. Perimeter values are in meters for unprojected data or in projected units (usually meters) for projected data.
+* Added "this.compactness" to the JS expression context. Compactness is the "Polsby-Popper" score of each polygon feature.
+* Added "-points vertices2" option, which is like "-points vertices", but retains every vertex of the original polygon or polyline instead of removing duplicate vertices within each feature.
+* Fix for issue #310.
+
+v0.4.102
+* Close issues #308 and #309.
+
+v0.4.101
+* Re-publish to npm
+
+v0.4.100
+* Enable support for variable simplification amounts at the feature level using JS expressions. Adding the "variable" keyword to the -simplify command turns on variable simplification.
+
+v0.4.99
+* Support reading CSV files larger than 2GB.
+* Added -i command option csv-filter=, for filtering CSV records on import using a JS expression.
+* Added -i command option csv-fields=, for importing a subset of fields from a CSV file.
+* Faster rendering of many unstyled point symbols (which are drawn as little squares).
+
+v0.4.98
+* Fixed a performance regression.
+
+v0.4.97
+* Updated mproj version to include bertin1953 projection.
+
+v0.4.96
+* Fix for issue #304 (inaccurate centroids for some tiny polygons, caused by floating point rounding).
+
+v0.4.95
+* Fixed some clipping and dissolving errors caused by floating point inaccuracy.
+
+v0.4.94
+* Fix for problem importing GeoJSON with non-standard properties
+
+v0.4.93
+* Improve CRS detection when merging datasets
+
+v0.4.92
+* Added '-o pixels=' and '-frame pixels=' options for scaling SVG output based on the number of pixels in the output image.
+
+v0.4.91
+* Upgraded to 0.0.18 of mapshaper-proj.
+
+v0.4.90
+* Upgraded to v0.0.17 of mapshaper-proj, which includes the "Equal Earth" projection (+proj=eqearth).
+
+v0.4.89
+* Convert undefined and null values to empty strings when outputting a DBF string field.
+
+v0.4.88
+* Fix: convert non-alphameric characters in DBF field names to underscores.
+* Web UI updates to support putting more than one mapshaper instance on a single page.
+
+v0.4.87
+* Added experimental -run command, for creating commands on-the-fly and running them.
+* Added experimental -require command, for importing Node modules for use in -each expressions.
+* Added "d" as an alias for "this.properties" in expressions, with a nod to D3.
+* -join command prints a warning instead of erroring if no records are joined.
+
+v0.4.86
+* [gui] Now you can drag layers in the layer menu to change their stacking order.
+* Added mapshaper-gui -a option, to display all layers initially.
+* The -target command can now target multiple layers.
+* Added undocumented aspect-ratio= option to -rectangle and -rectangles commands.
+
+v0.4.85
+* [style] Added -style stroke-dasharray= option.
+* Added -o max-height= option, for limiting the height of SVG output files.
+* Added undocumented -rectangles option, for creating a box around every feature in a layer.
+* Bug fixes
+
+v0.4.84
+* [rectangle] offset= option accepts a list of four values (minx,miny,maxx,maxy) in addition to a single value. Value can be a percentage or an interval.
+* [rectangle] If no source= or bbox= option is given, -rectangle uses the bounding box of the current target layer(s).
+* [points] Added a polyline-to-point conversion that reduces each polyline feature to a single vertex, suitable for point-in-polygon testing.
+* Bug fixes
+
+v0.4.83
+* Now you can turn on multiple reference layers from the layers menu in the web UI. Reference layers are styled on the map if they have style attributes.
+* If a feature is pinned via the [i] inspector tool, the delete key will delete it.
+* The text-anchor property of single-line SVG labels is automatically updated on drag, based on its horizontal position in relation to its anchor point. Labels towards the left of the anchor are given text-anchor=end, labels to the right are given text-anchor=start and centered labels are given text-anchor=middle.
+* The text-anchor property of multi-line SVG labels can be toggled by clicking the label after it has been selected.
+* Added -uniq max-count= option to retain multiple features with the same id.
+
+v0.4.82
+* Added -lines each= option, for applying a JS expression to each output line feature. The expression can access data about the original polygon features, just like the where= option.
+
+v0.4.81
+* Added -lines where= and -innerlines where= options, for filtering lines using properties of adjacent polygons. Polygons are represented as A and B objects in the expression. B is null for "outer" lines.
+
+v0.4.80
+* Results of assigments in -calc expressions are available to subsequent -each expressions as variables.
+* Updated dependencies.
+
+v0.4.79
+* Added new -include command for loading JS data and functions from an external file. The file should contain a single JS object. The keys and values of this object are converted to variables in the JS expression used by -each.
+
+v0.4.78
+* Bug fix
+
+v0.4.77
+* Added -s/--direct-save option to mapshaper-gui, for saving output files to a path relative to the user's current working directory, instead of into the browser's download folder.
+* Added -f/--force-save option to mapshaper-gui, to allow overwriting input files.
+
+v0.4.76
+* Increased the maximum size of CSV output to 2GB (the maximum Buffer size in Node).
+* Print a warning instead of throwing an error if a CSV file contains no data records.
+
+v0.4.75
+* -join copies source fields by default even if calc= option is present.
+* -join prints a warning when inconsistent values are found in copied fields during many-to-one joins.
+
+v0.4.74
+* -join fields=* now copies all of the fields from the source layer, including the key field.
+
+v0.4.73
+* The -merge-layers command is now able to merge layers from different datasets (including layers in the GUI and layers loaded via separate -i commands).
+* Added -merge-layers "force" option for merging layers with inconsistent data fields.
+
+v0.4.72
+* -dissolve and -dissolve2 now accept a comma-separated list of field names to dissolve on. 
+
+v0.4.71
+* Added -o field-order=ascending option, for sorting the column names (A-Z) of DBF and CSV files. 
+
+v0.4.70
+* Order of data fields is preserved in DBF output (previously fields were sorted in case-sensitive ascending order).
+
+v0.4.69
+* Added support for using .shx file when present. (Very occasionally, records in the .shp file are packed in an unusual way, and the .shx index file is needed for reading the .shp file).
+
+v0.4.68
+* Added ability to dismiss the intersection display on the GUI.
+* Updated web interface colors.
+
+v0.4.67
+* Renamed -svg-style command to -style (-svg-style still works as an alias).
+* Minor web interface improvements
+
+v0.4.66
+* SVG labels are displayed in the web interface.
+* Update label position relative to its anchor point by clicking and dragging the label.
+
+v0.4.65
+* Add -o height option, for setting the pixel height of SVG and TopoJSON output.
+
+v0.4.64
+* Bug fixes
+
+v0.4.63
+* Added mapshaper-xl script, for running mapshaper with about 8GB of heap memory instead of the default amount.
+* Output type 1 Shapefiles if features are all single points (more compact than type 8/multipoint).
+
+v0.4.62
+* Added -o singles option for saving each output layer to a separate file (TopoJSON only).
+* Allow -proj command to set the projection of an empty dataset.
+
+v0.4.61
+* Improvements to command line help.
+* Add support for specifying most distance parameters using a variety of units. For example: -affine shift=1km,2km
+* Add support for specifying areal parameters with units. For example: -filter-islands min-area=5sqkm. Recognizes sqmi/mi2, sqkm/km2, sqm/m2, sqft/ft2.
+
+v0.4.60
+* Added -o id-prefix=  option for namespacing svg layer and symbol ids.
+* Fix: SVG layer ids are based on layer names instead of output file name.
+
+v0.4.59
+* Bug fixes and performance improvements.
+* Added undocumented -i geometry-type= option, to allow importing GeoJSON features containing GeometryCollections with mixed types (which would otherwise cause an error).
+
+v0.4.58
+* Fix for issue #236 - error reading some GeoJSON files.
+* Added undocumented -filter-geom command with bbox= option, for removing non-intersecting geometry.
+
+v0.4.57
+* Bug fix for issue #228 "keep_shapes option doesn't always keep shapes".
+
+v0.4.56
+* -clean now removes empty geometries by default.
+* Added -clean allow-empty option to retain empty geometries.
+* Added -clean snap-interval= option to override the default snapping threshold.
+* Updated mapshaper-proj to v0.0.15 (improved .prj file support).
+
+v0.4.55
+* Fix for issue #221 (-simplify resolution= option error).
+
+v0.4.54
+* Improvements to -clean command
+
+v0.4.53
+* Update -dissolve2 command to flatten polygons (remove overlaps) and optionally fill gaps.
+* Added -clean command to flatten polygons and fill gaps.
+* Added min-gap-area= option to -clean and -dissolve2 comands to specify the threshold for filling enclosed gaps between adjacent polygons.
+* Show contents of zip files in web UI file import popup.
+
+v0.4.52
+* Redesigned initial view of the web UI.
+* Temporary fix for issue #219 -- stop trying to fix polygon geometry after applying coordinate precision.
+
+v0.4.51
+* Fix for issue #216 (GeoJSON export fails in browser).
+
+v0.4.50
+* Added support for reading CSV files larger than 250MB.
+* Added support for reading and writing CSV files using other encodings than UTF-8 or ascii.
+* Added -drop command for dropping loaded data layers and for deleting geometry and/or attribute data fields from targeted layers.
+* The [-info] command now shows an asterisk next to currently targetted layers.
+* Bug fixes
+
+v0.4.49
+* Added -polygons gap-tolerance= option, for closing "undershoots" (tiny gaps between two polylines).
+
+v0.4.48
+* Added -shape command, for creating polygons and polylines from lists of coordinates.
+* Added -rectangle command, for creating rectangular polygons.
+* Added experimental -polygons command, for convering a polyline layer containing rings to a polygon layer.
+* Made -dissolve2 more robust (less likely to drop rings when input contains overlapping shapes).
+* In JS expressions, this.x and this.y can now be used to set x,y coordinates of point features (previously they were read-only).
+* -svg-style layer-text= recognizes <br>, \n and '\n' (newline char) as line delimiters.
+* -o margin= option now accepts a comma-separated list of margin widths, as an alternative to a single value. List order is xmin,ymin,xmax,ymax (same as bbox= option).
+
+v0.4.47
+* Added -svg-style where= option, for applying svg attributes to a subset of features
+
+v0.4.46
+* Added -o geometry-type= option, which overrides the default GeoJSON output type with one of: Feature, FeatureCollection, GeometryCollection.
+
+v0.4.45
+* Added -o svg-scale= option, for scaling SVG output using geographical units per pixel.
+
+v0.4.44
+* -dissolve2 now removes polygon rings that are improperly nested inside other rings.
+
+v0.4.43
+* Restore prohibition against overwriting input files unless the "-o force" option is present.
+
+v0.4.42
+* Added support for exporting TopoJSON in pixel coordinates using the -o width= and -o margin= options.
+
+v0.4.41
+* Added -o rfc7946 option, for generating RFC 7946-compliant GeoJSON: default 6-decimal precision, CCW outer-ring winding order, antimeridian-spanning bbox, warns if CRS is not WGS84.
+
+v0.4.40
+* Added sprintf() and round(num, digits) utility functions to -each command context.
+* Fixed bug that prevented using applyCommands() with -clip or -erase commands.
+
+v0.4.39
+* [web] Added support for EPSG codes using the -proj command in the browser console (using Proj.4 syntax, like:  -proj +init=epsg:2784). Supported init files: epsg, esri, nad83, nad27.
+
+v0.4.38
+* Added -svg-style letter-spacing= option.
+* Started attaching SVG symbol classes to top-level symbol element (this only affects multipoint symbols).
+
+v0.4.37
+* Added support for multiline labels. Lines are separated by newline characters (`'\n'`) in the label text.
+* Added -svg-style line-height= option to control the line height of multiline labels.
+
+v0.4.36
+* Setting both r= and label-text= options of -svg-style creates labels with anchor points.
+* Added font-weight= and font-style= options to -svg-style command.
+
+v0.4.35
+* Added SVG label output, with new options to -svg-style command.
+* Added string-fields= option as an more convenient alternative to field-types= in the -i and -join commands.
+
+v0.4.34
+* Fixed an incompatibility with Node versions < 3.0.
+
+v0.4.33
+* [web] Added support for importing and exporting large GeoJSON files (>1GB) to the web interface.
+
+v0.4.32
+* [web] The inspector tool now shows multiple hits when hovering over/clicking on overlapping polygons and points with identical coordinates.
+* Added -target type=polygon|polyline|point option, for targeting layers of a given type.
+
+v0.4.31
+* Added support for exporting large (>1GB) GeoJSON files.
+
+v0.4.30
+* Added support for importing large (>1GB) GeoJSON files using the command line script.
+* Changed `-line` command to generate two fields: "RANK", containing an integer and "TYPE", containing a human-friendly name.
+
+v0.4.29
+* Fixed error exporting Shapefiles with unparsable .prj files (content of original file is copied to output file).
+* Updated mapshaper-proj to v0.0.11.
+
+v0.4.28
+* Fixed error when clipping polyline layers containing empty geometries.
+* [web] Support backslash continuation lines in web console.
+
+v0.4.27
+* Added `-points interpolated interval=` options, for interpolating points along polylines at a fixed interval.
+* Updated parsing of list options to accept quoted items, like this: `fields="County FIPS",State`	.
+* Renamed `-proj source=` option to `-proj match=`.
+* Now, `-proj from=` option accepts a .prj file name or layer id as an alternative to a projection string.
+* Now, `-proj from=` sets the target CRS if no destination projection is given.
+
+v0.4.26
+* [web] Updated console interface to display alongside the map.
+
+v0.4.25
+* Added `-proj target=` option, with support for `target=*`.
+* Added `-target name=` option for renaming the target layer.
+* Updated mapshaper-proj to v0.0.10.
+
+v0.4.24
+* Fixed: error dissolving polyline features containing rings.
+
+v0.4.23
+* Added polyline support to -dissolve command.
+
+v0.4.22
+* Added `-proj source=` option to match projection from a .prj file or another layer.
+* Added support for simple point-to-point spatial joins.
+* Added `-points vertices` option to convert polygon and polyline features to multipoint features.
+* [web] Save console history between sessions using browser localStorage.
+* [web] Always display mouse coordinates.
+* [web] Display coordinates of mouse bbox after first click.
+
+v0.4.21
+* Updated mapshaper-proj to v0.0.9, with better WKT parsing and more projections.
+* Added (undocumented) -shape command.
+* Bug fixes
+
+v0.4.20
+* Added support for generating .prj files.
+* Bug fixes
+
+v0.4.19
+* Improved display of styled layers.
+* Bug fixes
+
+v0.4.18
+* Stacking order of layers in SVG output follows order of `target=` list.
+* [-colorizer] `colors=` can take a space- or a comma-delimited list.
+* [-o] Added `point-symbol=square` option for SVG output.
+
+v0.4.17
+* Added section for experimental commands to command line help.
+* Added experimental `-affine` command for scaling, shifting and rotating coordinates.
+* Added experimental `-colorizer` command with support for sequential and categorical color schemes (intended for SVG output).
+* Fixed bug that caused .zip file export to fail in IE11.
+
+v0.4.16
+* Bug fixes
+
+v0.4.15
+* [web] Improve layer pinning interface.
+
+v0.4.14
+* [web] Add button to pin a layer, so it can be compared to the selected layer.
+* Allow `calc=` expressions to include assignments to same-named variables, ex: `calc="POPULATION = sum(POPULATION)"`.
+
+v0.4.13
+* Add `calc=` option to `-dissolve` and `-dissolve2` commands.
+
+v0.4.12
+* [csv] Improve detection of numeric fields by testing all non-empty values, not just the first value.
+* [csv] Print the names of auto-detected numeric fields to the console.
+
+v0.4.11
+* Fix a bug in undocumented `-data-fill` command.
+
+v0.4.10
+* [GeoJSON] Added `-o combine-layers` option, which modifies GeoJSON output by combining all output layers into a single GeoJSON file.
+* [SVG] Convert all parts of a multipart polygon or polyline as a single `<path>` element, instead of creating a `<g>` group with multiple child elements.
+* Fix for issue 174 (bug in `-merge-layers command`).
+
+v0.4.9
+* Fix for invalid GeoJSON output when an attribute data string contained a certain character sequence (Issue #171).
+
+v0.4.8
+* Fix some glitches in the web attribute inspector.
+
+v0.4.7
+* Added `-join calc=` option, for many-to-one joins. Provides functions for combining values from multiple source records and assigning the result to a field in the target table.
+* Fixed bug that broke the `-i name=` option when multiple `-i` commands were given.
+* Added more functions for `-calc` and `-join calc=` expressions: `mode()`, `first()`, `last()` and `collect()`.
+* Added undocumented `-data-fill` command, for interpolating missing data values by copying from neighbor polygons.
+
+v0.4.6
+* [cli] Fix wildcard expansion of input filenames in Windows command shell.
+
+v0.4.5
+* [cli] Retain .prj file when combining multiple Shapefiles that have the same projection.
+
+v0.4.4
+* [cli] Fix bug writing binary Shapefile files to disk.
+
+v0.4.2
+* [cli] Fix bug importing .shp file contents via applyCommands() api function.
+
+v0.4.1
+* [cli] Display user errors normally when using `-quiet` command.
+
+v0.4.0
+* Added support for loading several datasets via multiple `-i` commands.
+* Default target of a command is the output of the previous command (previously the default target was all layers).
+* Added `-target` command to set the default target.
+* `target=` option and `-target` command accept numerical layer ids; first layer of first dataset is 1.
+* Added `-quiet` command to inhibit console messages.
+* `-info` command shows information about all layers in all datasets.
+* Updated applyCommands() to accept an object containing contents of multiple input files and return an object containing contents of multiple output files (via callback).
+* Added `-uniq verbose` option, to show which features are removed.
+* Added `-o extension=` option, to set the file extension of exported GeoJSON and TopoJSON files.
+
+v0.3.43
+* Fixed bug that caused SVG to be generated without simplification applied (issue #161).
+
+v0.3.42
+* Fixed bug that could prevent SVG output after simplification (issue #160).
+
+v0.3.41
+* More informative error messages for -merge-layers command.
+
+v0.3.40
+* Fix regression: topology not being built when `-i combine-files` is used.
+* Add experimental `-cluster` command for aggregating polygons into compact groups.
+* Add support for importing TopoJSON files with nested GeometryCollections.
+
+v0.3.39
+* Add support for importing GeoJSON and TopoJSON collections that contain mixed geometry types. Polygon/MultiPolygon, LineString/MultiLineString and Point/MultiPoint features are imported to separate layers.
+* Address problems caused by imported JSON records containing inconsistent data properties.
+
+v0.3.38
+* [gui] Support loading file(s) from a URL. Use query string `?files=` followed by a comma-separated list of file URLs.
+* [dissolve2] Print a warning instead of halting when messy topology causes an uncommon pathfinding error.
+* Apply quantization to TopoJSON point layers (previously point layers were not quantized).
+
+v0.3.37
+* [join] Add `isMax() isMin() isMode()` functions to `-join where=` expressions.
+* [proj] Fix `webmercator` projection alias.
+* [gui] Fix layer menu scrolling.
+
+v0.3.36
+* Add `-point-grid` command.
+
+v0.3.35
+* [cli] Remove the restriction on importing files of different datatypes using `-i combine-files`.
+
+v0.3.34
+* Bug fixes
+* Add -simplification lock-box option (undocumented) to retain vertices at the corners and edges of a rectangular dataset (for simplifying vector tiles).
+
+v0.3.33
+* Fixes a global variable leak.
+
+v0.3.32
+* Fixes a bug that caused incorrect TopoJSON output of datasets containing partially overlapping line features.
+
+v0.3.31
+* `-info` command shows a Proj.4 CS definition, if CS is known or can be inferred.
+
+v0.3.30
+* New `-graticule` command adds a graticule layer appropriate for a world dataset centered on longitude 0.
+* Add `-proj from=` option, for defining the original coordinate system of a dataset if unknown.
+* Fix: escape characters in SVG attributes.
+
+v0.3.29
+* Added the `-uniq` command, which applies an expression to each feature and removes features that produce duplicate values.
+* Commands are displayed in alphabetical order by the `-help` command.
+* Fixed a bug that prevented reprojecting point layers.
+
+v0.3.28
+* Improved handling of projection errors.
+
+v0.3.27
+* Added reprojection support via mapshaper-proj, a JS port of the Proj.4 projection library.
+* The `-proj` command takes a proj4 string or an alias.
+* The `-proj densify` option interpolates vertices so long, straight segments can transform into curved lines.
+* The `-projections` command lists all supported proj4 projections and aliases.
+* Mapshaper now parses the .prj files of Shapefiles to identify their coordinate system.
+
+v0.3.26
+* -info command displays Object and Array data properties using JSON.
+* The web UI inspector displays objects and arrays as JSON, and accepts JSON input.
+* Object/Array data properties are serialized as JSON in CSV output.
+
+v0.3.25
+* Add geometry info to the console output of `-inspect`
+* Typing `mapshaper <command>` shows help for that command (shortcut for `mapshaper -h <command>`)
+* Rename `cleanup` option of `-clip` and `-erase` to `remove-slivers`. Also, delete unused arcs by default after clip/erase.
+* Skip over empty Shapefile geometry parts when importing, instead of throwing an error.
+
+v0.3.24
+* Fix regression affecting point Shapefile importing.
+
+v0.3.23
+* The new `-inspect <expression>` command displays attribute information about a single feature.
+* In the web UI console, `-inspect` displays selected features as if they had been inspected interactively using the "i" tool.
+* Updated web UI color scheme.
+
+v0.3.22
+* The `mapshaper-gui` script now accepts one or more files to load (e.g. `$ mapshaper-gui states.shp cities.json`)
+* `mapshaper-gui` probes for an open port on localhost if the default port is in use
+* `mapshaper-gui` exits when mapshaper's browser page is closed
+
+v0.3.21
+* The -filter-slivers command is now documented in `mapshaper -h`.
+* Open polygon rings are automatically closed on import (Shapefile and GeoJSON only).
+* Reading DBF files is faster.
+* When exporting SVG or TopoJSON from the Web UI, all selected layers are exported in a single file.
+
+v0.3.20
+* Add "Settings" button next to the simplification slider. Now, users can see the current simplification settings and change them on-the-fly.
+* Display a menu for selecting export layers when there are multiple exportable layers.
+* [`split`] When the target layer is unnamed, "split-" is no longer added as a prefix to output layer names when splitting on a data field.
+* Bug fixes
+
+v0.3.19
+* Support for exporting CSS style attributes with the new `-svg-style` command.
+* Display mouse coordinates in the Web UI when the "i" tool is selected. Clicking the screen selects the coordinates so they can be copied to the clipboard.
+* Bug fixes
+
+v0.3.18
+* Basic support for exporting to SVG.
+* Added command line option `-o format=svg`. Saving to a file with ".svg" extension also works.
+* Added SVG-specific options `width=` and `margin=` to the output command to override the default values.
+* Added support for importing and exporting NULL type Shapefiles
+* Bug fixes
+
+v0.3.17
+* Added `unjoined` and `unmatched` options to the `-join` command, for inspecting unjoined records from the source and destination tables.
+* Added a constraint to Visvalingam simplification to remove an ambiguity in the order of vertex removal when several vertices have the same effective area.
+* Added `cleanup` option to `-clip` and `-erase` commands, which removes slivers created by clipping (before, slivers were removed by default).
+* Rename `cartesian` option of `-simplify` to `planar`.
+
+v0.3.16
+* `-dissolve` now supports point layers. Dissolve reduces a group of point features to a single point at the centroid of the group.
+* `-dissolve weight=` option takes a data field or JS expression and uses this value to weight each point when calculating the centroid of a group of points.
+* `-filter-fields` no longer supports field renaming. Use `-rename-fields` instead.
+* `-info` and `-filter-fields` commands can be applied to much larger DBF files without triggering out-of-memory errors. 
+
+v0.3.15
+* For the web, separate geoprocessing library and Web UI into two files (mapshaper.js and mapshaper-gui.js)
+* Improve detection of invalid DBF files.
+* Bug fixes.
+
+v0.3.14
+* -innerlines command creates fewer line features.
+* Bug fixes.
+
+v0.3.13
+* Adds support for `-o format=json`, which exports an array of JSON records containing attribute data for each feature. Arrays of JSON records can also be imported.
+* Adds support for the output command (-o) to the Web UI console.
+* Bug fixes.
+
+v0.3.12
+* Adds `-simplify stats` option, which displays summary statistics relating to the geometry of simplified paths.
+* Adds `-simplification weighting=` option, for setting the weight parameter in weighted Visvalingam simplification.
+* Adds `densify` option to the (still undocumented) `-proj` command.
+* Automatically filter slivers after a clip or erase operation.
+* Adds (undocumented) `-filter-slivers` command.
+
+v0.3.11
+* Adds `-simplify resolution=` option, to apply an appropriate amount of simplification for a given display resolution. Example: `-simplify resolution=8000x6000`.
+* Adds $.x and $.y getters for retrieving x- and y-coordinates of point features from within an `-each` or `-filter` expression.
+
+v0.3.10
+* Adds planar option to simplification menu, if dataset contains lat-long coordinates.
+* Bug fixes
+
+v0.3.9
+* Changed web ui layout so popup attribute inspector appears more stable when resizing.
+* Much faster screen rendering of layers containing many small paths.
+
+v0.3.8
+* The -join command now can do point-to-polygon and polygon-to-point spatial joins.
+* Added sum-fields= option to the -join command, for summing the contents of one or more fields when joining multiple source records to a single target record.
+* Added where= option to the -each command, for targetting a subset of features using a boolean JS expression.
+* Added name= option to the import command, for renaming the input layer or layers.
+* Bug fixes
+
+v0.3.7
+* Added a button for exporting to CSV
+* Added `delimiter=` export option for overriding the default delimiter when outputting CSV.
+* More consistent layer naming -- layers created with the "+" option are unnamed by default.
+* Interface refinements.
+
+v0.3.6
+* Web UI now can import CSV files and standalone DBF files, which enables joining via the browser console.
+* Bug fixes
+
+v0.3.5
+* The attribute data inspector now supports editing data values.
+* The -split command can be applied to layers with no geometry.
+* Bug fixes
+
+v0.3.4
+* Turn on attribute data inspection on rollover by clicking the "i" button.
+
+v0.3.3
+* Correctly import numeric DBF fields that use commas as the decimal separator.
+* Use retina-quality rendering on retina displays.
+* New UI color scheme.
+* L/R arrow keys toggle between layers.
+* Added experimental weight-scale option to weighted Visvalingam simplification method.
+
+v0.3.2
+* Add delete buttons for each layer in the layers menu.
+* Stop displaying ghosted clipping shapes after clip or erase commands.
+* Many other interface improvements.
+
+v0.3.1
+* Adds freeform export options to export menu.
+* Fixes several bugs.
+
+v0.3.0
+* An updated web interface has a built-in console with support for command line editing.
+* Support for text encodings in the web UI.
+* Many bug fixes.
+
+v0.2.28
+* [cli] Fixed regression reading .shp files larger than 1GB.
+* [web] Added buttons for zooming in/out.
+
+v0.2.27
+* Add popup error messages to the web UI.
+* Add a "No simplification" option to the import options.
+
+v0.2.gi26
+* Web UI can now load more than one file. Only the last-loaded file can be edited and exported. The previous file is visible as a faded image. Older files are dropped.
+* Try to handle some irregularities found in in-the-wild .shp files.
+
+v0.2.25
+* Web UI shows a progress bar while importing large datasets.
+
+v0.2.24
+* The web interface can now import Zip archives containing supported file types.
+
+v0.2.23
+* Add `+` and `name= `options to `-filter` command, for creating a new filtered layer alongside the original layer.
+* Add `force` flag to the `-join` command. This allows values in the target data table to be overwritten by values in the source table when both tables contain identically named fields.
+* Bug fixes
+
+v0.2.22
+* Fixed a bug preventing files from importing in the GUI.
+
+V0.2.21
+* Feature ids from GeoJSON and TopoJSON files are automatically preserved.
+* Fixed several bugs affecting csv files.
+* When importing and exporting from/to GeoJSON or TopoJSON, top-level "crs" properties are preserved.
+* -dissolve command now works on layers without any geometry (in addition to polygon layers).
+* Improvements to text encoding detection.
+
+v0.2.20
+* Added `bbox=` option to `-clip` and `-erase` commands for clipping/erasing using a bounding box.
+* Added `-rename-fields` command.
+* Use .cpg file (if present) to set dbf text encoding.
+* Use dbf "language driver id" (if present and valid) to set dbf text encoding.
+* Try to auto-detect dbf text encoding if other methods fail (limited to utf-8 and latin1)
+* Support reading delimited text files with non-utf-8 encodings (using -i encoding= option).
+* Remove byte order mark (BOM) when importing text files in utf-8 and utf-16.
+* Fix a bug affecting -calc command.
+
+
+v0.2.19
+* Fixed an error importing Shapefiles with the `encoding=` option.
+* Added experimental (undocumented) `-proj` command for projecting lat-lng datasets.
+* Added `-projections` command for listing names of supported projections.
+
+v0.2.18
+* Supports importing, editing and exporting delimited text files and .dbf files.
+* Added `field-types=` option to `-i` and `-join` commands.
+* API function applyCommands() function now accepts delimited text files.
+* Removed optional dataset argument from API function runCommands().
+* Stop supplying default -o command when missing from command line.
+
+v0.2.17
+* Fix an incompatibility with Node 0.12.
+
+v0.2.16
+* Support importing GeoJSON Features that contain GeometryCollections.
+* Fix for issue #68: error clipping some shapes that abut a clip polygon.
+* Skip fields with unsupported types when importing .dbf files (instead of throwing exception).
+* Support for Node 0.12.x
+
+v0.2.15
+* Fixed bug affecting -join command.
+* Rename data fields to avoid name collisions.
+
+v0.2.14
+* Add wildcard expansion for input filenames (to support filename expansion in the Windows command line).
+* Speed up identification of interior points (`-points inner` command).
+* Improve command line help.
+
+v0.2.13
+* Add `-calc` command for calculating simple statistics about a data layer using a JS expression. Functions include sum() median() average() min() max() count().
+* Add function for finding interior points of polygon features, for anchoring symbols and labels.
+* Add `inner` and `centroid` options to the `-points` command -- for creating a layer of centroids or interior points from a polygon layer
+* Add `-sort` command for sorting the features in a layer
+* `-o id-field=` supports a comma-sep. list of field names -- useful for assigning ids to multiple TopoJSON objects with different data properties.
+
+v0.2.12
+* Add `-filter-islands` command with `min-area`, `min-vertices` and `remove-empty` options.
+* Add `-points` command with `x` and `y` options, for creating a point layer from x, y coordinates in an attribute table.
+* Add `-o prettify` option to generate human-readable GeoJSON and TopoJSON.
+* mapshaper.applyCommands() now returns an array only if output includes more than one JSON object.
+* Bug fixes
+
+v0.2.11
+* Halt when `-merge-layers` fails
+* Print a warning if `-innerlines` output is null
+* Apply snapping after multiple import files are merged/combined
+* Let users apply arbitrarily large snap intervals instead of capping at avg. segment length
+* Use APIError type for invalid API function call parameters
+* Switch from async csv parsing using node-csv to synchronous parsing using d3.dsv
+* Merge mapshaper.runCommandString() into mapshaper.runCommands()
+* Add mapshaper.applyCommands() to tranform Geo/TopoJSON programmatically.
+
+v0.2.9
+* Accept point and polyline type layers as targets of `-clip` and `-erase` commands
+* `-o presimplify` option adds simplification thresholds to TopoJSON arc vertices.
+* Bug fixes
+
+v0.2.8
+* Add `-rename-layers <name(s)>` for renaming one or more target layers
+
+v0.2.7
+* Bug fixes (issues #56 and #58)
+* Improved output file type inference
+
+v0.2.6
+* Add `-o drop-table` option
+* Infer output file type from file name
+* Bug fixes
+
+v0.2.5
+* Add `-o force` option to overwrite existing files instead of renaming output files
+* Bug fix
+
+v0.2.4
+* Add `-o precision` option for rounding output coordinates
+* Add `-i /dev/stdin` and alias `-i -` to receive data via stdin (single-file Topo/GeoJSON input only)
+* Add `-o /dev/stdout` and alias `-o -` to send output to stdout (single-file JSON output only)
+* Add support for Travis CI
+
+v0.2.3
+* Add `-i id-field=` option: import Topo/GeoJSON 'id' property to the specified data field
+* Extend `-o id-field=` option to GeoJSON Features (previously TopoJSON only)
+
+v0.2.2
+* Update weighting function for weighted Visvalingam simplification
+* Add support for loading mapshaper.js with RequireJS
+* Improve display of information with `-info` command
+* Add undocumented `-dissolve2` command, which can dissolve overlapping polygons
+
+v0.2.1
+* Improve performance of `-erase` when erase layer contains many small polygons
+
+v0.2.0
+* New command line syntax
+* New `-clip` and `-erase` commands
+* Many bug fixes

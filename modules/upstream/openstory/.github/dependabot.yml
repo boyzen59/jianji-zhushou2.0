@@ -1,0 +1,112 @@
+version: 2
+updates:
+  # Keep SHA-pinned GitHub Actions current. Dependabot preserves the pinning
+  # style: it bumps both the commit SHA and the trailing `# vX.Y.Z` comment.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+    commit-message:
+      prefix: ci
+
+  # Root app (bun.lock). Weekly version updates keep the stack current between
+  # intentional upgrade PRs.
+  #
+  # Grouping is deliberately coarse — three PRs a week, not a dozen. Per-library
+  # groups (tanstack, radix, storybook, …) produced ~10 PRs every Monday, each
+  # one a full CI run and a separate review. Instead: routine minor/patch bumps
+  # ride together, split only by production vs development so a runtime-affecting
+  # PR is obvious at a glance, and majors are quarantined in their own PR so one
+  # breaking bump can never block the routine ones.
+  - package-ecosystem: bun
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      # Core + adapters share a peer chain (`ai-openrouter`/`ai-fal`/
+      # `ai-grok`/`ai-byteplus` peer on `@tanstack/ai`). First matching
+      # group wins, so this must sit above `production` / `development` or
+      # a weekly run will bump `ai` without the adapters (or grok/byteplus
+      # without `ai`) and fail typecheck. Devtools rides along because
+      # `@tanstack/ai-devtools-core` also peers on `@tanstack/ai`.
+      tanstack-ai:
+        patterns:
+          - '@tanstack/ai'
+          - '@tanstack/ai-byteplus'
+          - '@tanstack/ai-fal'
+          - '@tanstack/ai-grok'
+          - '@tanstack/ai-openrouter'
+          - '@tanstack/react-ai-devtools'
+        update-types: ['minor', 'patch']
+      # `@logtape/pretty` (dev) imports from `@logtape/logtape` (prod) and
+      # needs the matching release; split across production / development, a
+      # bump of one without the other breaks the build (#1906). Same
+      # first-match rule: keep this above `production` / `development`.
+      logtape:
+        patterns:
+          - '@logtape/*'
+        update-types: ['minor', 'patch']
+      # `better-auth` (prod) needs `@better-auth/core` (dev) at the same
+      # release (#1956). Keep above `production` / `development`.
+      better-auth:
+        patterns:
+          - 'better-auth'
+          - '@better-auth/*'
+        update-types: ['minor', 'patch']
+      production:
+        dependency-type: production
+        update-types: ['minor', 'patch']
+      development:
+        dependency-type: development
+        update-types: ['minor', 'patch']
+      # Majors land together. Review or close as a batch — do the risky ones by
+      # hand rather than letting each open its own PR.
+      major-updates:
+        patterns: ['*']
+        update-types: ['major']
+    ignore:
+      # Engines pin Node 26; types for a future major would lie about the runtime.
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
+      # Hard-pinned to the exact version @tanstack/ai-openrouter depends on
+      # (0.13.20). Any other version installs a second nested copy of the SDK,
+      # and `createAdapter` then fails to typecheck: the two copies declare
+      # separate private fields on HTTPClient. Move this only in lockstep with
+      # an @tanstack/ai-openrouter bump.
+      - dependency-name: '@openrouter/sdk'
+      # Stay on drizzle 1.0 RC line; do not silently roll back to 0.x.
+      - dependency-name: 'drizzle-orm'
+        versions: ['<1.0.0-0']
+      - dependency-name: 'drizzle-kit'
+        versions: ['<1.0.0-0']
+      # Pinned to a nightly: every release imports typescript/lib/typescript.js,
+      # which TS 7 removed, and breaks `bun motion:codegen`. The nightly is cut
+      # from main after 0.97.3, so GHSA-hhx9-57xq-r5rw is already fixed (and the
+      # affected `buildClientParams` SDK template isn't generated here anyway —
+      # only the typescript/schemas/zod plugins run). Move only once a release
+      # drops the typescript runtime dep. See #1344, #1351.
+      - dependency-name: '@hey-api/openapi-ts'
+
+  # Server-side export container (separate package.json + bun.lock).
+  - package-ecosystem: bun
+    directory: /containers/video-export
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      video-export:
+        patterns: ['*']
+    ignore:
+      # Dockerfile is node:26-bookworm-slim — keep types on the Node 26 line.
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']

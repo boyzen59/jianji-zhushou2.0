@@ -1,0 +1,9 @@
+{
+  "metadata_only_sources": [
+    "awesome-opus-5-5-video-prompts",
+    "gsap",
+    "remotion-official"
+  ],
+  "third_party_license_scope": "per module; see THIRD_PARTY_NOTICES.md",
+  "video_downloads": 0
+}

@@ -1,0 +1,599 @@
+{
+  "schema_version": 1,
+  "note": "Original synthesis of reviewed methods. Source-specific presets are not global instructions. Cards are candidates, not a closed list of allowed designs.",
+  "cards": [
+    {
+      "id": "evidence-focus",
+      "title": "证据与细节聚焦",
+      "keywords": [
+        "人物",
+        "史料",
+        "证据",
+        "照片",
+        "图片",
+        "局部",
+        "放大",
+        "细节",
+        "focus",
+        "evidence"
+      ],
+      "inputs": [
+        "原句与证据出处",
+        "全图、关注区域及题注"
+      ],
+      "mechanism": "先建立全图位置，再用同源局部揭示解释细节；连接线或轮廓维持局部与整体关系。",
+      "compose": "可从照片圈注接到地图节点或定性图解；沿用同一个标记颜色与对象ID。",
+      "alternative": "证据本身足够清楚可静止；未有真实细节时不生成所谓放大证据。",
+      "checks": [
+        "放大采样是否来自同源坐标",
+        "原始比例与来源是否仍可辨识"
+      ],
+      "sources": [
+        "lemo-opuscar",
+        "video-shotcraft"
+      ],
+      "materials": [
+        "evidence-lens"
+      ],
+      "status": "synthesized_design_knowledge",
+      "rule_scope": "reference, not a mandatory template"
+    },
+    {
+      "id": "quantitative-comparison",
+      "title": "数据、图与表",
+      "keywords": [
+        "数量",
+        "数值",
+        "数据",
+        "税收",
+        "对比",
+        "比较",
+        "表格",
+        "趋势",
+        "排名",
+        "chart",
+        "table",
+        "data"
+      ],
+      "inputs": [
+        "同口径数据、单位与出处",
+        "观众要比较的维度"
+      ],
+      "mechanism": "需要精确查值用表，需要看差异用共同基线图；强调当前论点的数据对象，而非全表同时跳动。",
+      "compose": "数值标签与几何共用数据，可接证据图或流向图；颜色意义不因换图改变。",
+      "alternative": "没有可靠数值改用定性对照或因果图；不同统计口径先解释差异。",
+      "checks": [
+        "轴、单位、零点与比例是否忠于数据",
+        "标签终值与图形终态是否一致"
+      ],
+      "sources": [
+        "iart-data-animation",
+        "prompt-motion-charts"
+      ],
+      "materials": [
+        "comparison-stage"
+      ],
+      "status": "synthesized_design_knowledge",
+      "rule_scope": "reference, not a mandatory template"
+    },
+    {
+      "id": "geography-route",
+      "title": "地理与路线",
+      "keywords": [
+        "地图",
+        "地点",
+        "港口",
+        "迁徙",
+        "路线",
+        "疆域",
+        "空间",
+        "航线",
+        "map",
+        "route"
+      ],
+      "inputs": [
+        "地名、时代与坐标依据",
+        "路线或范围的事实状态"
+      ],
+      "mechanism": "先给空间锚点，再展开路径、节点或区域；镜头跟随观众需要理解的关系，不机械追逐标记。",
+      "compose": "路线可从史料上的标记进入真实地图，再转成资源流；保留地名ID与色彩语义。",
+      "alternative": "坐标或边界未证实时用示意网络，不画成真实疆域。",
+      "checks": [
+        "投影与地名对齐",
+        "图例与时间范围",
+        "路径首尾与转场接力"
+      ],
+      "sources": [
+        "iart-map-animation",
+        "remotion-official",
+        "video-shotcraft"
+      ],
+      "materials": [
+        "flow-to-map"
+      ],
+      "status": "synthesized_design_knowledge",
+      "rule_scope": "reference, not a mandatory template"
+    },
+    {
+      "id": "causal-model",
+      "title": "因果与机制",
+      "keywords": [
+        "因果",
+        "原因",
+        "结果",
+        "流程",
+        "机制",
+        "结构",
+        "关系",
+        "网络",
+        "抽象",
+        "没有数字",
+        "diagram",
+        "process"
+      ],
+      "inputs": [
+        "论证中的主体、动作、结果",
+        "有证据的关系与未知项"
+      ],
+      "mechanism": "将句子的动词变成对象变化：阻挡、分流、累积、转移或拆开；逐步显出能解释结果的结构。",
+      "compose": "图解可与真实素材、角色或图表叠加；主要注意力随当前因果节点移动。",
+      "alternative": "关系不是数量时不用面积、粗细冒充精确权重；静态结构足够时不强加运动。",
+      "checks": [
+        "箭头方向与因果依据",
+        "对象能否辨识",
+        "观众是否有读懂结果的停留"
+      ],
+      "sources": [
+        "dashi-animationstyle",
+        "iart-explainer-video",
+        "wtt-code-animation-studio"
+      ],
+      "materials": [
+        "causal-flow"
+      ],
+      "status": "synthesized_design_knowledge",
+      "rule_scope": "reference, not a mandatory template"
+    },
+    {
+      "id": "editorial-collage",
+      "title": "拼贴与并置叙事",
+      "keywords": [
+        "拼贴",
+        "并置",
+        "观点",
+        "碎片",
+        "档案",
+        "照片",
+        "纸张",
+        "collage",
+        "editorial"
+      ],
+      "inputs": [
+        "多份素材与各自出处",
+        "要比较或串联的论点"
+      ],
+      "mechanism": "按观看顺序组织证据层，利用遮罩、纸边、圈注与位置接力显出关系；拼贴的主角是证据而非装饰。",
+      "compose": "照片、表格、手绘与生成背景可以共镜；统一纸材、光向、边缘、阴影和标记系统。",
+      "alternative": "只需一张照片时不要堆叠；抠图不完整可用有意的矩形裁切。",
+      "checks": [
+        "同时出现时的阅读路径",
+        "关键证据无遮挡",
+        "前后景是否同一材质逻辑"
+      ],
+      "sources": [
+        "huashu-art-motion",
+        "vox-director",
+        "mg-styles-15"
+      ],
+      "materials": [
+        "collage-inquiry"
+      ],
+      "status": "synthesized_design_knowledge",
+      "rule_scope": "reference, not a mandatory template"
+    },
+    {
+      "id": "art-image-extension",
+      "title": "艺术风格与生成图扩展",
+      "keywords": [
+        "艺术",
+        "材质",
+        "水墨",
+        "绘画",
+        "气氛",
+        "生成图",
+        "生图",
+        "GPT",
+        "插画",
+        "视差",
+        "image",
+        "art"
+      ],
+      "inputs": [
+        "文案意图与项目风格tokens",
+        "角色身份、空间、光向及已有资产"
+      ],
+      "mechanism": "把抽象情绪落为材料、构图和光照；有意义时生成原创图，再用遮罩、平面运镜或实际分离层扩展。",
+      "compose": "生成图与代码文字、图表、真实史料同用；提示词引用同一风格与主体设定，不重设随机皮肤。",
+      "alternative": "已有SVG或数据适合代码就不生位图；重建图明确区别于历史证据。",
+      "checks": [
+        "角色与材料前后一致",
+        "文字和数据由可控排版承载",
+        "无真实分层时不声称深度准确"
+      ],
+      "sources": [
+        "lemo-opuscar",
+        "huashu-art-motion",
+        "dashi-animationstyle",
+        "xilo-opus-video"
+      ],
+      "materials": [
+        "image-extension"
+      ],
+      "status": "synthesized_design_knowledge",
+      "rule_scope": "reference, not a mandatory template"
+    },
+    {
+      "id": "shape-story",
+      "title": "对象形变与状态接力",
+      "keywords": [
+        "形变",
+        "转场",
+        "对象",
+        "接力",
+        "状态",
+        "轮廓",
+        "morph",
+        "transition",
+        "continuous"
+      ],
+      "inputs": [
+        "同一主体及前后状态",
+        "两段意义之间的联系"
+      ],
+      "mechanism": "选择可认出的轮廓或重心作为桥梁，使形状变化说明意义变化；必要时用遮罩交接不同拓扑。",
+      "compose": "标题线条可成为路径，路径落到图表或产品状态；保持对象身份和视觉方向。",
+      "alternative": "没有语义联系时硬切更清楚；不为全片无缝而强行扭曲真实证据。",
+      "checks": [
+        "中间态轮廓是否可信",
+        "跨镜位置与速度",
+        "变化后是否有可读落点"
+      ],
+      "sources": [
+        "mg-styles-15",
+        "animate",
+        "wise-motion"
+      ],
+      "materials": [
+        "hero-morph"
+      ],
+      "status": "synthesized_design_knowledge",
+      "rule_scope": "reference, not a mandatory template"
+    },
+    {
+      "id": "product-demonstration",
+      "title": "产品与界面证据",
+      "keywords": [
+        "产品",
+        "发布",
+        "功能",
+        "网页",
+        "界面",
+        "前端",
+        "操作",
+        "UI",
+        "product",
+        "demo"
+      ],
+      "inputs": [
+        "产品真实界面或已确认设计",
+        "文案中的功能与结果"
+      ],
+      "mechanism": "把价值主张对应到可见操作与状态变化；近景给关键界面，拉出展示其在流程中的位置。",
+      "compose": "UI状态可与旁白、图解和真实使用场景接力；鼠标和相机分工，避免同时抢焦点。",
+      "alternative": "文案不是产品介绍就不套宣传片结构；未实现功能标概念演示。",
+      "checks": [
+        "界面文本与事实一致",
+        "操作顺序可理解",
+        "裁切与指针不挡信息"
+      ],
+      "sources": [
+        "video-shotcraft"
+      ],
+      "materials": [
+        "product-focus"
+      ],
+      "status": "synthesized_design_knowledge",
+      "rule_scope": "reference, not a mandatory template"
+    },
+    {
+      "id": "spatial-camera",
+      "title": "镜头与空间组织",
+      "keywords": [
+        "运镜",
+        "相机",
+        "景深",
+        "空间",
+        "聚焦",
+        "拉出",
+        "推进",
+        "2.5D",
+        "3D",
+        "camera",
+        "depth"
+      ],
+      "inputs": [
+        "主体、层级与观看目的",
+        "素材可用的空间信息"
+      ],
+      "mechanism": "镜头动作带来新信息：由整体到细节、从局部揭出关系或跟随主体；相机与对象不必同时大幅运动。",
+      "compose": "可把同一证据标记从平面带进卡片空间；2.5D只作用于适合的层，不伪装真实三维。",
+      "alternative": "阅读密集表格或史料时固定机位；已有源镜头明显运动时减弱附加运动。",
+      "checks": [
+        "焦点是否稳定",
+        "透视、阴影、遮挡是否合理",
+        "边缘是否露底或闪烁"
+      ],
+      "sources": [
+        "video-shotcraft"
+      ],
+      "materials": [
+        "product-focus"
+      ],
+      "status": "synthesized_design_knowledge",
+      "rule_scope": "reference, not a mandatory template"
+    },
+    {
+      "id": "typography-choreography",
+      "title": "文字层级与错峰编排",
+      "keywords": [
+        "文字",
+        "字幕",
+        "关键词",
+        "标题",
+        "字体",
+        "错峰",
+        "阅读",
+        "typography",
+        "stagger",
+        "caption"
+      ],
+      "inputs": [
+        "经过确认的上屏文字与ID",
+        "语义重音、阅读顺序与原声锚点"
+      ],
+      "mechanism": "先排出信息层级，再根据语义选择遮罩、位移、逐项揭示或静置；入场结束后让文字稳定可读。",
+      "compose": "文字可以成为图解标签或形变主体；字号角色、字重与运动曲线跨章节共享。",
+      "alternative": "逐词跳动不总适合长句；文字只是说明时不要夺走证据焦点。",
+      "checks": [
+        "手机尺度可读性",
+        "长中文换行与英文占位",
+        "文字与原声精度是否如实"
+      ],
+      "sources": [
+        "claude-remotion-skill",
+        "lottiefiles-motion-design",
+        "wise-motion"
+      ],
+      "materials": [],
+      "status": "synthesized_design_knowledge",
+      "rule_scope": "reference, not a mandatory template"
+    },
+    {
+      "id": "character-action",
+      "title": "角色动作解释概念",
+      "keywords": [
+        "角色",
+        "手绘",
+        "人物",
+        "表情",
+        "骨架",
+        "步态",
+        "character",
+        "doodle"
+      ],
+      "inputs": [
+        "概念对应的动作",
+        "角色身份与外形约定"
+      ],
+      "mechanism": "用角色与对象的关系表达抽象过程，如搬运、阻挡、协作、失衡；外形与动作参数分开，便于重复出现。",
+      "compose": "角色可把证据引入图解，或与真人轮流解释；动作沿用本片轻重和材料语言。",
+      "alternative": "只需图标或实物即可说明时不额外加入角色；不默认生成真人替身或克隆声音。",
+      "checks": [
+        "角色跨镜身份",
+        "动作能否解释原句",
+        "关键姿态与物体接触"
+      ],
+      "sources": [
+        "doodle-anim",
+        "iart-javascript-animation",
+        "animate"
+      ],
+      "materials": [],
+      "status": "synthesized_design_knowledge",
+      "rule_scope": "reference, not a mandatory template"
+    },
+    {
+      "id": "audio-events",
+      "title": "原声、音乐与动作事件",
+      "keywords": [
+        "声音",
+        "音效",
+        "原声",
+        "配音",
+        "旁白",
+        "节奏",
+        "音乐",
+        "踩点",
+        "cue",
+        "audio",
+        "sound"
+      ],
+      "inputs": [
+        "旁白时间锚点",
+        "需要声音支持的视觉事件"
+      ],
+      "mechanism": "画面和音效读取同一事件表；音效支持动作与转折，旁白密集处降低竞争；音乐节拍可辅助但不覆盖句意。",
+      "compose": "一个cue重定时间后联动画面、音效和检查采样；章间可声音先行或延续。",
+      "alternative": "有清晰原声不重做配音；音乐不是主叙事时不把全部剪切强制对齐节拍。",
+      "checks": [
+        "听感是否遮住人声",
+        "峰值、响度与交付用途",
+        "画面与声音实际落点"
+      ],
+      "sources": [
+        "claude-motion",
+        "video-talkcraft",
+        "wtt-code-animation-studio"
+      ],
+      "materials": [
+        "event-cues"
+      ],
+      "status": "synthesized_design_knowledge",
+      "rule_scope": "reference, not a mandatory template"
+    },
+    {
+      "id": "style-system",
+      "title": "统一视觉系统",
+      "keywords": [
+        "风格",
+        "统一",
+        "配色",
+        "字体",
+        "材质",
+        "tokens",
+        "系统",
+        "design",
+        "style",
+        "consistency"
+      ],
+      "inputs": [
+        "文案情绪、时代与受众",
+        "已选方向与代表画面"
+      ],
+      "mechanism": "将设计决定落到语义token：谁是证据、强调、背景、解释层；材质和运动也有角色，而不是只存颜色。",
+      "compose": "每个媒介替换自身默认皮肤，引用同一token；允许布局和节奏变，不把统一误解为同版换字。",
+      "alternative": "外部品牌的颜色与禁用表不是本片约束；能解决问题的原创系统优先于堆库。",
+      "checks": [
+        "章节之间颜色语义与对象身份",
+        "不同媒介的线条、光向和字体角色",
+        "代表场景是否真正共享tokens"
+      ],
+      "sources": [
+        "lottiefiles-motion-design",
+        "xilo-opus-video"
+      ],
+      "materials": [],
+      "status": "synthesized_design_knowledge",
+      "rule_scope": "reference, not a mandatory template"
+    },
+    {
+      "id": "quality-review",
+      "title": "画面、运动与素材修复",
+      "keywords": [
+        "质量",
+        "画质",
+        "检查",
+        "可读性",
+        "闪烁",
+        "遮挡",
+        "修复",
+        "超分",
+        "对比度",
+        "review",
+        "quality"
+      ],
+      "inputs": [
+        "实际渲染或实际素材",
+        "问题时间码与交付规格"
+      ],
+      "mechanism": "按可见问题做针对检查：关键状态、连续转场、中文溢出、注意力、闪烁与声音；修复后重查受影响区间。",
+      "compose": "tokens改善可读性；确有素材缺陷且工具可用时再做超分或修复，处理前后对照真实细节。",
+      "alternative": "静帧不能证明运动良好，超分不能补出真实证据；不为了通过评分无限回路。",
+      "checks": [
+        "检查范围有证据",
+        "修复未改变事实或主体",
+        "实际输出格式、帧数与音轨"
+      ],
+      "sources": [
+        "claude-motion",
+        "claude-motion-design"
+      ],
+      "materials": [],
+      "status": "synthesized_design_knowledge",
+      "rule_scope": "reference, not a mandatory template"
+    },
+    {
+      "id": "procedural-simulation",
+      "title": "程序动画与可复现采样",
+      "keywords": [
+        "程序",
+        "模拟",
+        "粒子",
+        "规律",
+        "科学",
+        "Canvas",
+        "SVG",
+        "WebGL",
+        "shader",
+        "simulation"
+      ],
+      "inputs": [
+        "要解释的规律与参数",
+        "模型假设与表现边界"
+      ],
+      "mechanism": "静态输入和时间决定画面；累积模拟预计算后按帧采样，随机使用种子，动作与渲染速度脱钩。",
+      "compose": "模拟可嵌入图解、数据图和生成背景；采用共享色彩与镜头，预渲染也保留时基。",
+      "alternative": "示意模拟注明假设，不冒充测量；简单图解足够时不引入复杂物理。",
+      "checks": [
+        "不同seek顺序相同帧是否一致",
+        "字体、纹理和资产就绪",
+        "渲染成本与实际视觉收益"
+      ],
+      "sources": [
+        "iart-javascript-animation",
+        "claude-motion",
+        "animate",
+        "claude-motion-design"
+      ],
+      "materials": [],
+      "status": "synthesized_design_knowledge",
+      "rule_scope": "reference, not a mandatory template"
+    },
+    {
+      "id": "editing-reuse",
+      "title": "可回修的镜头与资产",
+      "keywords": [
+        "回修",
+        "复用",
+        "多版本",
+        "资产",
+        "替换",
+        "分镜",
+        "workflow",
+        "reuse",
+        "revision"
+      ],
+      "inputs": [
+        "稳定场景、句子、文字与素材ID",
+        "实际改变的输入"
+      ],
+      "mechanism": "分离内容、风格、合成与生成资产；一个修改只让相关依赖失效，可保留无关镜头与已验证结果。",
+      "compose": "图、表、拼贴共用同一内容登记；声音与镜头引用cue；有意变体不牵动原版本。",
+      "alternative": "不要把批量模板当叙事；不为使用完整系统重写用户稿或重生成全部资产。",
+      "checks": [
+        "变更影响是否覆盖而不过度扩张",
+        "旧输出是否被错误标完成",
+        "源码与最终媒体版本对应"
+      ],
+      "sources": [
+        "openmontage",
+        "firered-openstoryline",
+        "hypit",
+        "claude-code-video-toolkit"
+      ],
+      "materials": [],
+      "status": "synthesized_design_knowledge",
+      "rule_scope": "reference, not a mandatory template"
+    }
+  ]
+}

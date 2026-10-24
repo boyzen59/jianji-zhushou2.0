@@ -1,0 +1,206 @@
+import { ArcCollection } from '../paths/mapshaper-arcs';
+import { filterVertexData } from '../paths/mapshaper-arc-utils';
+import { DataTable } from '../datatable/mapshaper-data-table';
+// import { encode } from "@msgpack/msgpack";
+import { pack as encode } from 'msgpackr';
+import { crsToProj4 } from '../crs/mapshaper-projections';
+import { gzipAsync, gzipSync } from '../io/mapshaper-gzip';
+import { PACKAGE_EXT } from '../pack/mapshaper-pack-constants';
+export { PACKAGE_EXT };
+import { strToU8 } from 'fflate';
+import { exportTable2 } from './mapshaper-packed-table';
+import utils from '../utils/mapshaper-utils';
+
+// libraries
+// https://msgpack.org/index.html
+//
+
+// session format (including gui state)
+/*
+{
+  version: 1,
+  created: 'YYYY-MM-DDTHH:mm:ss.sssZ', // ISO string
+  datasets: [],
+  gui: {}, // optional; the GUI's view settings, see getSnapshotGuiState() in gui-session-snapshot-control.mjs
+  history: { // optional; only present in snapshots created by the GUI
+    commands: ['-i foo.shp', '-simplify 10%', ...],
+    savedAtIndex: 0 // index of the first command after the last save boundary
+  }
+}
+*/
+
+export async function exportPackedDatasets(datasets, opts) {
+  var content = pack(await exportDatasetsToPack(datasets, opts));
+  return [{
+    content: content,
+    filename: opts.file || 'mapshaper_snapshot.' + PACKAGE_EXT
+  }];
+}
+
+export function pack(obj) {
+  // encode options: see https://github.com/msgpack/msgpack-javascript
+  // initialBufferSize  number  2048
+  // ignoreUndefined boolean false
+  return encode(obj, {});
+}
+
+// gui: (optional) gui instance
+// opts examples:
+//    exporting from command line: { compact: true, file: 'tmp.msx', final: true }
+//    exporting from gui export menu: {compact: true, format: 'msx'}
+//    saving gui temp snapshot: {compact: false}
+// opts.history: optional GUI session history captured by SessionHistory#getHistorySnapshot
+// opts.gui_state: optional GUI view settings, saved as the snapshot's gui field
+export async function exportDatasetsToPack(datasets, opts) {
+  var obj = {
+    version: 1,
+    created: (new Date).toISOString(),
+    datasets: await Promise.all(datasets.map(dataset => exportDataset(dataset, opts)))
+  };
+  if (opts.history) {
+    obj.history = opts.history;
+  }
+  if (opts.gui_state) {
+    obj.gui = opts.gui_state;
+  }
+  return obj;
+}
+
+export async function exportDataset(dataset, opts) {
+  var arcs = dataset.arcs;
+  var arcData = null;
+  if (arcs) {
+    arcData = arcs.getVertexData();
+    arcData.zlimit = arcs.getRetainedInterval(); // TODO: add this to getVertexData()
+    arcData = await exportArcData(arcData, opts);
+  }
+  var layers = dataset.layers.map(lyr => exportLayer(lyr, opts));
+  return {
+    id: dataset.id || null,
+    arcs: arcData,
+    info: dataset.info ? exportInfo(dataset.info) : null,
+    layers: await Promise.all(layers)
+  };
+}
+
+// compress unpacked + uncompressed snapshot data in-place
+export async function compressSnapshotForExport(obj) {
+  var promises = obj.datasets.map(d => {
+    compressDatasetForExport(d);
+  });
+  await Promise.all(promises);
+  return;
+}
+
+async function compressDatasetForExport(obj) {
+  if (!obj.arcs) return;
+  var arcData = importArcData(obj.arcs); // convert buffers to typed arrays
+  obj.arcs = await exportArcData(arcData, {compact: true}); // re-export to compressed buffers
+}
+
+function flattenArcs(arcData) {
+  if (arcData.zz && arcData.zlimit) {
+    // replace unfiltered arc data with flattened arc data
+    arcData = filterVertexData(arcData, arcData.zlimit);
+    delete arcData.zz;
+  }
+  return arcData;
+}
+
+async function gzipArcData(obj, opts) {
+  var gzipOpts = Object.assign({level: 1, consume: false}, opts);
+  var promises = [gzipAsync(obj.nn, gzipOpts), gzipAsync(obj.xx, gzipOpts), gzipAsync(obj.yy, gzipOpts)];
+  if (obj.zz) promises.push(gzipAsync(obj.zz, gzipOpts));
+  var results = await Promise.all(promises);
+  obj.nn = results.shift();
+  obj.xx = results.shift();
+  obj.yy = results.shift();
+  if (obj.zz) obj.zz = results.shift();
+}
+
+function importArcData(obj) {
+  return {
+    nn: new Uint32Array(obj.nn.buffer, 0, obj.nn.length / 4),
+    xx: new Float64Array(obj.xx.buffer, 0, obj.xx.length / 8),
+    yy: new Float64Array(obj.yy.buffer, 0, obj.yy.length / 8),
+    zz: obj.zz ? new Float64Array(obj.zz.buffer, 0, obj.zz.length / 8) : null,
+    zlimit: obj.zlimit || 0
+  };
+}
+
+async function exportArcData(data, opts) {
+  // TODO: consider removing arcs that are not referenced by any layer
+  if (opts.compact && data.zz) {
+    data = flattenArcs(data); // bake in any simplification
+  }
+  var output = {
+    nn: typedArrayToBuffer(data.nn),
+    xx: typedArrayToBuffer(data.xx),
+    yy: typedArrayToBuffer(data.yy),
+    zz: data.zz ? typedArrayToBuffer(data.zz) : null,
+    zlimit: data.zlimit || 0
+  };
+  if (opts.compact && data.zz) {
+    await gzipArcData(output);
+  }
+  return output;
+}
+
+function typedArrayToBuffer(arr) {
+  return new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
+}
+
+async function exportLayer(lyr, opts) {
+  var data = null;
+  var obj;
+  if (lyr.data) {
+    data = await exportTable2(lyr.data);
+  }
+  obj = {
+    name: lyr.name || null,
+    geometry_type: lyr.geometry_type || null,
+    shapes: lyr.shapes || null,
+    raster_type: lyr.raster_type || null,
+    raster: lyr.raster ? exportRasterData(lyr.raster) : null,
+    data: data,
+    menu_order: lyr.menu_order || null,
+    pinned: lyr.pinned || opts.show_all || false,
+    active: !!(lyr.active || lyr == opts.active_layer) // lyr.active: deprecated
+  };
+  if (lyr.frame_hidden) obj.frame_hidden = true;
+  return obj;
+}
+
+function exportRasterData(raster) {
+  var copy = Object.assign({}, raster);
+  if (raster.grid) {
+    copy.grid = Object.assign({}, raster.grid);
+    if (raster.grid.samples) {
+      copy.grid.samples = typedArrayToBuffer(raster.grid.samples);
+    }
+    if (raster.grid.coverage) {
+      copy.grid.coverage = typedArrayToBuffer(raster.grid.coverage);
+    }
+  }
+  if (raster.view) {
+    copy.view = Object.assign({}, raster.view);
+    delete copy.view.preview;
+    delete copy.view.scalingStats;
+  }
+  if (raster.preview) {
+    delete copy.preview;
+  }
+  if (raster.pixels) {
+    copy.pixels = typedArrayToBuffer(raster.pixels);
+  }
+  return copy;
+}
+
+export function exportInfo(info) {
+  info = Object.assign({}, info);
+  if (info.crs && !info.crs_string && !info.wkt1) {
+    info.crs_string = crsToProj4(info.crs);
+  }
+  delete info.crs; // proj object cannot be serialized (need to reconstitute in unpack)
+  return info;
+}

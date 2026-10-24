@@ -1,0 +1,1963 @@
+import { GenerationProgressBanner } from '@/sequences/ui/generation/generation-progress-banner';
+import { useSequenceRuns } from '@/sequences/ui/generation/use-sequence-runs';
+import { theatreDraftLabel } from '@/motion/draft-mode';
+import { RenderWaitCopy } from '@/sequences/ui/generation/render-wait-copy';
+import { MotionProgressBanner } from '@/sequences/ui/generation/motion-progress-banner';
+import type { ModelGenerationStatus } from '@/models/ui/pickers/base-model-selector';
+import { DivergenceCompareDialog } from './divergence-compare-dialog';
+import { MobileSceneDrawer } from './mobile-scene-drawer';
+import { CanvasViewToggle } from './canvas-view-toggle';
+import { CopyScriptButton } from './copy-script-button';
+import { SceneCanvas } from './scene-canvas';
+import { SequenceDownloadMenu } from './sequence-export-actions';
+import { useSequenceExport } from '@/sequences/ui/theatre/use-sequence-export';
+import { SceneScriptDocument } from './scene-script-document';
+import type { BatchGenerateMotionArgs } from './scene-list';
+import { SceneList, type SceneListProps } from './scene-list';
+import { SceneModelBar } from './scene-model-bar';
+import { SceneRail } from './scene-rail';
+import {
+  SceneScriptPrompts,
+  effectiveTabFor,
+  tabsForScope,
+} from './scene-script-prompts';
+import { FailureSummaryBanner } from '@/sequences/ui/failure-summary-banner';
+import { HistoryColumn, HistorySkeleton } from '@/sequences/ui/history-page';
+import { SequenceHeaderPortal } from '@/sequences/ui/sequence-header-slot';
+import { ScrollArea } from '@/ui/shadcn/scroll-area';
+import {
+  batchGenerateMotionFn,
+  renderSequenceDraftsAtQualityFn,
+} from '@/motion/motion.fn';
+import {
+  continueGenerationFn,
+  generateMusicFn,
+  getSequencesFn,
+} from '@/sequences/sequences.fn';
+import { firstStageWithWork } from '@/sequences/generation-plan';
+import {
+  generationPlanKeys,
+  refetchAfterRefusedContinue,
+  useGenerationPlan,
+} from '@/sequences/ui/use-generation-plan';
+import type { ContinueFlags } from '@/sequences/ui/use-sequences';
+import { getDivergentVariantPromptDiffFn } from '@/shots/prompt-variants.fn';
+import { smartRetryFn } from '@/sequences/smart-retry.fn';
+import { BILLING_BALANCE_KEY } from '@/billing/ui/use-billing-balance';
+import { notifyInsufficientCredits } from '@/billing/ui/notify-insufficient-credits';
+import { useSceneSelection } from './use-scene-selection';
+import { segmentKeys, useSequenceSegments } from './use-segments';
+import { useScenesBySequence, type SceneWithScript } from './use-scenes';
+import { shotIsStale, useSequenceShotStaleness } from './use-shot-staleness';
+import { errorMessage, isInsufficientCreditsError } from '@/platform/errors';
+import { adjacentShotId } from './shot-walk';
+import {
+  sequenceKeys,
+  useSequence,
+  useSetSequenceMusic,
+  useSetSequenceModels,
+} from '@/sequences/ui/use-sequences';
+import { sumShotSeconds } from './scene-group';
+import {
+  EDITOR_FALLBACK_POLL_MS,
+  sequenceVideoVariantsDiscoverUntilKey,
+  sequenceVideoVariantsRefetchInterval,
+  shotKeys,
+  useDiscardVariant,
+  useDivergentVariants,
+  usePromoteVariantToPrimary,
+  useSequenceImageVariants,
+  useSequenceSelectedModels,
+  useSequenceVideoVariants,
+  useShotsBySequence,
+  useUndiscardVariant,
+} from './use-shots';
+import { useSequenceStyle } from '@/look/ui/use-styles';
+import {
+  DEFAULT_IMAGE_MODEL,
+  DEFAULT_MUSIC_MODEL,
+  DEFAULT_VIDEO_MODEL,
+  safeAudioModel,
+  safeImageToVideoModel,
+  safeTextToImageModel,
+  type AudioModel,
+  type ImageToVideoModel,
+  type TextToImageModel,
+} from '@/models/models';
+import {
+  clearSelection,
+  selectShot,
+  selectionScope,
+  selectionShots,
+  type ScenesSearch,
+} from './scene-selection';
+import { formatShotSpan } from '@/shots/scene-segments';
+import {
+  resolveImageModel,
+  resolveVideoModel,
+} from '@/models/resolve-asset-models';
+import { DEFAULT_ASPECT_RATIO } from '@/models/aspect-ratios';
+import type {
+  FrameVariant,
+  ShotVariant,
+  Sequence,
+} from '@/platform/server/db/schema';
+import { rendersReferenceOnly } from '@/shots/use-start-frame';
+import { isBatchMotionEligible, type ShotView } from '@/shots/shot-view';
+import { analyzeLoadedFailures } from '@/sequences/failure-analysis';
+import type { GenerationPhaseConfig } from '@/sequences/ui/generation-stream.reducer';
+import { useGenerationStream } from '@/sequences/ui/use-generation-stream';
+import { useStaleDetected } from './use-stale-detected';
+import { cn } from '@/ui/utils';
+import { useIsMobile } from '@/ui/use-mobile';
+import { Drawer, DrawerContent, DrawerTitle } from '@/ui/shadcn/drawer';
+import { usePostHog } from '@posthog/react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useRouter } from '@tanstack/react-router';
+import { captureSequenceReadySeen } from '@/sequences/ui/theatre/player-events';
+
+import {
+  estimateSceneCount,
+  estimateTotalSeconds,
+} from '@/sequences/time-estimate';
+import {
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent,
+} from 'react';
+import { toast } from 'sonner';
+const THRESHOLD_PX = 56;
+
+/**
+ * Horizontal swipe (touch/pen only) that ignores vertical pans and
+ * interactive controls. `delta` is -1 for previous (swipe right), +1 for next
+ * (swipe left).
+ */
+function useHorizontalSwipe(onSwipe: ((delta: -1 | 1) => void) | undefined) {
+  const startRef = useRef<{ x: number; y: number } | null>(null);
+
+  const onPointerDown = useCallback(
+    (event: PointerEvent<HTMLElement>) => {
+      if (!onSwipe) return;
+      if (event.pointerType === 'mouse') return;
+      if (
+        typeof window !== 'undefined' &&
+        window.matchMedia('(min-width: 768px)').matches
+      ) {
+        return;
+      }
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        target.closest('input, textarea, button, a, [role="slider"]')
+      ) {
+        return;
+      }
+      startRef.current = { x: event.clientX, y: event.clientY };
+    },
+    [onSwipe]
+  );
+
+  const finish = useCallback(
+    (event: PointerEvent<HTMLElement>) => {
+      const start = startRef.current;
+      startRef.current = null;
+      if (!onSwipe || !start) return;
+      const dx = event.clientX - start.x;
+      const dy = event.clientY - start.y;
+      if (Math.abs(dx) < THRESHOLD_PX || Math.abs(dx) < Math.abs(dy)) return;
+      onSwipe(dx < 0 ? 1 : -1);
+    },
+    [onSwipe]
+  );
+
+  const onPointerUp = finish;
+  const onPointerCancel = useCallback(() => {
+    startRef.current = null;
+  }, []);
+
+  if (!onSwipe) return {};
+  return { onPointerDown, onPointerUp, onPointerCancel };
+}
+
+/**
+ * Minimal coverage row shared by video (`shot_variants`) and image
+ * (`frame_variants`, #989) variants. Image variants have no `divergedAt`
+ * (divergence is retired for images), so it's optional and treated as never
+ * divergent.
+ */
+type SceneModelVariant = {
+  model: string;
+  // FrameVariant's wider union (adds 'cancelled', #1085); shot-variant rows
+  // assign into it unchanged.
+  status: FrameVariant['status'];
+  url: string | null;
+  discardedAt: Date | null;
+  divergedAt?: Date | null;
+};
+
+/**
+ * Per-model generation status across a scene's shots (#909) — feeds the scene
+ * bar's ✓/⟳/! dropdown markers. The model the selected shot currently resolves
+ * to (#1066) is marked `set`; completed wins over in-flight/failed.
+ * Divergent/discarded alternates ignored.
+ */
+function buildSceneModelStatuses<V extends SceneModelVariant>(
+  variantsByShot: Map<string, V[]>,
+  shotIds: ReadonlySet<string>,
+  setModel: string
+): Map<string, ModelGenerationStatus> {
+  const completed = new Set<string>();
+  const generating = new Set<string>();
+  const failed = new Set<string>();
+  for (const shotId of shotIds) {
+    for (const v of variantsByShot.get(shotId) ?? []) {
+      if ((v.divergedAt ?? null) !== null || v.discardedAt !== null) continue;
+      if (v.status === 'completed' && v.url) completed.add(v.model);
+      else if (v.status === 'generating' || v.status === 'pending')
+        generating.add(v.model);
+      else if (v.status === 'failed') failed.add(v.model);
+    }
+  }
+  const map = new Map<string, ModelGenerationStatus>();
+  for (const m of failed) map.set(m, 'failed');
+  for (const m of generating) map.set(m, 'generating');
+  for (const m of completed) map.set(m, 'completed');
+  map.set(setModel, 'set');
+  return map;
+}
+
+type ScenesViewProps = {
+  sequenceId: string;
+  search?: ScenesSearch;
+  /**
+   * A character, location or element opened from the inspector. It takes the
+   * place of the scene list and the canvas; the inspector stays where it is.
+   */
+  detail?: React.ReactNode;
+};
+
+const CompareWithPromptDiff: React.FC<{
+  sequenceId: string;
+  shot: ShotView;
+  variant: ShotVariant;
+  onClose: () => void;
+  onPromote: () => void;
+  onDiscard: () => void;
+  isPromoting: boolean;
+  isDiscarding: boolean;
+}> = ({
+  sequenceId,
+  shot,
+  variant,
+  onClose,
+  onPromote,
+  onDiscard,
+  isPromoting,
+  isDiscarding,
+}) => {
+  const { data: promptDiff } = useQuery({
+    queryKey: ['variant-prompt-diff', sequenceId, variant.id],
+    queryFn: () =>
+      getDivergentVariantPromptDiffFn({
+        data: { sequenceId, variantId: variant.id },
+      }),
+    staleTime: 30_000,
+  });
+  return (
+    <DivergenceCompareDialog
+      open={true}
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+      shot={shot}
+      variant={variant}
+      onPromote={onPromote}
+      onDiscard={onDiscard}
+      isPromoting={isPromoting}
+      isDiscarding={isDiscarding}
+      promptDiff={promptDiff ?? undefined}
+    />
+  );
+};
+
+type RegenerationType = 'image' | 'motion' | 'scene-variants';
+
+function addToSet(prev: Set<string>, id: string): Set<string> {
+  return new Set(prev).add(id);
+}
+
+function removeFromSet(prev: Set<string>, id: string): Set<string> {
+  const next = new Set(prev);
+  next.delete(id);
+  return next;
+}
+
+function addAllToSet(prev: Set<string>, ids: string[]): Set<string> {
+  const next = new Set(prev);
+  for (const id of ids) next.add(id);
+  return next;
+}
+
+function removeAllFromSet(prev: Set<string>, ids: string[]): Set<string> {
+  const next = new Set(prev);
+  for (const id of ids) next.delete(id);
+  return next;
+}
+
+function isTerminalStatus(status: string | null): boolean {
+  // 'cancelled' (#1108): a user cancel is terminal — it must clear the
+  // regenerating spinner like completed/failed do.
+  return (
+    status === 'completed' || status === 'failed' || status === 'cancelled'
+  );
+}
+
+const RAIL_COLLAPSED_KEY = 'openstory:scenes-rail-collapsed';
+
+export const ScenesView: React.FC<ScenesViewProps> = ({
+  sequenceId,
+  search = {},
+  detail = null,
+}) => {
+  const hasDetail = detail !== null;
+  const queryClient = useQueryClient();
+  const posthog = usePostHog();
+  const openRuns = useSequenceRuns(sequenceId);
+
+  const {
+    selection,
+    setSelection,
+    handleSelectScene,
+    handleFocusScene,
+    handleSelectShot,
+    handleClearSelection,
+    handleAscendSelection,
+    setFacet,
+    view,
+    setView,
+  } = useSceneSelection({ search, sequenceId });
+  const [autoPlaySequence, setAutoPlaySequence] = useState(false);
+  // Phone only: the bottom bar's cog opens the inspector as a drawer.
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const isMobile = useIsMobile();
+  const handlePlaySequence = useCallback(() => {
+    handleClearSelection();
+    setView('canvas');
+    setAutoPlaySequence(true);
+  }, [handleClearSelection, setView]);
+  const handleAutoPlayConsumed = useCallback(() => {
+    setAutoPlaySequence(false);
+  }, []);
+  // Where the sequence player's playhead is — the rail marks that shot. Not
+  // selection: the inspector keeps whatever the user is editing (#1771). A
+  // single-shot selection swaps the player out, so nothing is playing then.
+  const [playheadShotId, setPlayheadShotId] = useState<string>();
+  const playingShotId = selection.shotId ? undefined : playheadShotId;
+
+  const [regeneratingImages, setRegeneratingImages] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [regeneratingMotion, setRegeneratingMotion] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [regeneratingSceneVariants, setRegeneratingSceneVariants] = useState<
+    Set<string>
+  >(() => new Set());
+  const [leftoverGrokShotIds, setLeftoverGrokShotIds] = useState<Set<string>>(
+    () => new Set()
+  );
+  const handleLeftoverGrokChange = useCallback(
+    (shotIds: readonly string[], useGrok: boolean) => {
+      setLeftoverGrokShotIds((prev) => {
+        const next = new Set(prev);
+        for (const id of shotIds) {
+          if (useGrok) next.add(id);
+          else next.delete(id);
+        }
+        return next;
+      });
+    },
+    []
+  );
+
+  // Poll sequence while a motion batch is in flight so per-shot statuses stay
+  // fresh. The refetchInterval fn reads from the query cache each tick to
+  // avoid a circular dependency between sequence state and the poll condition.
+  const { data: sequence } = useSequence(sequenceId, {
+    refetchInterval: (query) => {
+      const seq = query.state.data;
+      if (!seq) return false;
+      const cachedShots = queryClient.getQueryData<ShotView[]>(
+        shotKeys.list(sequenceId)
+      );
+      return cachedShots?.some((f) => f.videoStatus === 'generating')
+        ? EDITOR_FALLBACK_POLL_MS
+        : false;
+    },
+  });
+  const sequenceExport = useSequenceExport(sequence);
+  const aspectRatio = sequence?.aspectRatio || DEFAULT_ASPECT_RATIO;
+  // No stills are ever rendered in this mode, so every motion-eligibility
+  // check has to stop requiring one (`isBatchMotionEligible`).
+  const generateStartFrames = sequence?.generateStartFrames ?? false;
+  const isProcessing = sequence?.status === 'processing';
+  const processingRef = useRef(isProcessing);
+  processingRef.current = isProcessing;
+  const leftCapturedRef = useRef(false);
+  // Assigned after `remainingSeconds` is computed below; read at leave time.
+  const remainingRef = useRef(0);
+  const router = useRouter();
+
+  useEffect(() => {
+    leftCapturedRef.current = false;
+  }, [sequenceId]);
+
+  useEffect(() => {
+    const captureLeave = (destination: string) => {
+      if (!processingRef.current || leftCapturedRef.current) return;
+      leftCapturedRef.current = true;
+      posthog.capture('render_wait_left', {
+        sequence_id: sequenceId,
+        seconds_remaining_estimate: remainingRef.current,
+        destination,
+      });
+    };
+    const onPageHide = () => captureLeave('unload');
+    window.addEventListener('pagehide', onPageHide);
+    return () => {
+      window.removeEventListener('pagehide', onPageHide);
+      // On unmount the router already points at where the user went.
+      captureLeave(router.latestLocation.pathname);
+    };
+  }, [sequenceId, posthog, router]);
+
+  // First sight of the finished video (#1301): the funnel step between
+  // sequence_generated and video_play. Once per sequence per mount.
+  const readySeenRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (sequence?.status !== 'completed' || readySeenRef.current === sequenceId)
+      return;
+    readySeenRef.current = sequenceId;
+    const createdAt = new Date(sequence.createdAt).getTime();
+    void queryClient
+      .fetchQuery({
+        queryKey: sequenceKeys.list(undefined),
+        queryFn: () => getSequencesFn(),
+        staleTime: 5 * 60 * 1000,
+      })
+      .then((list) => {
+        captureSequenceReadySeen(posthog, {
+          sequence_id: sequenceId,
+          first_sequence_for_team: list.every(
+            (s) =>
+              s.id === sequenceId ||
+              new Date(s.createdAt).getTime() >= createdAt
+          ),
+          seconds_since_generate: Math.round((Date.now() - createdAt) / 1000),
+        });
+      })
+      .catch(() => {
+        // Analytics only — never surface.
+      });
+  }, [sequence?.status, sequence?.createdAt, sequenceId, queryClient, posthog]);
+  const { data: style } = useSequenceStyle(sequenceId);
+  const styleCategory = style?.category ?? undefined;
+  const sequenceMusicModel = safeAudioModel(
+    sequence?.musicModel,
+    DEFAULT_MUSIC_MODEL
+  );
+  const sequenceVideoModel = safeImageToVideoModel(
+    sequence?.videoModel,
+    DEFAULT_VIDEO_MODEL
+  );
+  const { mutate: persistModels, isPending: modelsSaving } =
+    useSetSequenceModels(sequenceId);
+  const { mutate: persistIncludeMusic } = useSetSequenceMusic(sequenceId);
+  const persistSequenceVideoModel = useCallback(
+    (model: ImageToVideoModel) => {
+      if (model === sequenceVideoModel) return;
+      persistModels({ videoModel: model });
+    },
+    [sequenceVideoModel, persistModels]
+  );
+  const styleName = style?.name ?? undefined;
+  // Phase config from DB — set in stone when the workflow was triggered
+  const phaseConfig = useMemo<GenerationPhaseConfig>(
+    () => ({
+      stopAt: sequence?.generationStopAt ?? undefined,
+      referenceOnly: !(sequence?.generateStartFrames ?? false),
+      generateVoices: sequence?.generateVoices ?? false,
+    }),
+    [
+      sequence?.generationStopAt,
+      sequence?.generateStartFrames,
+      sequence?.generateVoices,
+    ]
+  );
+
+  // Subscribe to real-time generation events when sequence is processing.
+  // Skip history replay for non-processing sequences to avoid a brief flash of
+  // the progress banner on tab re-mount caused by replaying old phase events.
+  const {
+    state: generationState,
+    status: realtimeStatus,
+    reset: resetGenerationStream,
+  } = useGenerationStream(sequenceId, phaseConfig, {
+    replayHistory: isProcessing,
+  });
+
+  // Hybrid polling: only poll when processing AND realtime has failed
+  // - 'connecting' → wait for connection, don't poll
+  // - 'connected' → use realtime, don't poll
+  // - 'disconnected'/'error' → poll as fallback
+  const realtimeFailed = realtimeStatus === 'error';
+  const shouldPoll = isProcessing && realtimeFailed;
+
+  // Fetch shots — only poll when processing AND realtime has failed.
+  // Otherwise realtime events keep the cache fresh via updateQueryCacheFromEvent.
+  const { data: shots, error: shotsError } = useShotsBySequence(
+    sequenceId,
+    shouldPoll ? { refetchInterval: EDITOR_FALLBACK_POLL_MS } : undefined
+  );
+
+  const handleWalkShot = useCallback(
+    (delta: -1 | 1) => {
+      const next = adjacentShotId(shots ?? [], selection, delta);
+      if (!next) return;
+      if (next.type === 'sequence') {
+        setSelection(clearSelection(), undefined, true);
+        return;
+      }
+      setSelection(selectShot(next.id), undefined, true);
+    },
+    [shots, selection, setSelection]
+  );
+
+  // Progressive reveal (#1091): while the script is being split the canvas has
+  // nothing to show, so the Script view is forced and the Canvas toggle stays
+  // disabled. When the first shot preview lands the override drops away and —
+  // unless the user explicitly chose the script view (URL `view=script`) —
+  // the derived view falls back to the canvas default, auto-revealing the
+  // first images as they arrive. No effect, no state: pure derivation.
+  const canvasReady =
+    !isProcessing ||
+    (shots?.some((s) => s.image?.url || s.previewThumbnailUrl) ?? false);
+  const effectiveView = canvasReady ? view : 'script';
+  const canvasSwipe = useHorizontalSwipe(
+    effectiveView === 'canvas' ? handleWalkShot : undefined
+  );
+
+  // Escape progressive zoom-out (#986):
+  // 1) blur the focused editing field (exit typing)
+  // 2) else yield to an open dialog/menu/popover
+  // 3) else walk selection up a level: shot → scene → sequence
+  // Capture phase so we still see the key when a focused control stops bubbling.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented || e.repeat) return;
+      // The scene list is not on screen: Escape must not move a selection
+      // nobody can see, and it would close the detail on the way.
+      if (hasDetail) return;
+
+      const target = e.target;
+      if (target instanceof HTMLElement) {
+        const tag = target.tagName;
+        const isEditingField =
+          tag === 'INPUT' ||
+          tag === 'TEXTAREA' ||
+          tag === 'SELECT' ||
+          target.isContentEditable;
+
+        if (isEditingField) {
+          // Leave the field first; a second Esc ascends selection.
+          e.preventDefault();
+          e.stopPropagation();
+          target.blur();
+          return;
+        }
+
+        // Only yield to overlays that are currently open — a closed dialog
+        // still in the tree (or a focused control inside a non-modal panel)
+        // must not swallow Esc.
+        if (
+          target.closest(
+            [
+              '[role="dialog"][data-state="open"]',
+              '[role="alertdialog"][data-state="open"]',
+              '[role="menu"][data-state="open"]',
+              '[role="listbox"][data-state="open"]',
+              '[data-radix-popper-content-wrapper] [data-state="open"]',
+              '[data-state="open"][role="combobox"]',
+            ].join(', ')
+          )
+        ) {
+          return;
+        }
+      }
+
+      if (
+        document.querySelector(
+          [
+            '[role="dialog"][data-state="open"]',
+            '[role="alertdialog"][data-state="open"]',
+            '[data-slot="dialog-content"][data-state="open"]',
+            '[data-slot="sheet-content"][data-state="open"]',
+          ].join(', ')
+        )
+      ) {
+        return;
+      }
+
+      if (handleAscendSelection(shots ?? [])) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [handleAscendSelection, shots, hasDetail]);
+
+  // Fetch image variants for this sequence (frame_variants kind:'model', #989)
+  const { data: imageVariants } = useSequenceImageVariants(sequenceId);
+
+  // Render segments (#986/#990) — group the shot strip into per-video segments
+  // and drive the segment-aware Video tab. Poll while motion is in flight so a
+  // freshly-rendered segment's version + staleness land without a manual reload.
+  const anyVideoGenerating = useMemo(
+    () => shots?.some((f) => f.videoStatus === 'generating') ?? false,
+    [shots]
+  );
+  const { data: segments, error: segmentsError } = useSequenceSegments(
+    sequenceId,
+    anyVideoGenerating
+      ? { refetchInterval: EDITOR_FALLBACK_POLL_MS }
+      : undefined
+  );
+
+  // Video variants (#545) — per-model coverage and the inspector's
+  // per-model state. The player always shows each shot's current version.
+  // Poll while a primary render or a variant row is in flight, and for a
+  // short window after adding a model, so coverage can leave `generating`
+  // when a realtime completion event is dropped (#1381). Shot generating
+  // badges follow `videoStatus`, which this query does not write.
+  const { data: discoverUntilMs } = useQuery({
+    queryKey: sequenceVideoVariantsDiscoverUntilKey(sequenceId),
+    queryFn: () => null as number | null,
+    enabled: false,
+  });
+  const cachedVideoVariants = queryClient.getQueryData<ShotVariant[]>([
+    'sequence-video-variants',
+    sequenceId,
+  ]);
+  const videoVariantsInterval = sequenceVideoVariantsRefetchInterval({
+    shotsGenerating: anyVideoGenerating,
+    variants: cachedVideoVariants,
+    discoverUntilMs,
+  });
+  const { data: videoVariants } = useSequenceVideoVariants(
+    sequenceId,
+    videoVariantsInterval === false
+      ? undefined
+      : { refetchInterval: videoVariantsInterval }
+  );
+
+  const videoVariantsByShot = useMemo(() => {
+    const map = new Map<string, ShotVariant[]>();
+    if (!videoVariants) return map;
+    for (const v of videoVariants) {
+      if (v.variantType !== 'video') continue;
+      const list = map.get(v.shotId) ?? [];
+      list.push(v);
+      map.set(v.shotId, list);
+    }
+    return map;
+  }, [videoVariants]);
+
+  // Image variants are frame_variants now; each carries its owning `shotId`
+  // (frame ids ≠ shot ids, #989), so key the map by shot id. The query already
+  // returns only kind:'model', non-discarded rows.
+  const imageVariantsByShot = useMemo(() => {
+    const map = new Map<string, FrameVariant[]>();
+    if (!imageVariants) return map;
+    for (const v of imageVariants) {
+      const list = map.get(v.shotId) ?? [];
+      list.push(v);
+      map.set(v.shotId, list);
+    }
+    return map;
+  }, [imageVariants]);
+
+  // Divergent alternates + realtime stale:detected wiring (issue #625).
+  // Mirror the shots-list polling fallback so the corner-dot still updates
+  // when realtime is down.
+  const { data: divergentVariants } = useDivergentVariants(
+    sequenceId,
+    shouldPoll ? { refetchInterval: EDITOR_FALLBACK_POLL_MS } : undefined
+  );
+  useStaleDetected(sequenceId);
+  const promoteVariant = usePromoteVariantToPrimary();
+  const discardVariant = useDiscardVariant();
+  const undiscardVariant = useUndiscardVariant();
+  const [compareVariant, setCompareVariant] = useState<ShotVariant | null>(
+    null
+  );
+
+  const handleDiscardWithUndo = useCallback(
+    (variant: ShotVariant) => {
+      const restore = () => {
+        undiscardVariant.mutate(
+          {
+            sequenceId,
+            shotId: variant.shotId,
+            variantId: variant.id,
+          },
+          {
+            onError: (error) => {
+              toast.error('Failed to restore alternate', {
+                description: errorMessage(error),
+              });
+            },
+          }
+        );
+      };
+      discardVariant.mutate(
+        { sequenceId, shotId: variant.shotId, variantId: variant.id },
+        {
+          onSuccess: () => {
+            // Only close the dialog after the mutation succeeds — on failure
+            // the user keeps the dialog open and can retry from there.
+            setCompareVariant(null);
+            toast('Alternate discarded', {
+              action: { label: 'Undo', onClick: restore },
+            });
+          },
+          onError: (error) => {
+            toast.error('Failed to discard alternate', {
+              description: errorMessage(error),
+            });
+          },
+        }
+      );
+    },
+    [sequenceId, discardVariant, undiscardVariant]
+  );
+
+  // If the shot backing the open compare dialog disappears (e.g. concurrent
+  // delete from another tab), close the dialog explicitly with a toast rather
+  // than silently null-rendering it.
+  useEffect(() => {
+    if (!compareVariant || !shots) return;
+    const stillExists = shots.some((f) => f.id === compareVariant.shotId);
+    if (!stillExists) {
+      toast.info('Scene was removed.');
+      setCompareVariant(null);
+    }
+  }, [compareVariant, shots]);
+
+  const handlePromote = useCallback(
+    (variant: ShotVariant) => {
+      promoteVariant.mutate(
+        { sequenceId, shotId: variant.shotId, variantId: variant.id },
+        {
+          onSuccess: () => {
+            setCompareVariant(null);
+            toast.success('Alternate promoted');
+          },
+          onError: (error) => {
+            toast.error('Failed to promote alternate', {
+              description: errorMessage(error),
+            });
+          },
+        }
+      );
+    },
+    [sequenceId, promoteVariant]
+  );
+
+  const curSelectedShotId = selection.shotId;
+  const selectedShot = useMemo(
+    () =>
+      curSelectedShotId
+        ? shots?.find((shot) => shot.id === curSelectedShotId)
+        : undefined,
+    [shots, curSelectedShotId]
+  );
+
+  const scope = selectionScope(selection);
+
+  // The render segment (#986) the selected shot belongs to, plus a span label
+  // built from the covered shots' 1-based numbers — feeds the Video tab's
+  // segment panel. Undefined until the shot is rendered into a segment.
+  const selectedSegment = useMemo(
+    () =>
+      curSelectedShotId
+        ? segments?.find((s) => s.shotIds.includes(curSelectedShotId))
+        : undefined,
+    [segments, curSelectedShotId]
+  );
+  const selectedSegmentSpanLabel = useMemo(() => {
+    if (!selectedSegment || !shots) return undefined;
+    const numberById = new Map(shots.map((f) => [f.id, f.shotNumber]));
+    const numbers = selectedSegment.shotIds
+      .map((id) => numberById.get(id))
+      .filter((n): n is number => n != null);
+    return formatShotSpan(numbers);
+  }, [selectedSegment, shots]);
+
+  // Tabs are level-aware (#986). `search.facet` is the user's last *explicit*
+  // pick (a click writes it; missing ≠ Cast). When the scope changes so that
+  // pick is no longer offered — or the user never picked — fall back to the
+  // first tab for the new scope. Every downstream consumer reads
+  // `effectiveTab` so the panel, canvas, and previews stay in agreement.
+  const visibleTabs = useMemo(() => tabsForScope(scope), [scope]);
+  const effectiveTab = useMemo(
+    () => effectiveTabFor(scope, search.facet),
+    [scope, search.facet]
+  );
+
+  // Shot ids in scope; `null` = whole sequence, so facets show the full
+  // library. Facet MEMBERSHIP is resolved server-side (see use-scene-facets) —
+  // this only says which shots are selected.
+  const facetShotIds = useMemo(() => {
+    if (scope === 'sequence') return null;
+    return (shots ? selectionShots(selection, shots) : []).map((s) => s.id);
+  }, [scope, selection, shots]);
+
+  // Scenes group the shots; they carry no model of their own (#1066) — model
+  // identity lives on the selected frame_variants / video_variants row.
+  const { data: scenes, error: scenesError } = useScenesBySequence(sequenceId);
+  const scenesById = useMemo(() => {
+    const map = new Map<string, SceneWithScript>();
+    for (const scene of scenes ?? []) map.set(scene.id, scene);
+    return map;
+  }, [scenes]);
+  // At shot scope the selection is that shot's own scene; at scene scope it can
+  // be several (#986).
+  const selectedScenes = useMemo(() => {
+    if (scope === 'shot' && selectedShot?.sceneId) {
+      const scene = scenesById.get(selectedShot.sceneId);
+      return scene ? [scene] : [];
+    }
+    if (scope === 'scenes') {
+      return selection.sceneIds
+        .map((id) => scenesById.get(id))
+        .filter((s): s is SceneWithScript => s != null);
+    }
+    return [];
+  }, [scope, selectedShot, selection.sceneIds, scenesById]);
+
+  // The scene the Script facet targets: exactly one, or none. At shot scope
+  // that's the shot's own scene; at scene scope the single selected scene. A
+  // multi-scene selection leaves it undefined so the facet reads rather than
+  // silently writing to whichever scene happened to be first.
+  const scriptScene =
+    selectedScenes.length === 1 ? selectedScenes[0] : undefined;
+
+  // One sequence batch. Scene scope filters it; a second server fn repeated
+  // the same hash work for the in-focus scene (#1795).
+  const { data: sequenceStaleness, isError: sequenceStalenessFailed } =
+    useSequenceShotStaleness({ sequenceId });
+  const scriptSceneShots = useMemo(
+    () =>
+      scriptScene && shots
+        ? shots.filter((s) => s.sceneId === scriptScene.id)
+        : undefined,
+    [scriptScene, shots]
+  );
+  const scopeShots = scope === 'sequence' ? shots : scriptSceneShots;
+  const scopeStaleness =
+    scope === 'sequence'
+      ? sequenceStaleness
+      : scopeShots && sequenceStaleness
+        ? Object.fromEntries(
+            scopeShots.flatMap((shot) => {
+              const entry = sequenceStaleness[shot.id];
+              return entry ? [[shot.id, entry] as const] : [];
+            })
+          )
+        : undefined;
+  // A failed staleness check must not render as "everything is up to date":
+  // with no data every downstream consumer draws a confidently clean UI (no
+  // dots, no chips, no summary) off the back of a request that errored.
+  const scopeStalenessFailed = sequenceStalenessFailed;
+  const staleShotIds = useMemo(() => {
+    const set = new Set<string>();
+    for (const [shotId, staleness] of Object.entries(sequenceStaleness ?? {})) {
+      if (shotIsStale(staleness)) set.add(shotId);
+    }
+    return set;
+  }, [sequenceStaleness]);
+
+  // Model identity lives on the version that produced the asset (#1066), so the
+  // tabs target whatever the selected shot's selected image/video version was
+  // rendered with. A pick in the dropdown is a per-request override for the
+  // NEXT generation — it becomes durable once that version is selected, so it's
+  // held in view state rather than written anywhere.
+  //
+  // A pick therefore has to EXPIRE, or it outranks fresher server truth forever
+  // (it sits at the `explicit` tier, above everything). It carries the model it
+  // was made against, and stops applying as soon as that changes — which covers
+  // the pick's own generation completing, a "Set", a sequence-wide Set, and a
+  // teammate's change alike. Derived during render, so no effect syncs state.
+  // A FAILED generation doesn't move the selection, so the pick survives for a
+  // retry, which is the behaviour you want.
+  const { data: selectedModels } = useSequenceSelectedModels(sequenceId);
+  const [imageModelPick, setImageModelPick] = useState<{
+    shotId: string;
+    model: TextToImageModel;
+    basedOn: string | null;
+  } | null>(null);
+  const [videoModelPick, setVideoModelPick] = useState<{
+    shotId: string;
+    model: ImageToVideoModel;
+    basedOn: string | null;
+  } | null>(null);
+
+  const selectedImageModelForShot = curSelectedShotId
+    ? (selectedModels?.imageModelByShot[curSelectedShotId] ?? null)
+    : null;
+  const selectedVideoModelForShot = curSelectedShotId
+    ? (selectedModels?.videoModelByShot[curSelectedShotId] ?? null)
+    : null;
+
+  // A pick applies only to its own shot, and only while the model it was made
+  // against still stands.
+  const activeImagePick =
+    imageModelPick &&
+    imageModelPick.shotId === curSelectedShotId &&
+    imageModelPick.basedOn === selectedImageModelForShot
+      ? imageModelPick.model
+      : null;
+  const activeVideoPick =
+    videoModelPick &&
+    videoModelPick.shotId === curSelectedShotId &&
+    videoModelPick.basedOn === selectedVideoModelForShot
+      ? videoModelPick.model
+      : null;
+
+  const resolvedImageModel = resolveImageModel({
+    explicit: activeImagePick,
+    // Show the model a retry would actually run for a failed shot, so the
+    // dropdown and the server agree (#1066).
+    lastFailedAttemptModel: curSelectedShotId
+      ? selectedModels?.failedImageModelByShot[curSelectedShotId]
+      : null,
+    selectedVersionModel: selectedImageModelForShot,
+    sequenceModel: sequence?.imageModel,
+  });
+  const resolvedVideoModel = resolveVideoModel({
+    explicit: activeVideoPick,
+    lastFailedAttemptModel: curSelectedShotId
+      ? selectedModels?.failedVideoModelByShot[curSelectedShotId]
+      : null,
+    selectedVersionModel: selectedVideoModelForShot,
+    sequenceModel: sequence?.videoModel,
+  });
+
+  // Per-model coverage for the selected scene's shots — feeds the scene bar's
+  // Look/Motion dropdown markers (which models have generated, and how many).
+  const sceneShotIds = useMemo(() => {
+    const set = new Set<string>();
+    if (!shots) return set;
+    const targetSceneIds = new Set(selectedScenes.map((s) => s.id as string));
+    if (targetSceneIds.size === 0) {
+      if (scope === 'sequence') {
+        for (const s of shots) set.add(s.id);
+      }
+      return set;
+    }
+    for (const s of shots) {
+      if (s.sceneId && targetSceneIds.has(s.sceneId)) set.add(s.id);
+    }
+    return set;
+  }, [selectedScenes, shots, scope]);
+  const sceneImageModelStatuses = useMemo(
+    () =>
+      buildSceneModelStatuses(
+        imageVariantsByShot,
+        sceneShotIds,
+        resolvedImageModel
+      ),
+    [imageVariantsByShot, sceneShotIds, resolvedImageModel]
+  );
+  const sceneVideoModelStatuses = useMemo(
+    () =>
+      buildSceneModelStatuses(
+        videoVariantsByShot,
+        sceneShotIds,
+        resolvedVideoModel
+      ),
+    [videoVariantsByShot, sceneShotIds, resolvedVideoModel]
+  );
+
+  const handleImageModelChange = useCallback(
+    (model: TextToImageModel) => {
+      if (!curSelectedShotId) return;
+      setImageModelPick({
+        shotId: curSelectedShotId,
+        model,
+        basedOn: selectedImageModelForShot,
+      });
+    },
+    [curSelectedShotId, selectedImageModelForShot]
+  );
+  const handleVideoModelChange = useCallback(
+    (model: ImageToVideoModel) => {
+      if (!curSelectedShotId) return;
+      const failedModel =
+        selectedModels?.failedVideoModelByShot[curSelectedShotId];
+      // No version and no failed attempt: this shot still inherits the
+      // sequence default, so the pick IS the sequence default. Persist it
+      // so Sequence settings and every other ungenerated shot follow.
+      if (selectedVideoModelForShot == null && !failedModel) {
+        persistSequenceVideoModel(model);
+        setVideoModelPick(null);
+        return;
+      }
+      setVideoModelPick({
+        shotId: curSelectedShotId,
+        model,
+        basedOn: selectedVideoModelForShot,
+      });
+    },
+    [
+      curSelectedShotId,
+      selectedVideoModelForShot,
+      selectedModels?.failedVideoModelByShot,
+      persistSequenceVideoModel,
+    ]
+  );
+  const handleBatchVideoModelChange = useCallback(
+    (model: ImageToVideoModel) => {
+      persistSequenceVideoModel(model);
+      // Drop a next-gen pick that was only shadowing the sequence default,
+      // so the inspector of an ungenerated shot follows the generate picker.
+      setVideoModelPick((pick) => (pick?.basedOn == null ? null : pick));
+    },
+    [persistSequenceVideoModel]
+  );
+
+  const resolvedSequenceImageModel = safeTextToImageModel(
+    sequence?.imageModel,
+    DEFAULT_IMAGE_MODEL
+  );
+  const resolvedSequenceVideoModel = safeImageToVideoModel(
+    sequence?.videoModel,
+    DEFAULT_VIDEO_MODEL
+  );
+
+  // In-flight retry state (#882) for the selected shot. Image retry matters
+  // before the thumbnail exists; video retry after — the image entry is cleared
+  // once it completes, so preferring it is correct in both stages.
+  const selectedShotRetry = useMemo(() => {
+    if (!curSelectedShotId) return undefined;
+    const r = generationState.shotRetries.get(curSelectedShotId);
+    return r?.image ?? r?.video;
+  }, [generationState.shotRetries, curSelectedShotId]);
+
+  // Filter variants for the currently selected shot (by owning shotId — frame
+  // ids ≠ shot ids, #989).
+  const selectedShotVariants = useMemo(() => {
+    if (!imageVariants || !curSelectedShotId) return undefined;
+    return imageVariants.filter((v) => v.shotId === curSelectedShotId);
+  }, [imageVariants, curSelectedShotId]);
+
+  // The image-prompt tab targets the shot's resolved look model (#1066); its
+  // variant + Generate state track that model.
+  const effectiveImageModel = resolvedImageModel;
+
+  // Newest-first match for the tab model. Prefer an in-flight row so
+  // Regenerate shows Generating… mid-roll; else the latest completed.
+  const variantForSelectedModel = useMemo(() => {
+    if (!selectedShotVariants) return undefined;
+    const forModel = selectedShotVariants.filter(
+      (v) => v.model === effectiveImageModel
+    );
+    if (forModel.length === 0) return undefined;
+    const newestFirst = [...forModel].reverse();
+    return (
+      newestFirst.find((v) => v.status === 'generating') ??
+      newestFirst.find((v) => v.status === 'completed' && v.url) ??
+      newestFirst[0]
+    );
+  }, [selectedShotVariants, effectiveImageModel]);
+
+  // Motion mirror: the shot's resolved video model (#1066) drives the
+  // motion-prompt tab's variant + Generate state. Excludes divergent /
+  // discarded alternates so only the primary per-model row is matched.
+  const effectiveVideoModel = resolvedVideoModel;
+
+  const videoVariantForSelectedModel = useMemo(() => {
+    if (!curSelectedShotId) return undefined;
+    return videoVariantsByShot
+      .get(curSelectedShotId)
+      ?.find(
+        (v) =>
+          v.model === effectiveVideoModel &&
+          v.divergedAt === null &&
+          v.discardedAt === null
+      );
+  }, [videoVariantsByShot, curSelectedShotId, effectiveVideoModel]);
+
+  // Canvas badges for the image/motion tabs. The model dropdown is a pick for
+  // the *next* generation (#1066) — do NOT swap the canvas to another model's
+  // still/clip while browsing models. That showed non-current media (and often
+  // looked like the wrong model) and fought the "applies to the next
+  // generation" copy. Switching to another model's existing output is a
+  // history pick, like any other version.
+  const { previewVariantUrl, previewVariantVideoUrl, playerBadgeMessage } =
+    useMemo(() => {
+      const none = {
+        previewVariantUrl: null as string | null,
+        previewVariantVideoUrl: null as string | null,
+        playerBadgeMessage: null as string | null,
+      };
+      if (!selectedShot) return none;
+
+      if (effectiveTab === 'image-prompt') {
+        const currentImageModel = safeTextToImageModel(
+          selectedShot.image?.model,
+          DEFAULT_IMAGE_MODEL
+        );
+        if (
+          effectiveImageModel !== currentImageModel &&
+          variantForSelectedModel?.status === 'completed' &&
+          variantForSelectedModel.url
+        ) {
+          return {
+            ...none,
+            playerBadgeMessage: 'Pick it in History to use this model',
+          };
+        }
+        if (
+          effectiveImageModel !== currentImageModel &&
+          !variantForSelectedModel
+        ) {
+          return {
+            ...none,
+            playerBadgeMessage: 'Click Generate Image to create',
+          };
+        }
+        return none;
+      }
+
+      if (effectiveTab === 'motion-prompt') {
+        const currentVideoModel = safeImageToVideoModel(
+          selectedShot.video?.model,
+          DEFAULT_VIDEO_MODEL
+        );
+        if (
+          videoVariantForSelectedModel?.status === 'completed' &&
+          videoVariantForSelectedModel.url &&
+          effectiveVideoModel !== currentVideoModel
+        ) {
+          return {
+            ...none,
+            playerBadgeMessage: 'Pick it in History to use this model',
+          };
+        }
+        if (
+          effectiveVideoModel !== currentVideoModel &&
+          !videoVariantForSelectedModel
+        ) {
+          return {
+            ...none,
+            playerBadgeMessage: 'Click Generate Motion to create',
+          };
+        }
+        return none;
+      }
+
+      return none;
+    }, [
+      effectiveTab,
+      selectedShot,
+      effectiveImageModel,
+      variantForSelectedModel,
+      effectiveVideoModel,
+      videoVariantForSelectedModel,
+    ]);
+
+  const setterForType = useCallback((type: RegenerationType) => {
+    switch (type) {
+      case 'image':
+        return setRegeneratingImages;
+      case 'motion':
+        return setRegeneratingMotion;
+      case 'scene-variants':
+        return setRegeneratingSceneVariants;
+    }
+  }, []);
+
+  const handleRegenerateStart = useCallback(
+    (shotId: string, type: RegenerationType) => {
+      setterForType(type)((prev) => addToSet(prev, shotId));
+    },
+    [setterForType]
+  );
+
+  const handleRegenerateEnd = useCallback(
+    (shotId: string, type: RegenerationType) => {
+      setterForType(type)((prev) => removeFromSet(prev, shotId));
+    },
+    [setterForType]
+  );
+
+  // Auto-remove shots from regenerating sets when generation completes or fails
+  useEffect(() => {
+    if (!shots) return;
+
+    for (const shot of shots) {
+      if (regeneratingImages.has(shot.id) && isTerminalStatus(shot.imageStatus))
+        handleRegenerateEnd(shot.id, 'image');
+      if (regeneratingMotion.has(shot.id) && isTerminalStatus(shot.videoStatus))
+        handleRegenerateEnd(shot.id, 'motion');
+      if (
+        regeneratingSceneVariants.has(shot.id) &&
+        isTerminalStatus(shot.gridSheet?.status ?? null)
+      )
+        handleRegenerateEnd(shot.id, 'scene-variants');
+    }
+  }, [
+    shots,
+    regeneratingImages,
+    regeneratingMotion,
+    regeneratingSceneVariants,
+    handleRegenerateEnd,
+  ]);
+
+  // Derive motion banner state from query data so it persists naturally across
+  // tab switches — no local state needed. startedAt uses the earliest
+  // generating shot's updatedAt so elapsed time stays accurate.
+  const motionBannerState = useMemo(() => {
+    if (!shots || !sequence) return null;
+    const anyGenerating = shots.some((f) => f.videoStatus === 'generating');
+    if (!anyGenerating) return null;
+    const generatingTimes = shots
+      .filter((f) => f.videoStatus === 'generating')
+      .map((f) => f.updatedAt.getTime());
+    const startedAt =
+      generatingTimes.length > 0 ? Math.min(...generatingTimes) : Date.now();
+    return {
+      startedAt,
+      includeMusic: sequence.musicStatus === 'generating',
+    };
+  }, [shots, sequence]);
+
+  const [isRetrying, setIsRetrying] = useState(false);
+
+  // Scenes list folded to the thumbnail rail (#1713). A per-viewer preference,
+  // read after mount so the server and first client render agree.
+  const [railCollapsed, setRailCollapsed] = useState(false);
+  useEffect(() => {
+    try {
+      setRailCollapsed(localStorage.getItem(RAIL_COLLAPSED_KEY) === '1');
+    } catch {
+      // Storage blocked — the list just starts expanded.
+    }
+  }, []);
+  const setRail = useCallback((collapsed: boolean) => {
+    setRailCollapsed(collapsed);
+    try {
+      localStorage.setItem(RAIL_COLLAPSED_KEY, collapsed ? '1' : '0');
+    } catch {
+      // Storage blocked — the choice lasts for this visit only.
+    }
+  }, []);
+  const collapseRail = useCallback(() => setRail(true), [setRail]);
+  const expandRail = useCallback(() => setRail(false), [setRail]);
+
+  const failureSummary = useMemo(
+    () => analyzeLoadedFailures(shots, sequence, scenesById),
+    [shots, sequence, scenesById]
+  );
+
+  const handleSmartRetry = useCallback(async () => {
+    setIsRetrying(true);
+    try {
+      const result = await smartRetryFn({ data: { sequenceId } });
+      toast.success(
+        result.retryType === 'full'
+          ? 'Continuing generation'
+          : `Retrying: ${result.retriedItems.join(', ')}`
+      );
+      void queryClient.invalidateQueries({
+        queryKey: ['sequence', sequenceId],
+      });
+      void queryClient.invalidateQueries({ queryKey: ['shots', sequenceId] });
+    } catch (error) {
+      if (isInsufficientCreditsError(error)) {
+        notifyInsufficientCredits();
+        void queryClient.invalidateQueries({
+          queryKey: BILLING_BALANCE_KEY,
+        });
+      } else {
+        toast.error('Failed to retry', {
+          description: errorMessage(error),
+        });
+      }
+    } finally {
+      setIsRetrying(false);
+    }
+  }, [sequenceId, queryClient]);
+
+  // Handler for batch motion generation (server determines eligible shots)
+  const handleBatchMotionGeneration = useCallback(
+    async ({
+      includeMusic,
+      musicModel,
+      videoModel,
+      generateAudio,
+      draftMotion,
+    }: BatchGenerateMotionArgs) => {
+      // Optimistic: compute eligible shots locally (same filter as backend).
+      // 'cancelled' is user-initiated (#1108 Phase 4): deliberately eligible
+      // for a user-driven batch generate, never auto-retried.
+      const eligibleShotIds = (shots ?? [])
+        .filter((f) =>
+          isBatchMotionEligible(
+            f,
+            rendersReferenceOnly(f, { generateStartFrames })
+          )
+        )
+        .map((f) => f.id);
+
+      setRegeneratingMotion((prev) => addAllToSet(prev, eligibleShotIds));
+
+      // Optimistically mark shots as generating in the query cache so the
+      // derived banner state shows the banner immediately — no separate state.
+      const eligibleSet = new Set(eligibleShotIds);
+      const now = new Date();
+      queryClient.setQueryData<ShotView[]>(shotKeys.list(sequenceId), (old) =>
+        old?.map((f) =>
+          eligibleSet.has(f.id)
+            ? { ...f, videoStatus: 'generating', updatedAt: now }
+            : f
+        )
+      );
+      if (includeMusic) {
+        queryClient.setQueryData<Sequence>(
+          sequenceKeys.detail(sequenceId),
+          (old) => (old ? { ...old, musicStatus: 'generating' } : old)
+        );
+      }
+
+      posthog.capture('motion_generation_started', {
+        sequence_id: sequenceId,
+        include_music: includeMusic,
+        eligible_shot_count: eligibleShotIds.length,
+        // Explicit batch model overrides per-shot identity (#1066).
+        video_model: videoModel,
+        music_model: includeMusic ? musicModel : undefined,
+        generate_audio: generateAudio,
+      });
+
+      try {
+        await batchGenerateMotionFn({
+          data: {
+            sequenceId,
+            includeMusic,
+            model: videoModel,
+            musicModel: includeMusic ? musicModel : undefined,
+            generateAudio,
+            draftMotion,
+            leftoverGrokShotIds: [...leftoverGrokShotIds],
+          },
+        });
+        // Server may have updated sequence.videoModel / sequence.musicModel to
+        // the batch picks; invalidate so the header badge, footer pre-fill,
+        // and per-shot fallback all reflect the new values.
+        void queryClient.invalidateQueries({
+          queryKey: sequenceKeys.detail(sequenceId),
+        });
+      } catch (error) {
+        setRegeneratingMotion((prev) =>
+          removeAllFromSet(prev, eligibleShotIds)
+        );
+        // Roll back optimistic cache updates
+        queryClient.setQueryData<ShotView[]>(shotKeys.list(sequenceId), (old) =>
+          old?.map((f) =>
+            eligibleSet.has(f.id) ? { ...f, videoStatus: 'pending' } : f
+          )
+        );
+        if (includeMusic) {
+          void queryClient.invalidateQueries({
+            queryKey: sequenceKeys.detail(sequenceId),
+          });
+        }
+
+        if (isInsufficientCreditsError(error)) {
+          notifyInsufficientCredits();
+          void queryClient.invalidateQueries({
+            queryKey: BILLING_BALANCE_KEY,
+          });
+        } else {
+          throw error;
+        }
+      }
+    },
+    [
+      sequenceId,
+      shots,
+      generateStartFrames,
+      leftoverGrokShotIds,
+      queryClient,
+      posthog,
+    ]
+  );
+
+  const musicPromptsReady = !!(sequence?.musicPrompt && sequence.musicTags);
+  // The generation plan is the footer's only opinion (#1817): the first stop
+  // with missing or stale work picks the footer. Null while a run holds the
+  // sequence — its units read running.
+  const { data: plan } = useGenerationPlan(sequenceId);
+  const nextStage = useMemo(
+    () => (isProcessing || !plan ? null : firstStageWithWork(plan)),
+    [isProcessing, plan]
+  );
+
+  const handleContinueGeneration = useCallback(
+    async (args: ContinueFlags) => {
+      // Optimistic status flip, as the motion batch does: the chip and the
+      // footer key off `sequence.status`, and the server fn reserves credits
+      // and triggers the workflow before it returns.
+      const key = sequenceKeys.detail(sequenceId);
+      // Drop in-flight detail refetches (the prior run's `generation.complete`
+      // invalidates this key). Without cancel, they land after the optimistic
+      // processing write and hide the chip for a frame (#1641).
+      await queryClient.cancelQueries({ queryKey: key });
+      const previous = queryClient.getQueryData<Sequence>(key);
+      // Reset the stream before the status flip so the chip's first paint is
+      // a new run, not the leftover COMPLETE that would exit it (#1641).
+      resetGenerationStream({
+        stopAt: args.stopAt,
+        referenceOnly: !args.generateStartFrames,
+        generateVoices: args.generateVoices,
+      });
+      // Flip status AND stop-at together so the chip sizes for the Continue
+      // (Casting → References, etc.) instead of the finished run.
+      queryClient.setQueryData<Sequence>(key, (old) =>
+        old
+          ? {
+              ...old,
+              status: 'processing',
+              updatedAt: new Date(),
+              generationStopAt: args.stopAt,
+              generateStartFrames: args.generateStartFrames,
+              generateVoices: args.generateVoices,
+              draftMotion: args.draftMotion,
+            }
+          : old
+      );
+      try {
+        await continueGenerationFn({
+          data: {
+            sequenceId,
+            stopAt: args.stopAt,
+            leftoverGrokShotIds: [...leftoverGrokShotIds],
+            generateStartFrames: args.generateStartFrames,
+            generateVoices: args.generateVoices,
+            draftMotion: args.draftMotion,
+          },
+        });
+      } catch (error) {
+        // Continue reserves credits like any other run, so it hits the same
+        // toast as batch motion — not a generic error.
+        queryClient.setQueryData<Sequence>(key, previous);
+        if (!isInsufficientCreditsError(error)) {
+          refetchAfterRefusedContinue(queryClient, sequenceId);
+          throw error;
+        }
+        notifyInsufficientCredits();
+        void queryClient.invalidateQueries({ queryKey: BILLING_BALANCE_KEY });
+        return;
+      }
+      void queryClient.invalidateQueries({
+        queryKey: sequenceKeys.detail(sequenceId),
+      });
+      void queryClient.invalidateQueries({
+        queryKey: generationPlanKeys.bySequence(sequenceId),
+      });
+    },
+    [sequenceId, leftoverGrokShotIds, queryClient, resetGenerationStream]
+  );
+
+  // Render every approved draft at 1080p (#1756). The workflow flips each
+  // segment to generating; invalidate so the list picks that up.
+  const handleRenderDraftsAtQuality = useCallback(async () => {
+    const result = await renderSequenceDraftsAtQualityFn({
+      data: { sequenceId },
+    });
+    toast.success(
+      result.started > 0
+        ? `Rendering ${result.started} ${result.started === 1 ? 'final' : 'finals'}`
+        : 'No drafts ready to render'
+    );
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: shotKeys.list(sequenceId) }),
+      queryClient.invalidateQueries({ queryKey: segmentKeys.list(sequenceId) }),
+    ]);
+  }, [queryClient, sequenceId]);
+
+  const handleGenerateMusic = useCallback(
+    async (model: AudioModel) => {
+      await generateMusicFn({
+        data: { sequenceId, model },
+      });
+    },
+    [sequenceId]
+  );
+
+  // GenerationProgressBanner is owned by the script-analysis pipeline
+  // (sequence.status === 'processing'). Standalone motion gen runs when the
+  // sequence is already 'completed' / 'ready', so it must render via the
+  // dedicated MotionProgressBanner — never the 5-stage banner. Trusting
+  // generationState.currentPhase here would let leftover phase events from
+  // past runs hijack the UI back to the 5-stage banner.
+  const isGenerationActive = isProcessing;
+  const willEmail = isGenerationActive && !sequence.readyEmailSentAt;
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const startTimeRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!isProcessing) {
+      startTimeRef.current = null;
+      setElapsedSeconds(0);
+      return;
+    }
+    startTimeRef.current = sequence.updatedAt.getTime();
+    const tick = () => {
+      const start = startTimeRef.current ?? Date.now();
+      setElapsedSeconds(Math.floor((Date.now() - start) / 1000));
+    };
+    tick();
+    const interval = setInterval(tick, 1000);
+    return () => clearInterval(interval);
+  }, [isProcessing, sequenceId, sequence?.updatedAt]);
+
+  const remainingSeconds = useMemo(() => {
+    const phase1Completed = generationState.phases[0]?.status === 'completed';
+    const sceneCount = phase1Completed ? generationState.scenes.length : 0;
+    return Math.max(
+      0,
+      estimateTotalSeconds(
+        sceneCount,
+        sequence?.script ? estimateSceneCount(sequence.script) : undefined,
+        generationState.phases.length,
+        {
+          analysisModel: sequence?.analysisModel,
+          imageModel: sequence?.imageModel,
+          videoModel: sequence?.videoModel,
+          musicModel: sequence?.musicModel,
+        }
+      ) - elapsedSeconds
+    );
+  }, [
+    elapsedSeconds,
+    generationState.phases,
+    generationState.scenes.length,
+    sequence?.script,
+    sequence?.analysisModel,
+    sequence?.imageModel,
+    sequence?.videoModel,
+    sequence?.musicModel,
+  ]);
+  remainingRef.current = remainingSeconds;
+  const etaMinutes = Math.max(1, Math.round(remainingSeconds / 60));
+
+  // Progress rides in the app header (#1427) — no layout shift, and it
+  // never sits on top of anything you might want to click.
+  const progressChip =
+    isGenerationActive || openRuns.length > 0 ? (
+      <GenerationProgressBanner
+        generationState={generationState}
+        isProcessing={isProcessing}
+        startedAt={sequence?.updatedAt}
+        script={sequence?.script ?? undefined}
+        remainingSeconds={remainingSeconds}
+        analysisModel={sequence?.analysisModel}
+        imageModel={sequence?.imageModel}
+        videoModel={sequence?.videoModel}
+        musicModel={sequence?.musicModel}
+        willEmail={willEmail}
+        runs={openRuns}
+      />
+    ) : motionBannerState !== null && sequence && shots ? (
+      <MotionProgressBanner
+        shots={shots}
+        sequence={sequence}
+        includeMusic={motionBannerState.includeMusic}
+        startedAt={motionBannerState.startedAt}
+        onComplete={resetGenerationStream}
+      />
+    ) : null;
+
+  // One prop bag for the desktop sidebar and the phone sheet — same list.
+  const sceneListProps: SceneListProps = {
+    sequenceId,
+    shots,
+    scenes,
+    segments,
+    loadError: shotsError ?? scenesError,
+    segmentsError,
+    selection,
+    aspectRatio,
+    resolution: sequence?.resolution,
+    draftMotion: sequence?.draftMotion,
+    includeMusic: sequence?.includeMusic ?? true,
+    onIncludeMusicChange: persistIncludeMusic,
+    onRenderDraftsAtQuality: handleRenderDraftsAtQuality,
+    onSelectScene: handleSelectScene,
+    onSelectShot: handleSelectShot,
+    onClearSelection: handleClearSelection,
+    onPlaySequence: handlePlaySequence,
+    playingShotId,
+    regeneratingImages,
+    regeneratingMotion,
+    onBatchGenerateMotion: handleBatchMotionGeneration,
+    nextStage,
+    onContinueGeneration: handleContinueGeneration,
+    onGenerateMusic: handleGenerateMusic,
+    musicPromptsReady,
+    hideBatchButton: isGenerationActive,
+    divergentVariants,
+    onCompareDivergent: setCompareVariant,
+    initialMusicModel: sequenceMusicModel,
+    initialVideoModel: sequenceVideoModel,
+    onVideoModelChange: handleBatchVideoModelChange,
+    initialImageModel: resolvedSequenceImageModel,
+    analysisModel: sequence?.analysisModel,
+    onModelsChange: persistModels,
+    modelsSaving,
+    styleCategory,
+    generateStartFrames,
+    generateVoices: sequence?.generateVoices,
+    styleName,
+    staleShotIds: isGenerationActive ? undefined : staleShotIds,
+    targetDurationSeconds: sequence?.targetDurationSeconds,
+    isAnalyzing: isProcessing,
+    leftoverGrokShotIds,
+    onLeftoverGrokChange: handleLeftoverGrokChange,
+  };
+
+  const [historyOpen, setHistoryOpen] = useState(false);
+
+  // One inspector, two homes: the side column, or on a phone the drawer the
+  // bottom bar's cog opens. Never both, so its state and ids exist once.
+  // History stays on this column: the control opens the log here.
+  const modelBar = (
+    <SceneModelBar
+      selection={selection}
+      scenes={scenes}
+      shots={shots}
+      sequenceId={sequenceId}
+      title={sequence?.title}
+      resolvedSequenceImageModel={resolvedSequenceImageModel}
+      resolvedSequenceVideoModel={resolvedSequenceVideoModel}
+      styleId={sequence?.styleId ?? undefined}
+      stylePending={sequence?.styleConfig == null}
+      aspectRatio={aspectRatio}
+      resolution={sequence?.resolution}
+      targetDurationSeconds={sequence?.targetDurationSeconds}
+      analysisModel={sequence?.analysisModel ?? undefined}
+      historyOpen={historyOpen}
+      onHistoryToggle={() => setHistoryOpen((open) => !open)}
+    />
+  );
+  const inspector = (
+    <div className="flex h-full min-h-0 flex-col">
+      {historyOpen ? (
+        <>
+          {modelBar}
+          <Suspense fallback={<HistorySkeleton />}>
+            <HistoryColumn
+              sequenceId={sequenceId}
+              scope={
+                selection.shotId
+                  ? { shotId: selection.shotId }
+                  : selection.sceneIds.length > 0
+                    ? { sceneIds: selection.sceneIds }
+                    : undefined
+              }
+            />
+          </Suspense>
+        </>
+      ) : (
+        <ScrollArea className="min-h-0 flex-1">
+          {modelBar}
+          <div className="@container/inspector px-4 pb-4">
+            <SceneScriptPrompts
+              shot={selectedShot}
+              sequenceId={sequenceId}
+              resolution={sequence?.resolution}
+              sequenceGeneratesStartFrames={generateStartFrames}
+              sequenceDraftMotion={sequence?.draftMotion ?? false}
+              selectedTab={effectiveTab}
+              visibleTabs={visibleTabs}
+              onTabChange={setFacet}
+              regeneratingImages={regeneratingImages}
+              regeneratingMotion={regeneratingMotion}
+              onRegenerateStart={handleRegenerateStart}
+              aspectRatio={aspectRatio}
+              variantForSelectedModel={variantForSelectedModel}
+              videoVariantForSelectedModel={videoVariantForSelectedModel}
+              segment={selectedSegment}
+              segmentSpanLabel={selectedSegmentSpanLabel}
+              resolvedImageModel={resolvedImageModel}
+              leftoverGrokShotIds={leftoverGrokShotIds}
+              resolvedVideoModel={resolvedVideoModel}
+              imageModelStatuses={sceneImageModelStatuses}
+              videoModelStatuses={sceneVideoModelStatuses}
+              onImageModelChange={handleImageModelChange}
+              onVideoModelChange={handleVideoModelChange}
+              styleName={styleName}
+              styleCategory={styleCategory}
+              shotDivergentVariants={divergentVariants?.filter(
+                (v) => v.shotId === curSelectedShotId
+              )}
+              onCompareDivergent={(variant) => setCompareVariant(variant)}
+              facetShotIds={facetShotIds}
+              musicEditable={scope === 'sequence'}
+              sceneScope={scope === 'scenes'}
+              scene={scriptScene}
+              scopeShots={scopeShots}
+              filmSeconds={shots ? sumShotSeconds(shots) : undefined}
+              scopeStaleness={scopeStaleness}
+              scopeStalenessFailed={scopeStalenessFailed}
+              onSelectShot={handleSelectShot}
+              scenes={scenes}
+              onSelectScene={handleFocusScene}
+            />
+          </div>
+        </ScrollArea>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="@container/scenes flex h-full flex-col">
+      {/* Progress rides in the app header (#1427) — no layout shift,
+          and it never sits on top of anything you might want to click. */}
+      <SequenceHeaderPortal>{progressChip}</SequenceHeaderPortal>
+
+      {/* Failure summary with smart retry — wait until the run finishes so a
+          single in-flight miss doesn't headline the first result (#1286). */}
+      {failureSummary?.hasFailed && !isGenerationActive && (
+        <FailureSummaryBanner
+          summary={failureSummary}
+          onRetry={() => void handleSmartRetry()}
+          onFullRetry={() => void handleSmartRetry()}
+          isRetrying={isRetrying}
+        />
+      )}
+
+      <div className="flex flex-1 min-h-0">
+        <div
+          className={cn(
+            'hidden min-h-0 shrink-0 pl-4 py-4',
+            !hasDetail && 'md:block'
+          )}
+        >
+          {/* Both stay mounted — the list's footer drafts survive a fold. */}
+          <SceneList
+            {...sceneListProps}
+            onCollapse={collapseRail}
+            className={cn(
+              'w-[clamp(220px,24cqw,360px)]',
+              railCollapsed && 'hidden'
+            )}
+          />
+          <SceneRail
+            scenes={scenes}
+            shots={shots}
+            selection={selection}
+            playingShotId={playingShotId}
+            aspectRatio={aspectRatio}
+            staleShotIds={sceneListProps.staleShotIds}
+            onExpand={expandRail}
+            className={cn(
+              aspectRatio === '9:16' ? 'w-16' : 'w-24',
+              !railCollapsed && 'hidden'
+            )}
+          />
+        </div>
+
+        <div className={cn('md:hidden', hasDetail && 'hidden')}>
+          <MobileSceneDrawer
+            {...sceneListProps}
+            settingsOpen={settingsOpen}
+            onSettingsOpenChange={setSettingsOpen}
+          />
+          {isMobile && (
+            <Drawer
+              showSwipeHandle
+              open={settingsOpen}
+              onOpenChange={setSettingsOpen}
+            >
+              <DrawerContent className="pb-[env(safe-area-inset-bottom)] [--drawer-content-height:85dvh] data-[swipe-axis=y]:[--drawer-content-max-height:85dvh]">
+                <DrawerTitle className="sr-only">Settings</DrawerTitle>
+                {inspector}
+              </DrawerContent>
+            </Drawer>
+          )}
+        </div>
+
+        {/* Queried on the width left AFTER the scenes column, so folding the
+            list to the rail is what buys the inspector its place on the right.
+            Too narrow for both: one scrolling column, settings open under the
+            preview (#1713). */}
+        <div className="@container/workspace flex min-h-0 min-w-0 flex-1">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto @3xl/workspace:flex-row @3xl/workspace:overflow-visible">
+            {/* Unmounted, not hidden, under a detail: a hidden player would
+                keep playing its sound. */}
+            {hasDetail ? (
+              <div className="h-full min-w-0 shrink-0 @3xl/workspace:min-h-0 @3xl/workspace:flex-1">
+                {detail}
+              </div>
+            ) : (
+              // On a phone the canvas has the screen; the inspector is a
+              // drawer. The padding clears the fixed bottom bar.
+              <div className="flex h-[55dvh] min-w-0 shrink-0 flex-col max-md:h-auto max-md:min-h-0 max-md:flex-1 max-md:pb-[calc(4rem+env(safe-area-inset-bottom))] @3xl/workspace:h-auto @3xl/workspace:min-h-0 @3xl/workspace:flex-1">
+                <CanvasViewToggle
+                  view={effectiveView}
+                  onViewChange={setView}
+                  canvasDisabled={!canvasReady}
+                  trailing={
+                    <>
+                      <CopyScriptButton sequenceId={sequenceId} />
+                      <SequenceDownloadMenu
+                        sequenceExport={sequenceExport}
+                        draftLabel={theatreDraftLabel(shots ?? [])}
+                        variant="toolbar"
+                        publish={
+                          sequence
+                            ? {
+                                teamId: sequence.teamId,
+                                sequenceId: sequence.id,
+                                defaultTitle: sequence.title,
+                              }
+                            : undefined
+                        }
+                      />
+                    </>
+                  }
+                />
+                {/* flex-col so SceneCanvas's flex-1 chain still stretches — in a
+                block parent the CanvasMediaStage size container computes 0
+                height and the whole canvas collapses. */}
+                <div
+                  className="relative flex min-h-0 flex-1 flex-col touch-pan-y overflow-hidden"
+                  {...canvasSwipe}
+                >
+                  {effectiveView === 'script' ? (
+                    <SceneScriptDocument
+                      sequenceId={sequenceId}
+                      scenes={scenes}
+                      selectedSceneIds={selectedScenes.map((s) => s.id)}
+                      onSelectScene={handleFocusScene}
+                      splittingScript={
+                        isProcessing ? sequence.script : undefined
+                      }
+                    />
+                  ) : (
+                    <SceneCanvas
+                      sequenceExport={sequenceExport}
+                      autoPlay={autoPlaySequence}
+                      onAutoPlayConsumed={handleAutoPlayConsumed}
+                      onPlayingShot={setPlayheadShotId}
+                      playingShotId={playingShotId}
+                      selection={selection}
+                      shots={shots}
+                      scenes={scenes}
+                      loadError={shotsError}
+                      sequence={sequence}
+                      aspectRatio={aspectRatio}
+                      selectedTab={effectiveTab}
+                      overrideImageUrl={previewVariantUrl}
+                      overrideVideoUrl={previewVariantVideoUrl}
+                      badgeMessage={playerBadgeMessage}
+                      staleLabel={
+                        !isGenerationActive &&
+                        effectiveTab === 'image-prompt' &&
+                        curSelectedShotId &&
+                        !regeneratingImages.has(curSelectedShotId)
+                          ? scopeStaleness?.[curSelectedShotId]?.thumbnail ===
+                            'stale'
+                            ? 'Out of date'
+                            : scopeStaleness?.[curSelectedShotId]?.thumbnail ===
+                                'updating'
+                              ? 'Updating…'
+                              : null
+                          : null
+                      }
+                      progressMessage={
+                        isGenerationActive ? (
+                          <RenderWaitCopy
+                            etaMinutes={etaMinutes}
+                            willEmail={willEmail}
+                          />
+                        ) : (
+                          generationState.phases.find(
+                            (p) => p.status === 'active'
+                          )?.phaseName
+                        )
+                      }
+                      retry={selectedShotRetry}
+                      onSelectShot={handleSelectShot}
+                      onSelectScene={handleFocusScene}
+                      sceneImageModel={resolvedImageModel}
+                      regeneratingSceneVariants={regeneratingSceneVariants}
+                      onGenerateSceneVariantsStart={(id) =>
+                        handleRegenerateStart(id, 'scene-variants')
+                      }
+                      firstRunActive={isGenerationActive}
+                    />
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Too narrow for both: the detail has the screen to itself, as
+                it did as a page of its own. */}
+            <div
+              className={cn(
+                'relative z-10 min-w-0 shrink-0 border-t bg-background max-md:hidden @3xl/workspace:min-h-0 @3xl/workspace:border-0 @3xl/workspace:bg-transparent @3xl/workspace:py-4 @3xl/workspace:pr-4',
+                hasDetail && 'hidden @3xl/workspace:block'
+              )}
+            >
+              <div
+                id="scene-inspector"
+                className="@3xl/workspace:flex @3xl/workspace:h-full @3xl/workspace:min-h-0 @3xl/workspace:w-[clamp(280px,38cqw,420px)] @3xl/workspace:flex-col @3xl/workspace:overflow-hidden @3xl/workspace:rounded-lg @3xl/workspace:border @3xl/workspace:bg-background"
+              >
+                {!isMobile && inspector}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {compareVariant &&
+        (() => {
+          const targetShot = shots?.find((f) => f.id === compareVariant.shotId);
+          if (!targetShot) return null;
+          return (
+            <CompareWithPromptDiff
+              sequenceId={sequenceId}
+              shot={targetShot}
+              variant={compareVariant}
+              onClose={() => setCompareVariant(null)}
+              onPromote={() => handlePromote(compareVariant)}
+              onDiscard={() => handleDiscardWithUndo(compareVariant)}
+              isPromoting={promoteVariant.isPending}
+              isDiscarding={discardVariant.isPending}
+            />
+          );
+        })()}
+    </div>
+  );
+};

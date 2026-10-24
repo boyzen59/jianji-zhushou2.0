@@ -1,0 +1,26 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Analyze this talent reference: is the image already a character sheet? Describe the person.\nUploaded filename: character-sheet.jpg",
+        "model": "anthropic/claude-sonnet-5.5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\"isCharacterSheet\":true,\"subjectKind\":\"animated\",\"suggestedName\":\"\",\"description\":\"A small, chubby robot character with a large spherical head and compact humanoid body, rendered in polished silver-gray metal with black joint accents. It has a wide black visor-like face with two glowing teal ring-shaped eyes, a round camera-lens ear on each side of its head, and a glowing teal orb on its chest. Its limbs are stubby with articulated black joints and clawed metallic hands and feet.\",\"age\":\"\",\"gender\":\"\",\"ethnicity\":\"\",\"physicalDescription\":\"Round bulbous head disproportionately large compared to its short, stocky body; smooth silver metallic shell with black recessed panels at joints; black oval face visor housing two glowing teal ring eyes; small circular lens-like protrusions on either side of the head resembling ears or sensors.\",\"standardClothing\":\"No clothing; body is entirely composed of brushed silver metal plating with black rubberized joint segments and a glowing teal chest light and eye rings.\",\"distinguishingFeatures\":\"Glowing teal circular eyes and matching chest orb light; lens-like side sensors on head; segmented black joints at shoulders, elbows, hips, and knees.\"}"
+      },
+      "recordedTimings": {
+        "ttftMs": 3342,
+        "interChunkDelaysMs": [
+          339, 150, 420, 126, 436, 109, 420, 135, 409, 131, 420, 128, 428, 110,
+          420, 133, 414, 126, 422, 83, 33, 2, 1
+        ],
+        "totalDurationMs": 8737
+      },
+      "metadata": {
+        "systemHash": "67e7d0bd"
+      }
+    }
+  ]
+}

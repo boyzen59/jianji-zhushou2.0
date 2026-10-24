@@ -1,0 +1,532 @@
+---
+title: Analyze Script Workflow
+description: End-to-end pipeline that transforms a script into a storyboard with images, motion video, and music
+section: Developer Guide
+order: 5
+---
+
+End-to-end pipeline that transforms a user's script into a complete storyboard with images, motion video, and music. For what an edit makes stale afterwards, use the interactive [Dependency graph](/docs/dependency-graph).
+
+## High-Level Overview
+
+```mermaid
+flowchart TD
+    Verify["<b>Verify + Prepare</b> · <1s<br/>IN: sequenceId, userId, teamId<br/>OUT: script, aspectRatio, styleConfig,<br/>analysisModelId, imageModel, videoModel"] --> Poster
+    Poster["<b>Generate Poster</b> · non-critical<br/>IN: title, script, styleConfig<br/>OUT: posterUrl on sequence"] --> SceneSplit
+
+    subgraph "Phase 1 — Script Analysis · ~3min"
+        SceneSplit["<b>Scene Splitting</b> · two parallel LLM calls · ~3min<br/>IN: script, aspectRatio, autoGenerateMotion<br/>OUT: scenes[], title, shotMapping[], bibles[]<br/><i>scene rows stream in; shots + their previews stream in as each scene's shot list settles</i>"]
+    end
+
+    SceneSplit --> P2
+
+    subgraph "Phase 2 — Casting Characters & Locations (parallel) · ~2.5min"
+        P2["<b>Promise.all</b>"]
+        P2 --> CastSub
+        P2 --> LocationSub
+
+        subgraph CastSub["Attached cast"]
+            CastNote["<b>Cast is snapshotted</b><br/>A character's face, sheet and voice<br/>live on the character"]
+        end
+
+        subgraph LocationSub["locationMatchingWorkflow"]
+            LocExtract["<b>Location Extraction</b> · LLM<br/>IN: scenes[]<br/>OUT: locationBible[]"]
+            LocMatch["<b>Location Matching</b> · LLM<br/><i>skipped if no suggestedLocationIds</i>"]
+            LocExtract --> LocMatch
+        end
+    end
+
+    subgraph "Phase 3 — References & Prompts (parallel) · ~1min"
+        CharSheets["<b>Character Sheets</b> · image gen ×N chars<br/>IN: characterBible[]<br/>OUT: charactersWithSheets[]"]
+        LocSheets["<b>Location Sheets</b> · image gen ×N locs<br/>IN: locationBible[], libraryLocationMatches[]<br/>OUT: locationsWithSheets[]"]
+        VisualPrompts["<b>Visual Prompts</b> · LLM ×N scenes<br/>IN: scenes[], characterBible[], locationBible[],<br/>styleConfig, aspectRatio, analysisModelId<br/>OUT: scenesWithVisualPrompts[]"]
+    end
+
+    CastSub --> CharSheets
+    CastSub --> VisualPrompts
+    LocationSub --> LocSheets
+    LocationSub --> VisualPrompts
+
+    subgraph "Phase 4 — Frame Images, then Motion/Music Prompts (sequential) · ~3min"
+        ImageGen["<b>Frame Images</b> · Fal.ai ×N scenes parallel<br/>IN: fullPrompt, imageModels[], imageSize,<br/>characterRefs[], locationRefs[] per scene<br/>OUT: imageUrls[] + variant images"]
+        MotionMusicPrompts["<b>Motion + Music Prompts</b> · LLM<br/>IN: scenesWithVisualPrompts[], styleConfig,<br/>rendered starting frame (thumbnailUrl as<br/>vision input, #929)<br/>OUT: completeScenes[], musicPrompt, musicTags"]
+    end
+
+    CharSheets -->|"charactersWithSheets"| ImageGen
+    LocSheets -->|"locationsWithSheets"| ImageGen
+    VisualPrompts -->|"scenesWithVisualPrompts"| ImageGen
+    ImageGen -->|"rendered stills (#929)"| MotionMusicPrompts
+    VisualPrompts -->|"scenesWithVisualPrompts"| MotionMusicPrompts
+
+    subgraph "Phase 5 — Motion + Music Generation (conditional) · ~1-5min"
+        MotionBatch["<b>Motion Batch</b> · Fal.ai ×N parallel<br/>IN: imageUrls[], motionPrompts[],<br/>videoModel, aspectRatio, durations<br/>OUT: videoUrl per frame"]
+        MusicGen["<b>Music Generation</b> · Fal.ai<br/>IN: prompt, tags, totalDuration, musicModel<br/>OUT: a sequence_music_variants track,<br/>selected through the claim (#1115)"]
+    end
+
+    ImageGen -->|"imageUrls"| MotionBatch
+    MotionMusicPrompts -->|"motionPrompts + musicPrompt"| MotionBatch
+    MotionMusicPrompts -->|"musicPrompt + tags"| MusicGen
+
+    MotionBatch --> Done
+    MusicGen --> Done
+    MotionMusicPrompts -->|"if no motion/music"| Done
+    Done["<b>Complete</b> · <1s<br/>OUT: generation.complete + completeScenes[]"]
+
+    style Verify fill:#2d2d44,color:#fff
+    style Done fill:#1a472a,color:#fff
+```
+
+> **Timing source:** Measured from local Cloudflare Workflows runs (Workerd via Miniflare) for a 9-scene run. As of #929, Phase 4 runs **sequentially** — frame images render first, then motion/music prompts — because the motion-prompt pass is conditioned on the actual rendered starting frame (passed to the LLM as a vision input). This trades the prior image∥prompt parallelism for image-grounded motion.
+
+## Triggering Flow
+
+The pipeline starts from server handlers in `src/sequences/sequences.fn.ts`:
+
+1. **`createSequenceFn`** — Creates a new sequence record, then calls `triggerWorkflow('/storyboard', input)`
+2. **Regenerate** — a changed script, style, aspect ratio or analysis model creates a NEW sequence from the old one (`createSequenceFn` with `sourceSequenceId`; the MCP `regenerate_storyboard` tool builds the same input with `regenerateInput`), which triggers the same workflow
+3. **`retryStoryboardFn`** — Retries a failed sequence (resets status to `processing`, re-triggers)
+
+All three use `triggerWorkflow()` from `src/platform/server/workflow/client.ts`, which:
+
+- Resolves the **Cloudflare Workflows binding** for the trigger path via `TRIGGER_TO_BINDING` (`src/platform/server/workflow/trigger-bindings.ts`) — e.g. `/storyboard` → `STORYBOARD_WORKFLOW`
+- Calls `binding.create({ id, params: body })` to start a durable workflow instance in-process (Workerd locally, same runtime as production — no HTTP webhook, no QStash). `options.deduplicationId` becomes the instance id, making a trigger idempotent
+- Returns the workflow instance id, persisted as `workflowRunId` on the relevant DB row for tracking
+
+**Input shape (`StoryboardWorkflowInput`):**
+
+| Field                  | Type      | Purpose                                      |
+| ---------------------- | --------- | -------------------------------------------- |
+| `userId`               | string    | Auth context                                 |
+| `teamId`               | string    | Auth context                                 |
+| `sequenceId`           | string    | Target sequence                              |
+| `options`              | object    | `framesPerScene`, `generateThumbnails`, etc. |
+| `stopAt`               | stage     | How far the run goes (`GENERATION_STAGES`)   |
+| `autoGenerateMotion`   | boolean   | `flagsFromStopAt(stopAt)`; never set alone   |
+| `autoGenerateMusic`    | boolean   | `flagsFromStopAt(stopAt)`; never set alone   |
+| `musicModel`           | string?   | Override music model                         |
+| `imageModels`          | string[]? | Multiple image models for parallel gen       |
+| `suggestedLocationIds` | string[]? | Team locations picked for matching           |
+
+## Storyboard Workflow
+
+**File:** `src/sequences/server/workflows/storyboard-workflow.ts`
+
+The storyboard workflow (`StoryboardWorkflow`, a `WorkflowEntrypoint` extending `OpenStoryWorkflowEntrypoint`) validates data, generates a poster image, then delegates to the analyze-script workflow. Each unit of work runs inside `step.do('name', …)` so the Workflows engine checkpoints and auto-retries it.
+
+```mermaid
+flowchart TD
+    Start["STORYBOARD_WORKFLOW.create()"] --> Verify["step.do('verify-clear-and-start-processing')"]
+    Verify -->|"Validates auth<br/>Loads sequence + style<br/>Deletes existing frames<br/>Sets status = processing"| Poster["step.do('generate-poster')"]
+    Poster -->|"Non-critical poster image<br/>for video player empty state"| Invoke["spawnAndAwaitChild(ANALYZE_SCRIPT_WORKFLOW)"]
+    Invoke -->|"child gets its own<br/>step retry budget"| ASW["AnalyzeScriptWorkflow"]
+    ASW --> Complete["mark-completed + emit generation.complete"]
+```
+
+**Step: `verify-clear-and-start-processing`**
+
+1. Validates auth via `validateSequenceAuth()`
+2. Loads sequence with `getSequenceForUser()` — checks script and style exist
+3. Loads and parses the style config — the sequence's selected `sequence_style_versions` snapshot (#1600). An automatic style's recipe, derived by the run, lands as a `derived` snapshot (`sequences.snapshotAutoStyle` in `auto-style-step.ts`)
+4. Deletes all existing frames for the sequence
+5. Sets sequence status to `processing`
+6. Returns resolved models: `analysisModelId`, `imageModel`, `videoModel`
+
+**Step: `generate-poster`**
+
+- Generates a poster image from the script+title+style for the video player empty state
+- Non-critical — failures are logged and swallowed
+
+**Steps: `upload-poster` → `save-poster`**
+
+- `upload-poster` streams the provider image into R2 (`uploadPosterToStorage`) so the stored URL is the origin-relative `/r2/` path and never expires (#1117). Also non-critical: an upload failure falls back to the provider URL
+- `save-poster` writes `posterUrl` on the sequence and emits `generation.poster:ready` with the URL
+
+Then spawns the `AnalyzeScriptWorkflow` child via `spawnAndAwaitChild(ANALYZE_SCRIPT_WORKFLOW, …)` (`src/platform/server/workflow/await-child.ts`) and awaits its completion. The child runs as its own durable instance with its own per-step retry budget.
+
+**A continue is not a script run (#1818).** `continueGenerationFn` hands the storyboard a `plan`: the generation plan's `missing | stale` units up to the stop, frozen at the click as an Update-all plan (`computePlan({ units })`, every input read from D1 then — `docs/architecture/generation-plan.md`). With `plan` set (always with `resume`: no shot wipe, no poster) the storyboard spawns `UpdateStaleShotsWorkflow` (`spawn-continue`, `announcePhases: true`) instead of analyze-script, so the run does exactly those units: a references wave first (character / location sheets, element references, voices — each claimed in the run, as the bible workflows claim theirs), then the per-shot jobs (prompts, stills, dialogue, clips, first ones included) and music. A reference that fails holds the stills and clips made from it (`PlanTarget.referenceIds`) and fails nothing else. A voice the wave designs speaks in the plan under a placeholder (`pendingVoiceId`) and is bound to the designed id once the wave lands (`bindPendingVoices`), so the same run records and renders with it; a voice that does not land holds the dialogue and clips of every shot that speaks in it. Credits are a balance check at the click, not a reservation — the per-shot children preflight their own spend, as Update all's do. The references wave has no per-child preflight, so the run checks the balance against its click-time price (`PlanReferences.cost`, sheets and platform-only voices apart) in `gate-references` before spawning it. A clip renders while the version the plan judged stale is still selected (`PlanTarget.staleVideoVersionId`), whatever made it stale; leftover shots sent to Grok (`leftoverGrokShotIds`) render there. A failed unit stays on the unit (#2104): the run still ends `completed`, never `failed` with the unit's error copied onto the sequence, so the failure goes when the shot is fixed or deleted and is retried on its own; such a run sends no ready email. A sequence is `failed` only when the run itself broke (analysis, credits, a crash). `continueGenerationFn` refuses a sequence with a live run before it saves any switch. Analyze-script is a fresh run only: it persists no stage and no checkpoint (`stageComplete` emits `generation.phase:complete` and nothing else). Update all (`updateStaleShotsFn`) freezes the same kind of plan from the generation plan filtered to `stale` (`planUpdateAll` → `updateAllUnits`, #1819) — one executor, one set of units. The editor and MCP's `execute_generation` start both through the same gate: Update all through `prepareUpdateStale` (refused while the sequence is `processing`; a one-image credit floor waived by a fal key), Continue through `prepareContinue` (the run lock, the work list and the price). `launchUpdateStale` emits `generation.update-stale:start` with the run id, so every open editor tracks the run (`useUpdateStaleShots`), and `findRunningUpdateStale` reads it back from the channel history for an editor opened mid-run.
+
+After the analyze-script workflow completes, marks status as `completed` and emits `generation.complete`.
+
+## Analyze Script Workflow — Phase-by-Phase
+
+**File:** `src/sequences/server/workflows/analyze-script-workflow.ts`
+
+This is the core orchestration workflow. It runs durable units via `step.do()`, spawns child workflows via `spawnAndAwaitChild()`, and uses `Promise.all()` / `Promise.allSettled()` to fan child workflows out in parallel. It reads its input from `event.payload` and its instance id from `event.instanceId`.
+
+### Phase 1: Scene Splitting (Streaming LLM)
+
+**Sub-workflow:** `sceneSplitWorkflow` (`src/sequences/server/workflows/scene-split-workflow.ts`)
+
+Uses streaming LLM output to create scene rows progressively as scenes arrive. Shots exist only once a scene's shot-list entry has landed (#1593); each shot then gets a preview image, copied into R2. The preview is a greyscale storyboard sketch drawn by Nano Banana 2 Lite (`SHOT_PREVIEW_IMAGE_MODEL`, #2094) from the whole drawable shot spec (framing, action, camera move, direction) plus the bible description of each character the shot names. A shot with a start frame never redraws it: its still takes over. A reference-only shot has no still, so its sketch is redrawn from the new motion prompt whenever an edit changes that prompt (`redrawShotPreview` / `redrawShotPreviewInRun` in `src/shots/server/shot-preview.ts`): a saved spec or Rebuild, a hand edit, a restored version, and Rewrite shot. For a reference-only shot the derived motion prompt is that same framing, action and camera text. The request-path redraw skips a sketch whose prompt hash matches the newest preview. Every redraw checks credits first. One that cannot start logs a warning and leaves the old sketch up; it never fails the edit.
+
+**The attached cast (#2050).** `triggerStoryboard` freezes the sequence's live cast onto the payload (`cast`, required on `StoryboardWorkflowInput`, `AnalyzeScriptWorkflowInput` and `SceneSplitWorkflowInput`; a run queued without it fails at the top of scene-split and analyze-script, `queuedBeforeCast`). The bibles call gets it as a `<CAST>` block beside `<ELEMENTS>` (`formatCastBlock`) and echoes each character's id and look names; with nobody cast the block is absent and the user message is unchanged. After the call, `applyAttachedCast` swaps each shared character (held by the library or another sequence) for her snapshot, so the pinned bible wins, and `create-cast-records` links her (`characterLooks.linkFromAnalysis`) instead of writing a bible version; her face, sheet and voice stay hers. See `docs/architecture/team-characters.md`.
+
+**A re-analysis never makes a person not a person (#2065).** The cast write of a character that already exists (`characters.create`, its existing-row branch) writes `isPerson` as `existing || analysed`: the script's guess may turn not-a-person into a person, never the reverse, and it is decided inside the db write against the row that write already read, so the run makes no mid-run read. A new character takes the analysed value. The bible form is how a user turns it off again, when nothing locks the character (`person-lock.ts`).
+
+**Before the split, element vision.** Elements uploaded with the sequence run `/element-vision`, which writes their description late. `waitForElementVision` scans the trigger's `elementIds` (`wait-element-vision-scan-rows`), polls only the ones still analyzing, and returns every row it read; those rows are the elements the split uses (#1113 — there is no second `load-elements` read). Vision still running at the timeout fails the run.
+
+**Steps:**
+
+Since #1035 the split runs as **two parallel LLM calls** (sibling `step.do`s via `Promise.all`), both over the same line-gutter copy of the script, and the LLM never re-emits script text. #1486 adds a third call after slices exist, so a scene can own 1..N shots; since #1585 that call also carries every spoken line, so `originalScript.dialogue` comes from it (the slice regex is only a streaming preview):
+
+1. **`scene-splitting-stream`** — the scenes call, a **boundary-annotation** contract: the model returns `boundaries[] = { hintLine, quote }`, and `boundary-split.ts` resolves each verbatim quote to a raw offset (exact → normalized → fuzzy, monotonic cursor) and slices the ORIGINAL script — extracts are byte-verbatim adjacent substrings (`concat(slices) === script` from the first quote to the end, asserted). The prompt tells the model that front matter (a title, an episode line, a format note, a CHARACTERS list) is not a scene (#2077), so the first quote is the first filmable scene and the text before it is not sliced. A script that opens on the action, including one with no scene headings, starts at the top. The bibles call still receives the whole guttered script, so a character description written in that preamble is cast. A `Scene N — Xs` label is the scene's running time. Without one, the slice keeps a three-words-a-second ceiling until the shot-list model times what plays. The stream is fed through `createStreamingSceneParser()`:
+   - On each finalized boundary: persists the scene row + split script version (which carries the scene's narrative — title, heading, time of day, story beat, continuity — since #1600; the scene row holds none), emits `generation.scene:new`. **No shot row** (#1593): the rail shows the scene as "listing shots…" until its shot-list entry lands
+   - On title detection: updates the sequence title, emits `generation.updated`
+   - Excessive anchor repairs → one retry with feedback; a second degraded result keeps the first-pass LLM scenes. Dropped boundaries are logged and emitted as a non-fatal `generation.error`
+   - A cut inside one location/beat is **not** a new scene (the ONE SHOT RULE is gone)
+2. **`scene-bibles`** — the bibles call: `{ characterBible[], locationBible[], elementBible[] }`. Location/element `firstMention` is `{ text, lineNumber }` on the wire; the owning scene id is derived server-side from the gutter line. A character entry carries `voiceOnly` (#1585): a narrator or off-screen voice gets a row but no sheet and no place in the still prompt. After the join, scene continuity tags are canonicalized onto bible tags (`tag-reconcile.ts`) since two independent calls can disagree. A character entry also lists its `looks` (#2015) — every outfit the script gives it, the default first, each `{ name, clothing, styling, lines }` on the wire, where `lines` are gutter lines inside the scenes that wear it (the bibles call knows no scene ids). `bibleFromWire` (`src/cast/bible-looks.ts`) turns them into bible entries with slug look ids and a `sceneLooks` map (scene id → character tag → look id), returned beside the scenes. Analyze-script's `create-cast-records` writes the looks (`characterLooks.syncFromAnalysis`, matched by name so a re-analysis keeps each look's id, sheet and picks) and returns slug → `character_looks.id`; the run then swaps the slugs on the cast bible and on the picks, and `persist-scene-looks` writes the picks onto the scenes (`scenes.updateContinuity`), so only persisted ids are ever stored. A response recorded before looks parses to no looks and every character gets a default look from `standardClothing`.
+3. **`scene-shot-list-1..K`** — lists 1..N structured shots inside each resolved slice. The scenes go out in **batches of `SHOT_LIST_BATCH_SCENES` (8)**, one `step.do` per batch, all batches concurrent (`Promise.all`): a feature-length paste is a dozen bounded calls, not one call at the model's output cap, and one failed batch replays alone. **Each call streams** (`runStructuredCall` + `onAccumulated`): the accumulated text is partial-parsed at most once per `PARSE_COALESCE_CHARS`, and every scene entry that has settled (`settledPrefix` — a later entry has started, or the stream ended) is landed on the spot via `persistSceneShots`: scene row upserted (stable id via `orderIndex`), its shots allocated (`attachSceneShots`) and upserted on `(sceneId, shotNumber)`, tail rows trimmed with `deleteFromShotNumber`, `generation.shot:created` emitted per shot, and a preview fired per shot — its spec text when the scene has 2+ shots, else the slice (fire-and-forget via `triggerWorkflow`, deduplicated per instance + shot, so a step replay is idempotent; the image workflow opens a `kind: 'preview'` row before it renders, copies the preview into R2 and lands it there, or fails the row with the run — #1152). Mid-stream entries match on `sceneNumber` only; the validated final payload is the authority — `attachShotLists` throws on an omitted scene and lands anything the stream did not (a positional match, a provider that sent no partial chunks). The credit deduction sums the batches. Each call (`shotListPassResultSchema`, union-free), each shot carrying the `dialogue` spoken in it, speakers spelled as the cast list spells them. **Length is per scene (#1593, #2077):** a slice with a `Scene N — Xs` label plays for `metadata.durationSeconds` and its shots divide it. A slice with no such label omits the `duration:` line; the model's `durationSeconds` are real seconds (dialogue at speaking rate, action about a third as long, sluglines and speaker names free) and the scene's length becomes their sum. Each shot is rounded and capped at the longest clip; a shot shorter than the model's minimum is kept. A shot whose lines need longer than the model said is raised to that speech (about two words a second), still within the longest clip. The shot count and, unless those lines need more, the sum are capped at the word-count ceiling. The credit pre-flight still uses that ceiling, because it runs before either model call. A scene whose lines need more than the ceiling can run past the quote. Enhance writes scenes only — it no longer labels shots or knows the video model's clip grid (#1621), so the shot-list pass is the only place shot count/durations are decided. The prompt gives a labelled scene a `shots:` budget: `N to M` = at least one shot per longest clip, at most one per editorial second (`minShotsForScene` / `maxShotsForScene`; `up to M` when the floor is 1, `exactly N` when floor equals cap). An unlabelled scene gets `shots: up to N` only, with no floor. `allocateSceneShots` (labelled slices) first splits any shot holding more speech than the longest clip can carry (`splitOverfullShots`, between lines, same setup), then spreads the label over the returned shots with `allocateClipDurations` on 1s…max (a lone shot takes the whole label; a residual the grid cannot reach lands on the last shot) and clamps every shot to the model's longest clip — a pass that sends too few shots leaves the scene short, never ending on a 14-minute "clip". No film-wide target enters the run — `sequences.targetDurationSeconds` steers Enhance and the credit estimate only. `attachShotLists` rebuilds each scene's `originalScript.dialogue` from the shots with every line stamped `shotNumber`; `dialogueForShot` hands each clip only its own lines. Failure — no payload, or a scene the pass omits — fails the run: a one-shot fallback would silently leave scenes on the regex preview, which is empty for prose. `deriveShots` assembles visual/motion prompts from scene continuity + shot specs for **every clip of a 2+ shot scene** (#1517, see Phases 3–4); a 1-shot scene still takes the existing LLM prompt path, byte-identical. Stage 1 still renders **one video clip per shot** (no in-clip packing).
+4. **`reconcile-shots`** / **`persist-scenes`** — reconcile stamps the title + workflow and assembles the result (`scenes`, `shotMapping` concatenated from the batches); persist-scenes is the replay-safe re-upsert of the final scene set + shot links (idempotent on `(sceneId, shotNumber)`), trimming orphan tail rows if a re-analyze produced fewer scenes. It seeds the split script versions and rewrites their content and narrative in place (`updateSplitContent`); on a re-analysis a scene whose selected script is a user edit keeps that text and takes the new narrative as a new `split` version on top (#1600).
+5. **`deduct-llm-credits-scene-splitting`** / **`deduct-llm-credits-scene-bibles`** / **`deduct-llm-credits-scene-shot-list`** — one credit deduction per LLM call
+
+- **Prompts:** `phase/scene-splitting-boundaries-chat` + `phase/scene-bibles-chat` + `phase/scene-shot-list-chat`
+- **Variables:** `{ aspectRatio, script, elements }` (script is sanitized and line-guttered); shot-list gets `{ scenes, style, characters }` (formatted slices; a `duration:` line only when the slice has a `Scene N — Xs` label, plus a `shots:` budget, director style, the cast list with voice-only entries marked)
+- **Response schemas:** `sceneSplitScenesResultSchema` + `sceneSplitBiblesResultSchema` + `shotListPassResultSchema` — all under the ~3KB Anthropic strict-output grammar budget enforced by `response-schema-budget.test.ts`
+- **Output:** `{ scenes[], title, shotMapping[], characterBible[], locationBible[], elementBible[] }` — `shotMapping` maps each analysis shot (`analysisSceneId` + `shotNumber`) to `shotId/frameId` used throughout remaining phases. A 1-shot scene still has exactly one mapping row.
+
+### Phase 2: Casting Characters & Locations (Parallel Sub-Workflows)
+
+After scene splitting, two child workflows run **in parallel** via `Promise.all` over `spawnAndAwaitChild(...)`:
+
+Phase 2 matches team locations only.
+
+```mermaid
+flowchart LR
+    P2["Scene Splitting<br/>complete"] --> LM["locationMatchingWorkflow"]
+    LM --> Join["Matching complete"]
+```
+
+**Location Matching Workflow** (`src/cast/server/workflows/location-matching-workflow.ts`):
+
+1. Uses `input.locationBible` from scene-split (no location-extraction LLM)
+2. **Location matching** (skipped if no `suggestedLocationIds`):
+   - Reads the picked team locations by id (`liveRead.locations.getCurrentByIds`) once; nothing waits for a sheet. Name and description come from the trigger snapshot (`suggestedLocations`)
+   - LLM matches script locations to them (requires confidence >= 0.5). A pick is matched whether or not it has a sheet yet
+   - Deduplicates matches, emits `generation.location:matched`
+3. **Returns:** `{ matches: libraryLocationMatches }`. Each match is `{ locationId (the script id), libraryLocationId (the team location's id), libraryLocationName, referenceImageUrl (null while no sheet has landed) }`
+
+A match is a link, not a copy (#1695): the location bible workflow links the sequence to the matched team location and draws nothing. See `docs/architecture/team-locations.md` § Matching binds a link.
+
+### Phase 3: References & Prompts (Parallel Sub-Workflows)
+
+Three child workflows spawned in parallel via `Promise.all` over `spawnAndAwaitChild(...)`:
+
+```mermaid
+flowchart LR
+    P3["Extraction +<br/>Matching complete"] --> CS["characterBibleWorkflow<br/>Generate character sheets"]
+    P3 --> LS["locationBibleWorkflow<br/>Generate location sheets"]
+    P3 --> VP["visualPromptWorkflow<br/>Generate visual prompts"]
+    CS --> Join["All 3 complete"]
+    LS --> Join
+    VP --> Join
+```
+
+**Character Bible Workflow** (`src/cast/server/workflows/character-bible-workflow.ts`):
+
+- Creates the `characters` DB rows (upsert on `(sequenceId, characterId)`; the Script stage already made them sheet-less). The bible lands as a `character_bible_versions` row (#1600), appended only when a field moved, so a replay adds no history
+- Generates a reference sheet image for each on-screen character (one `CharacterSheetWorkflow` child per character, in parallel); a failed child leaves that row `failed` and the sequence stays at Casting so Generate can retry the misses (`Generate 1 / 3 references`, #1727)
+- A voice-only character (#1585) gets no child: its row is created `completed` with no sheet version, it is left out of the billed sheet count, and it never reaches the still prompt or the reference images. The motion prompt still sees it, for delivery
+- Claims each sheet before spawning its child (`claim-character-sheet-<n>`, `characterLooks.claimSheet`) and stamps the child with the sheet's input hash, computed from the cast bible the row holds, so a pipeline sheet is tracked like a regenerated one (#1113). The sheet is the character's default look's (#2015): the child carries the look (`lookId`, `lookVersionId`) and the bible version the row landed on (`bibleVersionId`, #1600), all taken from the `create-character-records` result. The claim is conditional (#1863): it is taken only while the look and the bible that result named still hold, so an edit that landed between the upsert and the claim leaves the run unclaimed and its sheet parks. A bible edit while the child runs revokes the claim and the sheet parks as divergent — see **Sheet claims** below
+- Uploads sheets to R2 storage
+- Makes a voice for each speaking character with voices on (one `CharacterVoiceWorkflow` child each, `src/cast/server/workflows/character-voice-workflow.ts`; also triggered by Generate on the character card). The provider is chosen when the child is triggered (`newVoiceProvider`, carried as `voiceProvider`): **ElevenLabs** runs one Voice Design call and saves the top preview as a voice; **Seed** (#1765) has an LLM write a three-part range script, then records `takes` range reads side by side (`seed-range-read-<n>`, one step each). Each read is transcribed and checked against the script (`recordCheckedTake`), cut into normal / quiet / loud clips, isolated and stored in R2 inside its own step, so only `{ url, path }` crosses. A read that fails the check is retried by its step, and a take that still fails is dropped. The voice is the first take that passed, and the run fails only when none do. Each take is billed as three ledger lines: Seed Audio, Scribe and isolation. See `docs/architecture/seed-voices.md`. The voice is the character's (#2017): `persist-voice` promotes the husk with `promoteVoiceClaimIfPending(characterId, …)`, which moves the character's current pointer, read by every sequence that casts it; the replaced voice is released only when no current pointer names it (`getVoiceReferenceCount`). See `docs/architecture/team-characters.md`
+- **Characters can be in several sequences (#2017).** A sheet run's claim, landing and failure name the look (`characterLooks.claimSheet(lookId, …)`, `characterSheetVariants.promoteIfPending({ lookId, … })`, `failSheetClaim(lookId, …)`): the look's sheet is shared by every sequence that casts the character. The voice is the character's own, so the voice run's one live read is `liveRead.characters.getVoice(characterDbId)` (the pending-promote pointer at persist), not a cast read. The payload's `sequenceId` is for the realtime channel and the event.
+
+**Location Bible Workflow** (`src/cast/server/workflows/location-bible-workflow.ts`):
+
+- `create-location-records` calls `locations.createBulk`, upserting on the sequence's script ids. A location analysis makes here lands as a team location, a `location_bible_versions` row (#1600) and a `sequence_location_links` row. A script location matching bound to a team location (`boundTo`) is linked to it and nothing is made. A location the writer attached, or that another sequence has used, is never rewritten (`analysisMayNotRewrite`): its link is brought back and its first mention refreshed
+- Spawns one `LocationSheetWorkflow` child per location this run made (parallel). A matched or attached location gets none, and so does one `createBulk` marks `held` (another sequence has used it): the sequence reads the team location's sheet as it is
+- Claims each reference (`claim-location-sheet-<n>`) and stamps the child with its input hash (#1113). The claim is one guarded UPDATE (`locations.claimReferenceIfUnmoved`, #1863): taken only while the bible version the upsert returned is still live. An edit that landed since leaves it untaken; the child still runs and its sheet parks
+- The child payload carries the bible the row holds (`toLocationMetadata`, `rendering` included), `bibleVersionId`, and `referencePhotoUrls: []`: this workflow has no trigger to snapshot photos at
+
+**Location Sheet Workflow** (`src/cast/server/workflows/location-sheet-workflow.ts`, #1695) draws one location's sheet. The location is the team's, so the run is the same from a sequence and from none.
+
+- The payload snapshots the bible (`locationMetadata`), the uploaded photos (`referencePhotoUrls`) and the image model. It carries no style: the bible's `rendering` is what the sheet takes from one. The prompt is `buildLocationSheetPrompt(entry, referencePhotoUrls)`
+- `sequenceId` is null for a run started from the Locations page. It then stores under `<team>/team/<location>/` and reports `generation.location-sheet:progress` on the location's own channel, `locationChannelId(null, id)` = `location:<id>`. Through a sequence the channel is the sequence's
+- It lands through its claim: `locations.claimReference` at the trigger, `locationSheetVariants.promoteIfPending` in `reconcile-database`, `locations.failReferenceClaim` on failure. A bible edit to a field the sheet reads, or a photo added or removed, revokes the claim and the result parks
+- A payload queued before #1695 fails at the top (`assertQueuedWithLocationRendering`, "Queued before team locations shipped. Run it again.")
+
+**Recast Location Workflow** (`src/cast/server/workflows/recast-location-workflow.ts`, #1695). "Replace" re-points the sequence's link at another team location in the trigger (`recastLocation` → `locations.replace`), before the run starts. The trigger then snapshots the shots set there. The workflow reads nothing and draws no sheet: it checks the batch hash and spawns `RegenerateShotsWorkflow` for those shots. With no shots it returns at once.
+
+**One sheet per look (#2015)** — `CharacterSheetWorkflow` draws one look of one character. Its payload snapshots the look at the trigger: `lookId`, `lookVersionId`, `lookStyling`, and the look's clothing as `characterMetadata.standardClothing` (the bible no longer owns clothing). The run never reads the look. It lands on the look itself (`character_looks`, #2017) — the pointer, the claim and the status are the look's, read by every sequence that casts the character — and stamps `lookId` / `lookVersionId` on the sheet row. A payload queued, a plan frozen or a step result cached before #2015 names no look: the run fails on arrival with "Queued before character looks shipped. Run it again." (`assertQueuedWithLooks`, checked once at the top of `CharacterSheetWorkflow`, `UpdateStaleShotsWorkflow`, `CharacterBibleWorkflow`, `SceneSplitWorkflow` and `AnalyzeScriptWorkflow`), and the sheet run clears its claim by its own id (`failSheetClaimByVersion`). The references wave of a plan run makes one sheet per look some scene uses: a `sheet:character` plan unit is a look id (`loadPlanInput` — each character's default look, plus any look a live scene picks in `continuity.characterLooks`), `buildPlanReferences` builds one payload per unit, and `UpdateStaleShotsWorkflow` claims and spawns each (`claim-character-sheet-<lookId>`, `spawn-character-sheet-<lookId>`). A look no scene wears gets a sheet only from Generate. Every other look is drawn from the default look's selected sheet (`face: { url, versionId } | null` on the payload, required, null exactly on the default look; `faceSheetVersionId` in the hash) and is refused at the trigger while there is none. A payload from before `face` fails at the top of `CharacterSheetWorkflow` (`assertQueuedWithFace`). **Second references wave:** a look whose default sheet the same run makes is drafted at the click with no face (`PlanReferences.lookSheetsAfterDefault`, built by `buildPlanReferences` through `buildCharacterSheetDraft`). Its claim is taken at kickoff with the first wave's (so a regenerate between the waves takes a newer claim and this run's sheet parks). After the first wave settles, `UpdateStaleShotsWorkflow` finishes each draft with the sheet the run just landed for that default (`finish-look-sheet-<lookId>`, `finishCharacterSheetPayload`, from the run's own child result, no read) and claims and spawns it like any other sheet. A default that failed or parked fails the look, clears its kickoff claim (`failSheetClaim`), and holds the shots that wear it. A plan frozen before this field fails at the top of the run. An explicit Regenerate is untouched; `docs/architecture/character-looks.md`. A shot's still and its reference-only clip attach the sheet of the look its scene picks: `matchCharactersToShotImage` and `resolveShotReferences` return each character dressed (`dressForScene`, `src/cast/character-looks.ts`), so a plan target's `referenceIds` name looks and a failed look sheet holds only the shots of the scenes that wear it. `PlanTarget.motionRender.characterLooks` carries the scene's picks to the clip render. A recast redraws the default look's sheet in `RecastCharacterWorkflow` and re-renders the shots that wear it. Other looks are not started there: once the new default sheet exists they and their shots read stale, and the next Update or Continue redraws them. The recast result names them (`looksLeftStale`). A look nobody wears stays stale until asked for. A recast is one new bible version (and voice version) of the character (#2017), read by every sequence that casts it: the other sequences read stale and their own Update redraws them. The run itself regenerates only the launching sequence's default-look shots. A sheet or voice run started from no sequence (the Characters page, `sequenceId: null` on the payload) stores under `<team>/team/<character>/` and reports on the character's own channel, `castChannelId(null, id)` = `character:<id>`; a recast from there runs a plain sheet run instead and re-renders nothing. See `docs/architecture/team-characters.md` § From no sequence.
+
+**Sheet portraits** — a sheet is saved and shown before its portrait exists. `CharacterSheetWorkflow` and `LocationSheetWorkflow` have a `trigger-portrait` step after `reconcile-database` (promoted or parked; after the sheet lands), and a sheet upload does the same from its server fn: `triggerSheetPortrait` → `triggerWorkflow('/sheet-portrait', …, { deduplicationId: sheet-portrait-<versionId> })`, with spawn-time enforcement rows mid-run (`liveRead.compliance.listEnforcementFor`). The trigger never throws. `SheetPortraitWorkflow` reads nothing: `draw-portrait` (one Nano Banana 2 Lite call with the stored sheet as reference, stored in the same step; its own credit hold `<instanceId>:portrait-hold` taken before the paid call, no hold no call; nothing is charged in this step, and a call, store or provenance failure releases the hold and returns no portrait), `charge-portrait` (charged as "Sheet portrait" under `<instanceId>:portrait`, then the rest of the hold released; its own step so a charge that fails retries without drawing again), `save-portrait` (`setPortrait` on the version row the payload names, only while it has none; an attribute of that sheet, not a selection, so no claim) and `emit-portrait-ready` (the sheet's completed event again). See `docs/architecture/character-looks.md` § The tile's portrait.
+
+**Sheet claims (#1113)** — every sheet workflow (`CharacterSheetWorkflow` and `LocationSheetWorkflow`) lands through a claim its trigger took (the bible workflows and the regenerate server fns). A location recast takes none: it draws no sheet (#1695). The payload carries the claim id (`sheetVersionId`, `referenceVersionId`, `sheetId`). A character or location sheet payload also carries `bibleVersionId` (#1600): the bible version its metadata was read from, stamped on the version row the run lands, promoted or parked. A payload queued before #1600 has none and stamps null. A character sheet's claim is its look's (`characterLooks.claimSheet`, #2015), held on the look (`character_looks`, #2017), and is taken conditionally in every trigger — the regenerate and recast server fns, the plan run and the bible workflow: only while the character's current look version and bible version are still the ones on the payload (#1863). A claim that is not taken still hands back an id, and the run parks its sheet under it. The reconcile cron's `character_looks.claims` pass reads the looks: it promotes a claimed sheet an older worker landed on the legacy columns during the #2015 or #2017 deploy, and fails a claim more than an hour old. The final write (`reconcile-database`, `reconcile-create-sheet`) promotes only while the claim still names the run; otherwise the result parks as a divergent variant, `generation.stale:detected` fires, and the live sheet is untouched. Edits to a sheet's inputs and a location's photos added or removed revoke claims — a look's clothing or styling edit revokes that look's claim, and a bible or cast change revokes every look's; there is no write-time hash recompute. A style change revokes none: no sheet reads the sequence's style (#2017, #1695). `onFailure` clears only the run's own claim. A run queued before #1113 has no claim id and lands unconditionally.
+
+**Shot prompts (#1923).** Analysis writes each shot's spec and derives the still and motion text in `persist-shot-specs` (`deriveStillPrompt` / `deriveMotionPrompt`). There is no visual-prompt or motion-prompt LLM. A later Rebuild writes the same derived text from the selected spec. Rewrite shot is the one prompt-side LLM: it refills that shot's spec, then rebuilds the text, and on a reference-only shot starts one preview redraw (deduplicated per instance + shot). The prompt hash includes the spec's canonical content when the digest kind is `current`, so a spec edit stales the prompts and a still re-render does not.
+
+### Phase 4: Frame Images, then Motion/Music Prompts (Sequential)
+
+Frame images render before music design. Motion text is already derived from the shot spec, so it does not wait on the still. Music has no image dependency; it still runs in the motion-and-music child after the stills.
+
+```mermaid
+flowchart LR
+    P4["Visual prompts<br/>complete"] --> FI["frameImagesWorkflow<br/>Generate images + variants"]
+    FI -->|"rendered stills"| MMP["motionMusicPromptsWorkflow<br/>Motion prompts + music design"]
+    MMP --> Join["Phase complete"]
+```
+
+**Shot Images Workflow** (`src/stills/server/workflows/shot-images-workflow.ts`):
+
+1. Builds per-scene character and location reference maps
+2. For each scene, generates images with each selected model in parallel (one `spawnAndAwaitChild` per scene × model, gathered with `Promise.allSettled`):
+   - Spawns the `ImageWorkflow` child (binding `IMAGE_WORKFLOW`) per scene per model
+   - After each image completes, fires the shot-grid variant generation via `triggerWorkflow('/variant-image', …)` (fire-and-forget; its progress is tracked on `frame.variantImageStatus`). Every grid trigger passes `tileHashInput` (the prompt + reference-sheet hashes the grid is generated against); `ShotVariantWorkflow` hashes it under the upscale model (`tileInputHash`) and stamps the sheet, and `selectShotVariantFn` copies that stamp onto the picked tile, so a tile reads stale after a prompt edit like any other still (#712)
+3. Returns `{ imageUrls }` — primary model's URL per scene. The primary still is persisted to `frame.thumbnailUrl`, which the motion-prompt pass reads next.
+
+**Motion + Music Prompts Workflow** (`src/motion/server/workflows/motion-music-prompts-workflow.ts`):
+
+1. **Music summaries** — Music does not use snapped durations: its scene summaries come from `musicSceneSummariesFromAnalysis`, one row per scene with that scene's shot durations summed and no visual prompt. Verify, regenerate and Update all rebuild them from those rows with `musicSceneSummariesFromRows` (#1783).
+2. **Music only** — `MusicPromptWorkflow` is the one LLM call. Motion maps come back empty. The motion text was written with the spec in `persist-shot-specs`.
+3. **Merge** — Joins the music design onto the scenes that already carry visual prompts.
+4. **Returns:** `{ completeScenes, musicPrompt, musicTags }`
+
+### Phase 4b: Dialogue Audio (Conditional)
+
+**Sub-workflow:** `DialogueAudioWorkflow` (`src/motion/server/workflows/dialogue-audio-workflow.ts`), one `spawnAndAwaitChild` after images and before motion. Runs only for scenes whose speakers hold a `voiceId` (#1554) — an ElevenLabs voice, recorded by Text to Dialogue, or a `seed:` voice (#1765), recorded by Seed Audio (`generateSeedDialogueSpeech`, see `docs/architecture/seed-voices.md`); a line bound to an uploaded audio element or opted out to the video model is skipped. Scenes record concurrently. A scene that fails is logged and does not fail the stage: the scenes that recorded keep their clips, and the failed scene's shots have none, so motion records them itself (see "Motion's fallback") and fails just those shots with the reason.
+
+**Record wide, keep narrow (#1657).** Text to Dialogue acts the turns it is given against each other, so a shot recorded alone is a cold read of a reply the model never heard: the call speaks the scene's whole conversation. What is kept is narrow, so one edit disturbs one shot — only shots whose working-set clip no longer matches their lines adopt the new audio; the rest keep the section they had and nothing of theirs goes stale (`generateDialogueSpeech`, `src/motion/server/generate-dialogue-speech.ts`):
+
+- **The lines come from the shot**, not the script and not a scene list: `shot_dialogue_versions` holds them per shot (append-only, one selected row). The shot-list pass seeds a `prompt` row per shot at scene split; a line edit appends `user-edit` for that one shot, so it cannot drop a concurrent edit to another; a shot with no row yet is derived from its scene's script by `deriveShotDialogueLines`. The conversation is assembled at use — shot order, then line order within the shot (`sceneConversation`) — so a shot reorder needs nothing restamped. A continue records through the Update-all executor (#1818), whose plan resolves each target's lines at the click, so an edit made while the run was stopped is what gets recorded.
+- **Who adopts.** Per scene, the prepare step reads the shots through the existing hatch `scopedDb.liveRead.shots.getByIds` and asks `matchingDialogueClips` which voiced shots hold no clip for their lines — those are `adoptShotIds`. None → the scene is reused and no call is made.
+- **One index.** A turn's `index` is **shot-relative**, which is what lets every #1554/#1651 helper (`dialogueClipSourceKey`, `matchingDialogueClips`, `spokenLinesFor`, `withSpokenText`, the rewrite merge) work unchanged on one shot's lines. A turn's place in the conversation is its array position, never stored.
+- **Chunking.** A conversation over `DIALOGUE_TAKE_CHUNK_CHARS` (2000 characters of `ttsUtterance` text, ElevenLabs' reliability line for v3) is split at a **shot boundary**, never inside a shot (`chunkTakeLines`). Each chunk is its own speech — nothing is joined — and only chunks that contain an adopting shot are recorded. A chunk also breaks where the voice provider changes (a Seed voice and an ElevenLabs voice never share a call), and a Seed chunk where a fourth speaker would join (Seed takes one voice clip per speaker, three at most) or past 1,000 line characters.
+- **Bytes never cross a step (#1645).** `generateDialogueSpeechCall` decodes the response, measures each shot's window, uploads the WHOLE WAV once inside its `step.do`, and returns only `{ speechId, storageKey, url, durationSeconds, characterCount, turns, windows, charges }` (`charges`: one ledger line per provider, so a Seed call's Scribe pass is billed as ElevenLabs spend). `generateSeedDialogueSpeech` returns the same record. There is no read-back or assemble step.
+- **Section boundaries.** The silence between two turns belongs to the shot that is about to speak, so a window starts where the previous shot stopped speaking and runs to the next shot's first word (`shotSliceWindows`). Its tail is measured **once, here** (`trimmedEndSeconds`, in place, no copy) and stored as the section's `toSeconds`.
+- **The cut is a cache.** One `step.do` per adopting shot calls `cutAudioSection` (`src/motion/server/cut-audio-section.ts`), which never loads the speech: a 4 KiB ranged read parses the WAV header, the body is a ranged R2 stream (`readStorageStream`), padding to the provider floor is appended as zeros, and the whole is a `FixedLengthStream` because `r2.put` rejects an unknown length. The key is deterministic (`<speechId>_<fromMs>_<toMs>_<minMs>.wav`), so an existing file is returned as-is and a replay costs nothing.
+- **A packed clip sends one longer section (#1794).** Neighbouring sections can overlap: a section ends on its last loud sample, and the next starts at the previous shot's last word as the transcript timed it. Sent side by side, a multi-shot clip would play the overlap twice and count it twice against the model's combined audio cap (H3 Max: 15s). So `MotionWorkflow` joins consecutive member clips from one speech in a `cut-spanning-section` step (`cutSpanningSection`): one longer section of the speech, from the first member's start to the last member's end, never longer than the speech. It reads each section by the clip id on the payload through `scopedDb.claims.shotDialogue.getSectionById`. Only the audio on the wire changes; each member keeps its own clip, and the manifest still names each member's clip ids.
+- **Persistence.** One persist step: `scopedDb.shotDialogue.appendSpeech(...)` per recorded chunk writes the `dialogue_speeches` row and a `shot_dialogue_sections` row for EVERY shot the call spoke — selected with `source: 'generated'` for the adopting shots, unselected with `source: 'context'` for the rest — then `shots.setAudioClips(shotId, [clip])` for the adopted shots only. Ids are generated inside the step and both inserts are `onConflictDoNothing`, so a replay is idempotent. The clip's `id` is the section's id and it stamps `speechId`. Picking another reading — older, or a context one — is the same `selectSection` (`selectShotDialogueSectionFn`), which re-cuts and puts that clip back on the one shot.
+- **What a shot says.** Every trigger resolves a shot's lines through `shotDialogueResolver` (selected `shot_dialogue_versions` row → a pre-#1657 prompt row's copy → the script) and puts THAT into the payload's `motionPrompt.dialogue` and `voicedLines` (and, for a motion-prompt run, `dialogue`) — never the prompt row's own copy, and never the motion-prompt LLM's `dialogue` output. A run cannot read the node: the storyboard batch resolves from `dialogueLinesByShotId` on its payload, and Update Stale snapshots `dialogue` and `dialogueContext` on each plan target at click time. The render stamps `dialogueKey` on the clip manifest — every line its prompt quoted, on an audio-capable model — so an edit to any line, voiced or not, re-stales the clip.
+- **On demand.** `regenerateShotDialogueFn` ("Regenerate dialogue" in a shot's readings list) triggers `DialogueAudioWorkflow` directly with one scene job whose `forceAdoptShotIds` names the shot (every voiced shot with `scope: 'scene'`, plus any shot a voice change dated), so it adopts a new reading even though its clip still matches. The run owns its reservation.
+- **Once per scene, outside the pipeline too.** `MotionBatchWorkflow` (`recordScenesOnce`) and `UpdateStaleShotsWorkflow` spawn `DialogueAudioWorkflow` over `dialogueSpeech.scenes` from their payload/plan BEFORE fanning out, then hand each child its clip (`attachSpeechClips`) — or, in Update Stale, let `prepare-video` read it live. A payload queued before #1913 carries the scenes as `dialogueRecording`; both read it as a fallback. Update Stale gates it on balance first (`gate-dialogue-audio`) and skips it when short. Update Stale reports it per target (`dialogueTargetOutcome`, #1740): a target with audio counts in `dialogues`; a dialogue-only target without it is a `dialogue` failure; a target with a video render records itself at `prepare-video` instead.
+- **Claims.** `generateDialogueSpeech` opens with a `claim` step (`shot_dialogue_claims`), records only for the shots it claimed, promotes through `appendSpeech` (pointer + `shots.audioClips` + claim completion in one guarded transaction), and runs `fail-claims` before rethrowing. It returns clips for PROMOTED shots only.
+- **A line at the mic (#1802).** `DialogueTakeWorkflow` (`src/motion/server/workflows/dialogue-take-workflow.ts`, trigger `/dialogue-take`, from `recordShotDialogueLineFn`) is the same claim → record → cut → `appendSpeech` lifecycle for one shot. Its one recording step (`recordDialogueTake`) turns the user's take into the speaker's voice — ElevenLabs Voice Changer, or Seed Audio with the take as a delivery reference — and splices it into the shot's current reading (snapshotted on the payload as `base`), then lands it as a `mic` reading. It refuses a result over `dialogueFitBudget`'s limit rather than rewriting the user's words, and charges only after that check. The fn refuses a silent take, a shot with a live dialogue claim, and a take that cannot fit before reserving credits; a run that still finds no claim fails visibly. Record is hidden behind `MIC_TAKES_ENABLED` until the Seed prompt is reliable.
+- **Motion's fallback.** A shot whose clip is missing or no longer matches gets `dialogueContext` on its `MotionWorkflowInput` at the trigger (`contextWindow`: its own turns plus whole neighbouring shots, grown outward under the chunk limit). `MotionWorkflow` hands that to the same `generateDialogueSpeech` with `adoptShotIds: [shotId]` — it records the window and keeps only its own shot.
+
+**Fitting the section to the clip (#1651).** ElevenLabs v3 takes no target or maximum duration, so the length is discovered rather than requested. The ladder checks **only the adopting shots**: a section whose padded length is over its shot's limit sends THAT shot's turns to the rewrite (`shortenDialogueLines`, `src/motion/server/fit-dialogue-clip.ts`) and the chunk is re-recorded, because the other shots' delivery is not independent of it. Only the final attempt's speeches get rows:
+
+1. `convertWithTimestamps` (not `convert`) returns the speech plus per-turn voice segments (the character alignment is never read). `trimmedEndSeconds` pulls the section's end back to whichever is LATER of the last audible sample and the end of the shot's last voice segment — so a segment that under-reports cannot clip a word, and a noise floor that never dips cannot keep a tail the segment says is silent. It measures in place and moves a number, not bytes; the pad up to the provider floor is added later, at cut time.
+2. Still over: an LLM (`phase/shorten-dialogue-chat`) tightens the turns to the shot's word budget (`DIALOGUE_WORDS_PER_SECOND`, ~30 words for 15s) and the chunk is re-recorded. Bounded by `MAX_DIALOGUE_FIT_ATTEMPTS` (2), each pass billing another TTS call. The rewrite is merged **by turn index**, so a model that drops or invents a turn cannot change who speaks or with whose voice — the worst it does is leave a line as it was, which stops the loop.
+3. Still over: the shot fails here with the measured numbers. It is never submitted — a provider that refuses a 15.4s reference reports it as an opaque request error minutes later, on a render the user paid for.
+
+There is deliberately **no time-compression** rung: speeding speech up alters the performance the user cast, and a pitch-preserving stretch in workerd would be ours to write and tune.
+
+**Two budgets, from `dialogueFitBudget`.** `limitSeconds` is the refusal line — `dialogueAudioMaxSeconds(videoModels)` (the tightest of each model's reference-audio window and its longest grid clip) minus `DIALOGUE_FIT_SLACK_SECONDS` (0.2), which is where H3 Max's 14.8s comes from; the slack covers trailing silence, encoder padding and provider rounding, none of which the end of the shot's last voice segment measures. `targetSeconds` is what a rewrite aims at: the **shot's own** length when shorter, so the reading fits the cut instead of stretching it. Speech between the two is kept rather than rewritten — `raiseShotDurationToCoverAudio` extends the clip, a pacing cost, not a broken render.
+
+**The delivered wording, not the authored wording, drives the prompt.** A rewritten reading records its per-turn text on the section and its clip as `spokenLines` (and on the speech's turn as `spokenText`); `sourceKey` still keys the lines as authored, so matching, staleness and the manifest's `audioSourceKey` do not move and nothing re-records. `MotionWorkflow` reads it back with `withSpokenText` before assembling, because the prompt's dialogue drives lip movement and has to say what the bound audio says. The user's script in `frame.metadata` is left as they wrote it.
+
+The shot-list pass is the prevention half: its Dialogue rules give each shot a words-per-second placement budget and tell it to spread a long conversation across more shots rather than stacking it onto one short one. The prompt is advice the model can ignore, so `allocateSceneShots` enforces it (`splitOverfullShots`): a shot holding more words than the longest clip's budget is split between lines into back-to-back shots on the same setup. A single line is never cut.
+
+### Phase 5: Motion + Music Generation (Conditional)
+
+**Sub-workflow:** `motionBatchWorkflow` (`src/motion/server/workflows/motion-batch-workflow.ts`)
+
+Only runs if the run's `stopAt` includes motion, a video model is set, and images were generated. A single orchestrator handles: The music track rides along when the stop is Music and the Music switch (`includeMusic`, snapshotted on the payload by the launcher) is on — the scenes' `musicDesign.presence` no longer gates it.
+
+1. **Parallel generation** — All frame motion child workflows + the optional music workflow spawned simultaneously (`spawnAndAwaitChild` under `Promise.all`)
+2. **Collect video URLs** — Reads from DB (authoritative ordering by `orderIndex`)
+
+**Each motion child bills after its upload (#1845).** `MotionWorkflow` runs `upload-to-storage` before `deduct-credits`, the order `StudioGenerationWorkflow` uses (#1844): a clip that never lands in R2 fails the run before the charge, and the reservation is zeroed instead. The upload is a plain streamed copy; there is no theatre remux at ingest any more.
+
+**Ark draft mode (#1756).** With `sequences.draftMotion` on, every motion payload carries `draft: true` and a Seedance 2.5 clip on the BytePlus via renders at 480p with Ark's `draft` flag; `MotionWorkflow` stamps the Ark task id on the version (`stamp-draft-task`). "Render at quality" (`renderShotAtQualityFn` / `renderSequenceDraftsAtQualityFn` → `renderDraftAtQuality`) triggers `/motion` directly with `finalFromDraft: { taskId, renderSegmentId, manifest }` and its own reservation: the run opens a 1080p version on the draft's segment with the draft's manifest, skips dialogue (by omission: the payload carries no `voicedLines`, so never snapshot them onto a final), ingest and the content rescue, submits only the task id (`submitBytePlusFinalRender`), and promotes it like any primary render. A content refusal on a final is terminal after one poll (same seed, same assets) and a draft never swaps to the Grok fallback (the user picks another model). One run per segment, and one hold plus one instance per (draft, attempt): the reservation `idempotencyKey` and the trigger `deduplicationId` are both `motion-final-<versionId>-<sibling count>`. The id expires seven days after the draft. A studio edit (#1925) is an ordinary `/studio` run in `mode: 'edit'` whose input carries `sourceVideoUrl` (the clip Ark rewrites) and `sourceAssetId` (the history chain); it ingests no stills. `StudioGenerationWorkflow` has the same `finalFromDraftTaskId` shape: `renderStudioAssetAtQuality` opens a NEW studio row from the draft's input at 1080p and the run skips ingest and stamps no `draftTaskId`. `MotionBatchWorkflow`'s Ark pool admission budgets `arkStillsToRegister` (start frames and person sheets — what ingest actually creates), not every reference URL. See `docs/architecture/byteplus-ark.md`.
+
+**Image status is the newest primary row (#1942).** `ImageWorkflow` opens its `frame_variants` row in `set-generating-status` with `isPrimary: !variantOnly` (a claimed row got `isPrimary: true` from its trigger); that row's lifecycle is the shot's `imageStatus` / `imageError` on every read (`readinessImageStatus`), so no step writes a status onto the frame. `onFailure` fails the run's rows (and the trigger's claim row by `targetVariantId`), and records a failed primary row when the run died before opening one; that row's id is minted at the run's trigger time, so a run clicked since stays newer. `ReplaceElementWorkflow` opens each affected shot's primary row up front (`open-image-claim-<i>`, one insert per step) and hands it to the child as `targetVariantId`. A child that never picked its claim up is failed (`failUnclaimed`, `pending` only; a child still rendering after the await times out owns its row), and the parent's `onFailure` fails every claim still carrying its run id. `UpscaleShotVariantWorkflow` fails its framing row with `isPrimary: false` (the old still is still good) and emits `upscaleError`, which the client toasts. The cron reap of a dead `framing` row does the same flip.
+
+**Music lands through a claim (#1115).** Each `MusicWorkflow` child opens its `sequence_music_variants` row in its first step (`open-music-variant`): the primary model (`audioModels[0]`) takes the sequence's claim with it (`claimMusic`, last kickoff wins), the other models open `isPrimary: false` rows that never touch the pointer. A run a trigger started (generate, smart retry, update-stale) adopts the row the trigger opened with its claim (`variantId` → `stampMusicRun`). `complete-music-variant` lands the track and moves `sequences.selectedMusicVariantId` only while the claim still names the row; a moved claim parks it (`divergedAt`) and the run emits `generation.stale:detected`. `onFailure` fails the run's pending row and clears the claim only while it names it (`failMusicClaim`). The sequence's `musicUrl` / `musicStatus` / `musicPrompt` … are projected on every read from the selected track, the newest primary row and the selected prompt version — nothing writes them. A failed `MusicPromptWorkflow` fails the track claim its parent took (`musicVariantId`) or records a failed track row.
+
+There is no merge step: the clips stay separate rows. The player stitches them client-side (`src/motion/ui/packed-playback.ts`), and a single MP4 is produced only on demand by `POST /api/v1/sequences/$id/exports` → `SequenceExportWorkflow` → the video-export Container (production-only).
+
+```mermaid
+flowchart TD
+    Start["motionBatchWorkflow"] --> Parallel["Promise.all"]
+    Parallel --> M1["Motion frame 1"]
+    Parallel --> M2["Motion frame 2"]
+    Parallel --> MN["Motion frame N"]
+    Parallel --> Music["Music generation<br/>(if enabled)"]
+    M1 --> Collect["Collect video URLs from DB"]
+    M2 --> Collect
+    MN --> Collect
+    Collect --> Done["Clips stay separate rows<br/>(player stitches; export muxes on demand)"]
+    Music --> Done
+```
+
+### Final: Return
+
+Returns the `completeScenes` array.
+
+## Data Flow: Scene Object Accumulation
+
+```mermaid
+flowchart TD
+    P1["Phase 1: Scene Splitting"] -->|"sceneId, sceneNumber,<br/>originalScript (extract, dialogue),<br/>metadata, continuity,<br/>character/location/element bibles"| P2
+    P2["Phase 2: Locations"] -->|"library location matches<br/>(bibles already from Phase 1)"| P3
+    P3["Phase 3: References &<br/>Prompts"] -->|"+ visual fullPrompt +<br/>negativePrompt (no components)"| P4
+    P4["Phase 4: Images +<br/>Motion/Music Prompts"] -->|"Frames get thumbnailUrl +<br/>variants. Scenes get<br/>prompts.motion + musicDesign"| P5
+    P5["Phase 5: Motion + Music<br/>Generation"] -->|"Sequence selects its track.<br/>Frames get videoUrl"| Final["Complete Scene"]
+
+    style Final fill:#1a472a,color:#fff
+```
+
+Each phase enriches the `Scene` object. The frame's `metadata` column is updated after visual prompts to persist intermediate results. Phase 1 creates frames progressively during streaming and triggers preview images for instant feedback.
+
+**Scene type fields** (from `src/shots/scene-analysis.schema.ts`):
+
+| Field            | Added By | Notes                                                                      |
+| ---------------- | -------- | -------------------------------------------------------------------------- |
+| `sceneId`        | Phase 1  | Required, unique                                                           |
+| `sceneNumber`    | Phase 1  | Required, 1-indexed                                                        |
+| `originalScript` | Phase 1  | `{ extract, dialogue }`                                                    |
+| `metadata`       | Phase 1  | `{ title, durationSeconds, location, timeOfDay, storyBeat }`               |
+| `continuity`     | Phase 1  | `{ characterTags, environmentTag, colorPalette, lightingSetup, styleTag }` |
+| `prompts.visual` | Phase 3  | `{ fullPrompt, negativePrompt }` — `components` is no longer LLM output    |
+| `prompts.motion` | Phase 4  | `{ fullPrompt }` — `components`/`parameters` are no longer LLM output      |
+| `musicDesign`    | Phase 4  | `{ presence, style, mood, atmosphere }`                                    |
+| `sourceImageUrl` | Optional | URL of generated or uploaded source image                                  |
+
+## Real-Time Events
+
+Events emitted on a per-sequence realtime channel (`getGenerationChannel(sequenceId)`, a `RealtimeChannel` Durable Object). Payloads carry ids and small strings only; a `/history` replay is bounded by rows and bytes (#1811). Broadcast-only events are `shotPrompt.streaming` (marked transient on emit) and `generation.run:started` / `generation.run:ended` (written by the channel itself, not by `/emit`).
+
+**Open runs (#2113).** The same Durable Object keeps a `runs` table: instance id, workflow binding (the class's wrangler binding, so a child id such as `continue_…` or `element-sheets_…` still resolves), class name, label (`failureLabel`), parent instance id (the parent notify hint, or null), and started at. `OpenStoryWorkflowEntrypoint.run()` reports start and end for a payload that has a `sequenceId`, each inside its own `step.do` (`report-run-started`, `report-run-ended`), so a resumed run does not count twice. The report tries a few times inside that step and then returns; the step is checkpointed either way, and the alarm can only drop a row the start actually inserted. A run with no sequence (the Characters page, the library) is not reported. An engine abort is not an end. `GET /runs` is the list. The chip reads it after the SSE stream connects, so a run that started during page load is not missed, then applies the live events. A failed read keeps the list already on screen. While any row is open, the DO alarm asks that instance's Workflows binding for its status every few minutes and deletes `complete`, `errored`, and `terminated` rows (and an instance the engine no longer has), so a crashed run cannot leave the count stuck. The chip is the existing progress banner: one row per top-level run, its child runs listed under it, and the count is the top-level rows. The script-to-video phases are that run's row, not a separate chip.
+
+Realtime requires the `enable_request_signal` compatibility flag in
+`wrangler.jsonc` (inherited by production and test). `/api/realtime` listens
+for request cancellation to clear its heartbeat, release the write queue,
+and abort its upstream Durable Object subscriptions. Cloudflare does not
+enable this signal by compatibility date alone. Without the flag, closed
+browser connections can retain subscribers and timers indefinitely, even
+with bounded queues and history. Node stream mocks do not exercise this
+runtime behavior: verify disconnect cleanup over real HTTP in Workerd.
+See [Cloudflare's request cancellation documentation](https://developers.cloudflare.com/changelog/post/2025-05-22-handle-request-cancellation/).
+
+| Event                                 | When Emitted                                                                                                                             | Payload                                                                    |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `generation.phase:start`              | Before each LLM call or generation phase                                                                                                 | `{ phase, phaseName }`                                                     |
+| `generation.phase:complete`           | After each phase completes                                                                                                               | `{ phase }`                                                                |
+| `generation.run:started`              | Workflow base, once per sequence run. Broadcast only, not history (#2113)                                                                | `{ instanceId, binding, className, label, parentInstanceId, startedAt }`   |
+| `generation.run:ended`                | Workflow base on success or real failure, and the DO alarm when the engine has finished the instance. Broadcast only                     | `{ instanceId }`                                                           |
+| `generation.poster:ready`             | Storyboard workflow — after poster generated                                                                                             | `{ posterUrl }`                                                            |
+| `generation.scene:new`                | Phase 1 — progressively as scenes stream in                                                                                              | `{ sceneId, sceneNumber, title, scriptExtract, durationSeconds }`          |
+| `generation.scene:updated`            | Phase 1 — as scene metadata updates during stream                                                                                        | `{ sceneId, sceneNumber, title, scriptExtract, durationSeconds }`          |
+| `generation.updated`                  | Phase 1 — after title detected in stream                                                                                                 | `{ title }`                                                                |
+| `generation.shot:created`             | Phase 1 — progressively as shots are upserted                                                                                            | `{ shotId, sceneId, orderIndex }`                                          |
+| `generation.shot:updated`             | After a prompt version or dialogue clip is written                                                                                       | `{ shotId, updateType }` (ids only; the client refetches, #1811)           |
+| `generation.location:matched`         | Phase 2 — when script locations matched to team locations                                                                                | `{ matches: [{ locationId, locationName, libraryLocationId, ... }] }`      |
+| `generation.image:progress`           | Image workflow — generating/completed/failed                                                                                             | `{ frameId, status, thumbnailUrl? }`                                       |
+| `generation.variant-image:progress`   | Variant workflow — generating/completed/failed                                                                                           | `{ frameId, status, variantImageUrl? }`                                    |
+| `generation.video:progress`           | Motion workflow — generating/completed/failed                                                                                            | `{ frameId, status, videoUrl? }`                                           |
+| `generation.audio:progress`           | Music workflow — generating/completed/failed                                                                                             | `{ status, audioUrl?, model?, primary? }` (`primary: false` = added model) |
+| `generation.character-sheet:progress` | Character sheet — per look of a character (#2015); on the character's own channel when started from no sequence (`castChannelId`, #2017) | `{ characterId, lookId, status, sheetImageUrl? }`                          |
+| `generation.location-sheet:progress`  | Location bible — per location                                                                                                            | `{ locationId, status, referenceImageUrl? }`                               |
+| `generation.recast:start`             | Recast character — before regenerating frames                                                                                            | `{ characterId, frameCount }`                                              |
+| `generation.recast:complete`          | Recast character — all frames regenerated                                                                                                | `{ characterId, successCount, failedCount }`                               |
+| `generation.recast:failed`            | Recast character — on failure                                                                                                            | `{ characterId, error }`                                                   |
+| `generation.recast-location:start`    | Recast location — before regenerating frames                                                                                             | `{ locationId, frameCount }`                                               |
+| `generation.recast-location:complete` | Recast location — all frames regenerated                                                                                                 | `{ locationId, successCount, failedCount }`                                |
+| `generation.recast-location:failed`   | Recast location — on failure                                                                                                             | `{ locationId, error }`                                                    |
+| `generation.error`                    | On non-fatal workflow error                                                                                                              | `{ message, phase? }`                                                      |
+| `generation.failed`                   | On workflow failure                                                                                                                      | `{ message }`                                                              |
+| `generation.complete`                 | Storyboard workflow — after everything finishes                                                                                          | `{ sequenceId }`                                                           |
+
+## Error Handling
+
+### Failure Handling (`onFailure`)
+
+**The payload seam (#2065).** Before `runImpl`, the base class passes the payload through `foldLegacyFeaturesInPayload` (`src/cast/bible-looks.ts`). A run queued before the default look took the bible's distinguishing features carries them on its character bible entries; the fold moves the text into the styling of the entry's default look (the `default` slug under slug ids; the first look under persisted ids, which do not say) and drops the key, and on a sheet payload into `lookStyling` when the look is the default (`face` null), keeping the pair as queued in `queuedLegacyStyling` for `CharacterSheetWorkflow`'s `validate-snapshot`. A payload of the current shape is unchanged. Step results cached before the deploy are not folded. The bibles call (`phase/scene-bibles-chat`) no longer asks for `distinguishingFeatures`: permanent marks go in `physicalDescription`, the rest in the look's styling; a recorded response that still has the field folds it into the first look in the wire schema.
+
+Every workflow extends `OpenStoryWorkflowEntrypoint` (`src/platform/server/workflow/base-workflow.ts`), which wraps the workflow body: when `runImpl` throws, the base class builds a `ScopedDb` from the payload and invokes the subclass-supplied `onFailure({ event, error, scopedDb })`. The analyze-script `onFailure`:
+
+1. Sanitizes the error via `sanitizeFailResponse()` — unwraps repetitive child workflow failure prefixes (`Child workflow <id> failed: ...`, including nested child workflows and the error name the status fallback puts in front, e.g. `Error:` or `NonRetryableError:`), preserving the child workflow ID if stripping would leave only generic text (e.g. "no error detail" or "Unknown error"), maps known Cloudflare error codes (e.g., `1102` → "Worker exceeded memory limit"), and truncates messages over 500 characters
+2. Updates sequence status to `'failed'` with the error message
+3. Emits `generation.failed` with the sanitized error
+
+> The base class deliberately skips `onFailure` when the engine aborts mid-run (a transient state the instance resumes from), so it doesn't mark user-facing rows failed for a retry that will succeed. The same abort is not an end of the sequence's open-run row (#2113): `report-run-ended` runs only after a success or a real failure. After `emit-failure` and after the parent is notified, when the payload has a `sequenceId`, it appends one `sequence_events` row inside `step.do('log-run-failure')`, under an id checkpointed in `failure-event-id`. Every workflow declares a required `failureLabel`, and the row reads `run.failed` / `{failureLabel} failed`; a workflow whose sentence depends on the payload overrides `failureActivity` (`SequenceExportWorkflow` writes `export.failed`, an `ImageWorkflow` with `skipStorage` writes "Preview failed"). A `WorkflowLoggedError` stores its own summary. The row targets the shot when the payload has a `shotId`, otherwise the sequence. A run that failed only because an awaited child failed (`isChildFailureError`) writes no row: the child already wrote one. An engine abort skips the row. A log write that fails is swallowed unless it is itself an engine abort. A trigger that never became a run is not seen here; the server module that tried to start it logs it through `recordTriggerFailure`. Subclass `onFailure` handlers do not write a second failure line. Storyboard's `mark-failed` returns without throwing, so that path writes its own "Storyboard failed" line. A credits shortfall carries the top-up sentence on `WorkflowLoggedError`. The ready email is swallowed after completion so a send failure does not append "Storyboard failed".
+
+Child workflows (image, motion, music, character bible, location bible, location matching, frame-images, motion-batch) each implement their own `onFailure` that updates the relevant record's status to `'failed'`. Per-shot unit failures in `UpdateStaleShotsWorkflow`, and the reason it writes when it fails a sheet, voice or music claim for a child that never started, also sanitize their stored failure messages through `sanitizeFailResponse()`, ensuring user-facing error banners and shot indicators show the underlying failure cause rather than spawn hierarchy prefixes.
+
+**BytePlus ACR leases (#1361, #1531).** `MotionWorkflow` and `StudioGenerationWorkflow` lease every still they register on Ark under an owner of `motion:<instanceId>` / `studio:<instanceId>` (`assetLeaseOwner`). Both release by that owner on success (step `release-byteplus-asset-leases`, whichever via the clip finally rendered on; a release that exhausts its retries is logged, never fails the rendered clip) and at the end of `onFailure` (inside the base class's retried `emit-failure` step), via `scopedDb.bytePlusAssets.releaseOwner`. That drops the run's own leases and any reservation it never finalized; another run's lease on the same still is untouched. A batch parent never releases for its children. Every claim and finalize renews all of the run's leases, so a still leased early cannot expire while a later still waits. A miss is a `byteplus_assets` row with NULL `assetId` (counts against capacity); another run for that still gets `pending` and the claim step retries. A full leased pool is `NonRetryableError` — it does not wait out the TTL. Abandoned reservations are takeable after the 45-minute TTL. Reference clips are ingested the same way, as `Video` assets (#1930): every video element in `MotionWorkflow` (after `check-reference-clip-rights` has refused any the likeness ledger has not cleared or signed), and every studio reference clip the ledger did not clear in `StudioGenerationWorkflow`. Ingest per still is `-url` (fal key + fetchable URL) → `-claim` (the only retried-for-minutes step) → `-evict` (an already-deleted asset counts as done) → `-slot` → `-wait` → `-create`. Motion's parents (motion-batch, update-stale-shots) await a motion child for 90 minutes, and analyze-script awaits motion-batch for 120.
+
+**Content soften and refused audio (#1373, #1773).** After the reseeds, the rescue attempt of a single-shot clip softens only `motionPrompt.fullPrompt` (the prose) — never the assembled prompt — and re-assembles the retry with `buildMotionShotPrompt`, so the dialogue block, audio trailer and scene header are re-added, not rewritten. The `softened` version stores that prose with the version's `audio`; dialogue stays on the shot's dialogue node. A packed multi-shot clip still softens its assembled prompt. When the clip was sent reference audio (a dialogue reading or an audio element) and the rejection names the input audio (`flaggedInputs(...).inputAudio`: a `body.audio…` field, Ark's `InputAudioSensitiveContentDetected`, or a message naming the input/reference audio), the rescue is skipped — no soften, no model fallback — and the terminal message names the generated dialogue and says what to change.
+
+**User edits land at the click (#1786).** A prompt typed into Regenerate is written as a `user-edit` version by the trigger, not by the run: `prepareShotImageWorkflowInput` for stills and `generateShotMotion` (`src/motion/server/shot-motion-generation.ts`, behind `generateShotMotionFn` and MCP `generate_shot_video`) for clips. The payload pins that row's id (`promptVersionId`, `motionPromptVersionId`), so a run that reaches its first write minutes later cannot override a newer edit. New triggers never set `userEditProvenance`. A run queued before this deploy still carries it (with `userEditText` and `priorMotion`), and `ImageWorkflow`, `MotionBatchWorkflow` and `MotionWorkflow` still write that edit in-run, since nothing else holds the typed text (`PreClickEditPayload`). Drop the fields once no such run can be in flight.
+
+**Rescue rewrites land through the promote claim (#1786).** A `softened` or `shortened` motion version, and an image run's `softened` visual version (`persistSoftenedPromptVersion`), are appended to history **unselected**: selecting mid-run would override an edit the user made meanwhile and cancel a prompt regeneration they queued. The rewrite reaches the selection with its render instead. A still carries it when it wins its claim, because selecting a still restores its linked prompt. A primary clip carries it in `update-shot`: `persistMotionCompletion` promotes through `videoVariants.selectIfPendingPromoteIs`, one guarded UPDATE that moves the segment's pointer only while this version still holds `pendingPromoteVersionId`. It then calls `shotPromptVersions.selectIfSelectionIs`, which swaps the prompt pointer only while the shot still points at the version the run started from (`rescuedMotionPromptOf`) and no prompt regeneration is queued. A newer kickoff or a manual pick wins, and so do a prompt edit and a queued regeneration. Both promotes treat a consumed claim with the pointer already on their version as a win, so a retried `update-shot` or image promote step does not drop its render to history. The image model fallback appends the Grok row in `switch-to-fallback-model` (the append is its last write, so a retry never adds a second row), then `hand-claim-to-fallback` moves the claim with `frames.movePendingPromoteVersionIdIf`, only while the original row still holds it.
+
+**Prompt-length recovery (#1754).** `MotionWorkflow` never truncates a prompt. When a via that documents a hard ceiling refuses one — our own `PromptTooLongError` thrown before the request, or the provider's 422, both classified by `isPromptTooLongError` — the submit step returns a `tooLong` sentinel instead of throwing. That sentinel does **not** join the content-rejection reseed ladder (reseeding the same prompt cannot shorten it): the loop calls `shortenOverlongMotionPrompt` once under `videoPromptHardLimit(model)`, appends the rewrite as a `shortened` shot prompt version (unselected, and the in-flight clip's manifest is repointed at it via `writeRescuedMotionPrompt` — the same helper the #1373 content soften uses), and resubmits. One rewrite per run; a second refusal is a `NonRetryableError` naming both numbers, because a shot that still will not fit is the user's to shorten.
+
+**Seedance on Ark: one new job after an internal error (#2036).** `MotionWorkflow` and `StudioGenerationWorkflow` submit one new, identical job when a poll on the BytePlus via fails with `InternalServiceError`: the loop sleeps `seedance-internal-backoff` for 5 seconds and resubmits with the suffix `-internal` on its submit and poll steps, without spending a content-flag attempt. `MotionWorkflow` skips it on its rescue pass. A second failure is a `NonRetryableError`. An `InvalidParameter` at submit (including `TaskTypeConstraint`) is a `NonRetryableError` at once, so the step never replays a body Ark will always refuse. So is a reference the model cannot use (`UnusableReferencesError` from `submitMotionJob`), which is refused before anything is sent. Both workflows log Ark's raw message, the first `InternalServiceError` included, and store plain copy that says the user was not charged for the video.
+
+**The edit decision rides the payload (#2036).** `MotionWorkflowInput.seedanceEditSeconds` is required: the trigger decides whether the job is a Seedance 2.5 edit, holds for it, and snapshots the answer. `MotionWorkflow` passes it to the submit, which sends `duration: -1` only when the request it built is an edit and those seconds cover its longest clip. A parent that spawns a motion child sets it (`UpdateStaleShotsWorkflow` decides in its prepare step and its preflight checks the team can afford it; `ReplaceElementWorkflow` attaches no clip, so it is null). See `docs/architecture/byteplus-ark.md`.
+
+### Retry Strategy
+
+Under Cloudflare Workflows, retries are configured per `step.do()` (and on the workflow class), not on the trigger — the legacy `retries`/`retryDelay` options on `triggerWorkflow()` are accepted for back-compat but are **no-ops**.
+
+| Level                                      | Retries         | Backoff                                                                         |
+| ------------------------------------------ | --------------- | ------------------------------------------------------------------------------- |
+| Individual `step.do()` steps               | engine default  | Managed by the Workflows engine                                                 |
+| LLM-call steps (`durableLLMCallCf`)        | via `step.do`   | Engine-managed                                                                  |
+| Child workflows (`spawnAndAwaitChild`)     | own step budget | Awaited with a `timeout`; the child retries its own steps                       |
+| Ark still claim (`<prefix>-ark-<n>-claim`) | 40 × 30s        | Constant — waits out another run's create; a full leased pool fails immediately |
+| Ark poll `InternalServiceError`            | 1 new job       | 5s sleep; off the content-flag budget                                           |
+
+Per-scene fan-out (image, variant, motion) uses `Promise.allSettled` over `spawnAndAwaitChild`, so one scene's failure or timeout doesn't kill the rest of the batch — failures are collected and surfaced as a single error. Dialogue audio is the exception: its failed scenes are logged, not raised, because motion records those shots again (Phase 4b).
+
+### Cloudflare Workflows Durability
+
+- Each `step.do()` step is checkpointed by the Workflows engine. The workflow body **replays from the top** on every step callback; already-completed steps return their persisted result instead of re-executing, so on failure or restart execution effectively resumes from the last completed step. (This is why steps must be idempotent and why large blobs shouldn't be returned across a step boundary.)
+- `spawnAndAwaitChild()` starts a child workflow instance (its own `binding.create()`) and awaits its result via a wake event (`waitForEvent`). The child is durable independently of the parent.
+- No application-level concurrency gating — fal queues submissions server-side (`IN_QUEUE` doesn't count toward the cap, jobs are never rejected), and OpenRouter handles its own rate limits. (A past QStash-era attempt at gating via `flowControl` produced ghost slot leaks on cancel and PR-preview cross-contamination; see #725. Cloudflare Workflows likewise has no app-level gate.)
+
+## Key Files Reference
+
+| File                                                           | Purpose                                                              |
+| -------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `src/sequences/sequences.fn.ts`                                | Server functions that trigger the pipeline                           |
+| `src/platform/server/workflow/client.ts`                       | `triggerWorkflow()` — resolves binding + `binding.create()`          |
+| `src/platform/server/workflow/trigger-bindings.ts`             | `TRIGGER_TO_BINDING` — maps trigger path → Workflows binding         |
+| `src/platform/server/workflow/base-workflow.ts`                | `OpenStoryWorkflowEntrypoint` — base class, `onFailure`, `ScopedDb`  |
+| `src/platform/server/workflow/await-child.ts`                  | `spawnAndAwaitChild()` — parent→child fan-out + await                |
+| `src/motion/server/render-at-quality.ts`                       | Ark draft → 1080p final: opens the run with `finalFromDraft` (#1756) |
+| `src/models/server/byteplus-final-render.ts`                   | Posts the `draft_task` body Ark renders the final from               |
+| `src/models/server/llm-call-helper.ts`                         | `durableLLMCallCf` / `durableStreamingLLMCallCf`                     |
+| `src/sequences/server/workflows/storyboard-workflow.ts`        | Wrapper: verify, clear, poster, spawn analyze-script                 |
+| `src/sequences/server/workflows/analyze-script-workflow.ts`    | Core orchestration (phases 1-5)                                      |
+| `src/sequences/server/workflows/scene-split-workflow.ts`       | Phase 1: scenes + bibles in parallel, then streamed shot lists       |
+| `src/sequences/boundary-split.ts`                              | Anchor resolution + verbatim script slicing                          |
+| `src/sequences/tag-reconcile.ts`                               | Canonicalize scene continuity tags onto bible tags after the join    |
+| `src/sequences/server/streaming-scene-parser.ts`               | Incremental JSON parser for the boundary-annotation stream           |
+| `src/platform/server/workflow/sanitize-fail-response.ts`       | Error message extraction + Cloudflare error-code mapping             |
+| `src/shots/server/db/frames.ts`                                | Scoped-db frame methods (`createFramesMethods`)                      |
+| **Extraction + Matching**                                      |                                                                      |
+| `src/cast/server/workflows/location-matching-workflow.ts`      | Location matching against Phase 1 location bible                     |
+| **Reference Generation**                                       |                                                                      |
+| `src/cast/server/workflows/character-bible-workflow.ts`        | Character sheet generation (parallel per character)                  |
+| `src/cast/server/workflows/character-sheet-workflow.ts`        | One look's character sheet image generation (#2015)                  |
+| `src/cast/server/workflows/location-bible-workflow.ts`         | Location sheet generation (parallel per location)                    |
+| `src/cast/server/workflows/location-sheet-workflow.ts`         | Single location reference image generation                           |
+| **Prompt Generation**                                          |                                                                      |
+| `src/shots/server/persist-shot-spec.ts`                        | First spec + derived still and motion prompts                        |
+| `src/shots/server/rebuild-shot-prompts.ts`                     | Rebuild derived prompts from the selected spec                       |
+| `src/shots/server/workflows/shot-spec-rewrite-workflow.ts`     | Rewrite shot: one LLM call refills the spec, then rebuilds           |
+| `src/motion/server/workflows/motion-music-prompts-workflow.ts` | Music design only                                                    |
+| `src/audio/server/workflows/music-prompt-workflow.ts`          | Music design LLM call                                                |
+| **Image Generation**                                           |                                                                      |
+| `src/stills/server/workflows/shot-images-workflow.ts`          | Orchestrates image + variant gen for all scenes                      |
+| `src/stills/server/workflows/image-workflow.ts`                | Single image generation (Fal.ai)                                     |
+| `src/stills/server/workflows/shot-variant-workflow.ts`         | Shot grid variant generation                                         |
+| **Motion + Music Generation**                                  |                                                                      |
+| `src/motion/server/workflows/motion-batch-workflow.ts`         | Orchestrates motion + music generation                               |
+| `src/motion/server/workflows/motion-workflow.ts`               | Single motion/video generation (Fal.ai)                              |
+| `src/audio/server/workflows/music-workflow.ts`                 | Music generation (Fal.ai)                                            |
+| `src/sequences/server/workflows/sequence-export-workflow.ts`   | Server-side export (video-export Container; production-only)         |
+| **Recasting + Regeneration**                                   |                                                                      |
+| `src/cast/server/workflows/recast-character-workflow.ts`       | Recast a character and regenerate affected frames                    |
+| `src/cast/server/workflows/recast-location-workflow.ts`        | Re-render the shots set at a replaced location                       |
+| `src/shots/server/workflows/regenerate-shots-workflow.ts`      | Regenerate specific shots with new prompts                           |
+| **Schemas + Events**                                           |                                                                      |
+| `src/platform/realtime/index.ts`                               | Real-time event schema and channel helpers                           |
+| `src/platform/server/realtime/runs.ts`                         | Report and read a sequence's open workflow runs (#2113)              |
+| `src/sequences/ui/generation/sequence-runs.ts`                 | Chip model: top-level runs and the runs nested under them            |
+| `src/shots/scene-analysis.schema.ts`                           | `Scene` type definition                                              |
+| `src/sequences/response-schemas.ts`                            | `musicDesignResultSchema` and other LLM response schemas             |

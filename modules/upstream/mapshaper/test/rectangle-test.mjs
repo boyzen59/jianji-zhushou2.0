@@ -1,0 +1,133 @@
+import assert from 'assert';
+import api from '../mapshaper.js';
+import helpers from './helpers';
+import { applyAspectRatio } from '../src/commands/mapshaper-rectangle';
+import { Bounds } from '../src/geom/mapshaper-bounds';
+var captureLogCalls = helpers.captureLogCalls;
+var captureLogCallsAsync = helpers.captureLogCallsAsync;
+
+describe('mapshaper-rectangle.js', function () {
+
+  it('-rectangle + names the new layer "rectangle"', async function() {
+    var out = await api.applyCommands('-rectangle bbox=0,0,10,10 name=a ' +
+      '-rectangle + -o target=* format=geojson');
+    assert.deepEqual(Object.keys(out).sort(), ['a.json', 'rectangle.json']);
+  });
+
+  it('-rectangle without + keeps the target layer\'s name', async function() {
+    var out = await api.applyCommands('-rectangle bbox=0,0,10,10 name=a ' +
+      '-rectangle -o target=* format=geojson');
+    assert.deepEqual(Object.keys(out), ['a.json']);
+  });
+
+  describe('-rectangles command with bbox= option', async function() {
+    var csv = 'bbox\n"[0,0,1,1]"\n"[2,0,3,1]"';
+    var cmd = '-i data.csv -rectangles bbox="JSON.parse(bbox)" -o data.json';
+    var result = await api.applyCommands(cmd, {'data.csv': csv});
+    var json = JSON.parse(result['data.json']);
+    var coords = json.features[1].geometry.coordinates;
+    assert.deepEqual(coords, [[[2, 0], [3, 0], [3, 1], [2, 1], [2, 0]]]);
+  });
+
+  describe('applyAspectRatio()', function () {
+    it('Handle max ratio', function () {
+      var bounds = new Bounds(1, 1, 4, 2); // wide box
+      applyAspectRatio(',1', bounds)
+      assert.deepEqual(bounds.toArray(), [1, 0, 4, 3]);
+    })
+
+    it('Handle min ratio', function () {
+      var bounds = new Bounds(1, 1, 2, 4); // tall box
+      applyAspectRatio('1,', bounds)
+      assert.deepEqual(bounds.toArray(), [0, 1, 3, 4]);
+    })
+
+    it('Handle fixed ratio', function () {
+      var bounds = new Bounds(0, 0, 2, 2); // tall box
+      applyAspectRatio('2', bounds);
+      assert.deepEqual(bounds.toArray(), [-1, 0, 3, 2]);
+    })
+
+    it('Handle min and max ratio 1', function () {
+      var bounds = new Bounds(0, 0, 2, 2); // tall box
+      applyAspectRatio('1,2', bounds);
+      assert.deepEqual(bounds.toArray(), [0, 0, 2, 2]); // box fits
+    })
+
+    it('Handle min and max ratio 2', function () {
+      var bounds = new Bounds(0, 0, 4, 1); // tall box
+      applyAspectRatio('1,2', bounds);
+      assert.deepEqual(bounds.toArray(), [0, -0.5, 4, 1.5]); // pad vertically
+    })
+
+
+    it('Handle min and max ratio 3 -- min,max order reversed', function () {
+      var bounds = new Bounds(0, 0, 4, 1); // tall box
+      applyAspectRatio('2,1', bounds);
+      assert.deepEqual(bounds.toArray(), [0, -0.5, 4, 1.5]); // pad vertically
+    })
+  })
+
+  it('Rectangles created using -rectangle source= are assigned CRS of source', function(done) {
+    var cmd = '-rectangle bbox=0,0,1,1 name=box1 -proj +proj=merc -rectangle source=box1 name=box2' +
+        ' -o target=box2 format=shapefile';
+    api.applyCommands(cmd, {}, function(err, o) {
+      var prj = o['box2.prj'] || '';
+      assert(prj.indexOf('Mercator') > -1);
+      done();
+    });
+  });
+
+  it ('create a rectangle using -rectangle bbox= and offset=', function(done) {
+    api.applyCommands('-rectangle bbox=1,1,4,4 offset=1 -o gj2008 out.json', {}, function(err, out) {
+      var geom = JSON.parse(out['out.json']).geometries[0];
+      assert.deepEqual(geom, {
+        type: 'Polygon',
+        coordinates: [[[0,0], [0,5], [5,5], [5,0], [0,0]]]
+      });
+      done();
+    });
+  })
+
+  it ('-rectangle with a projected bbox', function(done) {
+    api.applyCommands('-rectangle bbox=100,100,1000,1000 offset=1 -o out.json', {}, function(err, out) {
+      var geom = JSON.parse(out['out.json']).geometries[0];
+      assert.deepEqual(geom, {
+        type: 'Polygon',
+        coordinates: [[ [ 99, 99 ], [ 1001, 99 ], [ 1001, 1001 ], [ 99, 1001 ], [ 99, 99 ] ]]
+      });
+      done();
+    });
+  })
+
+  it('does not warn when -rectangle imports projected internal GeoJSON', async function() {
+    var output = await captureLogCallsAsync(async function() {
+      await api.applyCommands('-rectangle bbox=100,100,1000,1000 -o out.json', {});
+    });
+    var calls = output.log;
+    assert.equal(
+      calls.some(s => /coordinates outside the lat-long range/.test(s)),
+      false,
+      'did not expect projected-coords warning from internal GeoJSON import'
+    );
+  });
+
+  it ('create a rectangle from an existing layer with percentage offsets', function(done) {
+    var geom = {
+      type: 'LineString',
+      coordinates: [[0, 1], [1, 2], [2, 1], [1, 0]]
+    };
+    api.applyCommands('-i in.json -rectangle offset=50%,100%,150%,200% -o gj2008 out.json',
+        {'in.json': geom}, function(err, output) {
+      var geom = JSON.parse(output['out.json']);
+      var expect = {
+        type: 'Polygon',
+        coordinates: [[[-1, -2], [-1, 6], [5, 6], [5, -2], [-1, -2]]]
+      };
+      assert.deepEqual(geom.geometries[0], expect);
+      done();
+    });
+
+  })
+
+})

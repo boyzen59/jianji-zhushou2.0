@@ -1,0 +1,1775 @@
+import {
+  buildMotionShotPrompt,
+  buildPackedMotionPrompt,
+} from '@/motion/server/build-motion-render';
+/**
+ * The `generateMotionWorkflow` durable workflow.
+
+ */
+
+import { gateEstimate } from '@/billing/cost-estimation';
+import { getEffectiveFalPricing } from '@/billing/server/fal-pricing-live';
+import {
+  deductWorkflowCredits,
+  recordFalUsageStep,
+} from '@/billing/server/workflow-deduction';
+import {
+  clipContentRejectionMessage,
+  CONTENT_REJECTION_EVENT,
+  CONTENT_REJECTION_FALLBACK_EVENT,
+  CONTENT_REJECTION_RETRY_EVENT,
+  CONTENT_REJECTION_SOFTEN_EVENT,
+  flaggedInputs,
+  isContentRejectionError,
+} from '@/models/content-rejection';
+import { extractFalErrorMessage } from '@/models/fal-error';
+import {
+  DEFAULT_VIDEO_MODEL,
+  getMotionReferenceEndpoint,
+  IMAGE_TO_VIDEO_MODELS,
+  supportsDraftMode,
+  videoModelSupportsAudio,
+  videoPromptHardLimit,
+} from '@/models/models';
+import {
+  DEFAULT_ANALYSIS_MODEL,
+  getAnalysisModelById,
+} from '@/models/models.config';
+import { isPromptTooLongError } from '@/models/prompt-length';
+import { assetLeaseOwner } from '@/models/server/byteplus-asset-pool';
+import { ingestArkAssets } from '@/models/server/byteplus-asset-steps';
+import {
+  audioSourceKeyFromVoicedLines,
+  matchingDialogueClips,
+  withSpokenText,
+  withVoicedLineTokens,
+} from '@/motion/dialogue-tts';
+import { DRAFT_FINAL_RESOLUTION, DRAFT_RESOLUTION } from '@/motion/draft-mode';
+import { referenceKeysFrom } from '@/motion/reference-provenance';
+import { raiseShotDurationToCoverAudio } from '@/motion/resolve-shot-duration';
+import { packedPromptFitsLimit } from '@/motion/server/build-motion-render';
+import { bindableReferences } from '@/motion/server/build-reference-video-prompt';
+import { cutSpanningSection } from '@/motion/server/cut-audio-section';
+import {
+  arkStillsForMotion,
+  calculateMotionMetadata,
+  canRenderReferenceOnly,
+  motionCostFromUsage,
+  pollMotionJob,
+  resolveMotionVia,
+  submitMotionJob,
+} from '@/motion/server/motion-generation';
+import { buildVideoManifest } from '@/motion/server/render-segments';
+import { dialogueClipsAsReferences } from '@/motion/server/synthesize-dialogue';
+import {
+  uploadVideoToStorage,
+  videoUrlFitsWorkflowCheckpoint,
+} from '@/motion/server/video-storage';
+import { getLogger } from '@/platform/logger';
+import { getGenerationChannel } from '@/platform/realtime';
+import { recordProvenance } from '@/platform/server/compliance/provenance';
+import type {
+  MotionAudioClip,
+  VideoManifest,
+} from '@/platform/server/db/schema';
+import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
+import { recordMediaGenerationSpan } from '@/platform/server/observability/ai-otel';
+import { buildR2Key, STORAGE_BUCKETS } from '@/platform/server/storage/buckets';
+import { OpenStoryWorkflowEntrypoint } from '@/platform/server/workflow/base-workflow';
+import {
+  isEngineAbortError,
+  WorkflowValidationError,
+} from '@/platform/server/workflow/errors';
+import type { MotionWorkflowInput } from '@/platform/server/workflow/types';
+import { computeVideoManifestInputHash } from '@/shots/input-hash';
+import type {
+  AssemblableMotionPrompt,
+  MotionAudio,
+} from '@/shots/scene-analysis.schema';
+import { dialogueLinesKey } from '@/shots/shot-dialogue';
+import { ensureImageUnderLimit } from '@/stills/server/image-compress';
+import {
+  MOTION_CONTENT_FALLBACK_MODEL,
+  shortenOverlongMotionPrompt,
+  softenRejectedMotionPrompt,
+} from '@/stills/server/workflows/content-soften';
+import type { TokenUsage } from '@tanstack/ai';
+import type { WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
+import {
+  explainSeedanceFailure,
+  isSeedanceInternalServiceError,
+  seedanceSubmitRefusal,
+  SEEDANCE_INTERNAL_BACKOFF,
+} from '@/motion/seedance-edit';
+import { UnusableReferencesError } from '@/motion/reference-support';
+import { requireUploadRights } from '@/cast/server/upload-rights';
+import {
+  getExtensionFromUrl,
+  getMimeTypeFromExtension,
+} from '@/platform/server/storage/file';
+import { AttestationRequiredError } from '@/platform/errors';
+import { NonRetryableError } from 'cloudflare:workflows';
+import {
+  persistMotionCompletion,
+  persistMotionFailure,
+  rescuedMotionPromptOf,
+} from './motion-workflow-persist';
+
+const logger = getLogger(['openstory', 'workflow', 'motion']);
+
+/** Each batch polls in a tight loop for ~30s, then checkpoints for durability */
+const POLL_BATCH_DURATION_MS = 30_000;
+const POLL_INTERVAL_MS = 3_000;
+/**
+ * 60 batches × 30s = 30 minutes of polling. Under a many-sequence burst the
+ * fal queue alone can hold a job past 15 minutes (the June 7 sample run lost
+ * 13 shots to the old 30-batch budget while ~95% of jobs completed fine), so
+ * the budget must absorb provider-side queueing — motion-batch's per-child
+ * await (90 minutes, which also covers BytePlus still ingest) stays above it.
+ */
+const MAX_BATCHES = 60;
+/** Kling rejects start shot images over 10MB — use 9.5MB safety margin */
+const KLING_MAX_IMAGE_BYTES = 9.5 * 1024 * 1024;
+
+/**
+ * Total clip generation attempts on a content-flag rejection (#881): the
+ * initial attempt plus 2 resubmits. The veo "could not generate / didn't
+ * generate expected output" rejections are largely stochastic and clear on a
+ * fresh resubmit; deterministic content-checker / sensitive-audio hits exhaust
+ * this budget and fail as before.
+ */
+const MAX_MOTION_ATTEMPTS = 3;
+
+/** Per-attempt poll outcome. A content-flag rejection (`rejected`) re-rolls the
+ *  whole submit→poll cycle; a non-content `failed` is a hard stop as today. */
+type MotionPollOutcome =
+  | { kind: 'pending' }
+  | { kind: 'completed'; url: string; usage?: TokenUsage }
+  | { kind: 'rejected'; rejection: string }
+  | { kind: 'failed'; error: string };
+
+type MotionWorkflowResult = {
+  videoUrl: string;
+  duration: number;
+};
+
+/** Route a provider clip failure: a content flag re-rolls the attempt (#881);
+ *  anything else is a hard stop, matching the pre-#881 behaviour. */
+function classifyMotionFailure(message: string): MotionPollOutcome {
+  return isContentRejectionError(message)
+    ? { kind: 'rejected', rejection: message }
+    : { kind: 'failed', error: `Motion generation failed: ${message}` };
+}
+
+export class MotionWorkflow extends OpenStoryWorkflowEntrypoint<MotionWorkflowInput> {
+  protected override readonly failureLabel = 'Motion';
+
+  protected override async runImpl(
+    event: Readonly<WorkflowEvent<MotionWorkflowInput>>,
+    step: WorkflowStep,
+    scopedDb: WorkflowScopedDb
+  ): Promise<MotionWorkflowResult> {
+    const input: Readonly<MotionWorkflowInput> = event.payload;
+    const workflowRunId = event.instanceId;
+    const model = input.model || DEFAULT_VIDEO_MODEL;
+
+    // Speech is an upstream prerequisite. Dialogue generation runs before the
+    // motion child (scene-wide in batch flows); a missing or stale take blocks
+    // this render before it can reserve credits or submit a silent clip.
+    const packedMembers =
+      (input.coveredShots?.length ?? 0) > 1 ? input.coveredShots : null;
+    const missingDialogueShotIds = packedMembers
+      ? packedMembers
+          .filter(
+            (member) =>
+              (member.voicedLines?.length ?? 0) > 0 &&
+              matchingDialogueClips(member.audioClips, member.voicedLines ?? [])
+                .length === 0
+          )
+          .map((member) => member.shotId)
+      : (input.voicedLines?.length ?? 0) > 0 &&
+          matchingDialogueClips(input.audioClips, input.voicedLines ?? [])
+            .length === 0
+        ? [input.shotId ?? '(unknown)']
+        : [];
+    if (missingDialogueShotIds.length > 0) {
+      throw new NonRetryableError(
+        `Dialogue audio is not ready for shot${missingDialogueShotIds.length === 1 ? '' : 's'} ${missingDialogueShotIds.join(', ')}; motion requires a completed dialogue take.`
+      );
+    }
+
+    // Reference-only shots have no still by design — the reference sheets and
+    // the prompt are the whole input. Every other shot must carry one.
+    // A final from a draft (#1756) sends only the task id — no still.
+    if (
+      !input.imageUrl?.trim() &&
+      !input.referenceOnly &&
+      !input.finalFromDraft
+    ) {
+      throw new WorkflowValidationError(
+        'Thumbnail Path is required for motion generation'
+      );
+    }
+    // What this render is stamped with: a draft is 480p, its final 1080p,
+    // anything else the tier the sequence asked for.
+    const renderedResolution = input.finalFromDraft
+      ? DRAFT_FINAL_RESOLUTION
+      : input.draft && supportsDraftMode(model)
+        ? DRAFT_RESOLUTION
+        : (input.resolution ?? null);
+    if (
+      input.referenceOnly &&
+      !(await canRenderReferenceOnly(model, scopedDb.credentials))
+    ) {
+      // A route whose start frame is optional is what makes this shot
+      // renderable — a fal reference-to-video endpoint, or Grok on the native
+      // xAI via. A model with neither cannot serve it at all. Fail before the
+      // credit check rather than burning a reservation on a doomed submit.
+      throw new WorkflowValidationError(
+        `Video model "${model}" cannot render reference-only shots (no route whose start frame is optional)`
+      );
+    }
+
+    // Motion's dual-write (#545, re-routed to `video_variants` in #990) opens
+    // this model's `video_variants` version in `set-generating-status` and
+    // closes it in completion/`onFailure`, all of which need `sequenceId`. Every
+    // trigger sets both ids; assert it once here so a `sequenceId`-less caller
+    // fails loudly at the boundary rather than silently writing the legacy
+    // columns while skipping the variant half (which would leave the model
+    // invisible in the scenes-view switcher).
+    if (input.shotId && !input.sequenceId) {
+      throw new WorkflowValidationError(
+        'sequenceId is required when shotId is set (motion dual-write)'
+      );
+    }
+
+    // Upstream dialogue clips (#1554) raise duration (Seedance 2.5 is 4–30 s)
+    // and ride the request as audio refs, so both the video estimate and the
+    // manifest have to see them. Missing or stale audio was rejected above.
+    let prompt = input.prompt;
+    let multiPrompt = input.multiPrompt;
+    let referenceImages = input.referenceImages;
+    let durationHint = input.duration;
+    const audioClips: MotionAudioClip[] = input.audioClips ?? [];
+    // The words the bound audio actually SAYS (#1651): a dialogue-stage section
+    // that was rewritten to fit records its delivered wording on the clip, and
+    // the prompt drives lip movement, so assembly has to read it back.
+    const voicedLines = withSpokenText(input.voicedLines ?? [], audioClips);
+    // The manifest key is the AUTHORED lines (#1671): every reader computes
+    // it from the scene, so stamping the shortened wording would read stale
+    // forever. `voicedLines` above is for the prompt, which must say what the
+    // audio says.
+    const authoredLines = input.voicedLines ?? [];
+    /**
+     * One shot's request prompt from its structured parts: the prose, then
+     * the dialogue, audio trailer and (peeled) scene header. Also how the
+     * content soften re-assembles (#1773): only the prose is rewritten.
+     */
+    const assembleShotPrompt = (motionPrompt: AssemblableMotionPrompt) =>
+      buildMotionShotPrompt({
+        motionPrompt: {
+          ...motionPrompt,
+          dialogue: withVoicedLineTokens(motionPrompt.dialogue, voicedLines),
+        },
+        model,
+        characterTags: input.characterTags,
+        generateAudio: input.generateAudio,
+        attachSceneHeader: input.attachSceneHeader,
+        scene: input.packedScene,
+      });
+    if (voicedLines.length > 0) {
+      if (!input.sequenceId) {
+        throw new WorkflowValidationError(
+          'sequenceId is required when dialogue audio is attached to motion'
+        );
+      }
+      const sequenceId = input.sequenceId;
+      const packedClip = Boolean(
+        input.coveredShots && input.coveredShots.length > 1
+      );
+      // A packed clip sends one longer section of the recording, not each member's
+      // overlapping section (#1794). The members keep their own clips.
+      const wireClips = packedClip
+        ? await step.do('cut-spanning-section', () =>
+            cutSpanningSection(audioClips, {
+              teamId: input.teamId,
+              sequenceId,
+              minDurationSeconds:
+                getMotionReferenceEndpoint(model)?.audioSeconds?.min,
+              getSection: (id) =>
+                scopedDb.claims.shotDialogue.getSectionById(id),
+            })
+          )
+        : audioClips;
+      referenceImages = [
+        ...(input.referenceImages ?? []),
+        ...dialogueClipsAsReferences(wireClips),
+      ];
+      if (input.coveredShots && packedClip) {
+        const packed = buildPackedMotionPrompt({
+          shots: input.coveredShots.map((member) => ({
+            durationSeconds: member.duration ?? durationHint ?? 3,
+            motionPrompt: member.motionPrompt
+              ? {
+                  ...member.motionPrompt,
+                  dialogue: withVoicedLineTokens(
+                    member.motionPrompt.dialogue,
+                    member.voicedLines
+                      ? withSpokenText(
+                          member.voicedLines,
+                          member.audioClips ?? audioClips
+                        )
+                      : voicedLines
+                  ),
+                }
+              : undefined,
+            prompt: member.prompt ?? prompt,
+            characterTags: member.characterTags ?? input.characterTags,
+            generateAudio: input.generateAudio,
+          })),
+          model,
+          generateAudio: input.generateAudio,
+          scene: input.packedScene,
+        });
+        const hardLimit = videoPromptHardLimit(model);
+        if (!packedPromptFitsLimit(packed, hardLimit)) {
+          throw new WorkflowValidationError(
+            `This ${input.coveredShots.length}-shot clip's prompt exceeds ${IMAGE_TO_VIDEO_MODELS[model].name}'s ${hardLimit}-character limit. Shorten a shot prompt to generate it as one clip.`
+          );
+        }
+        prompt = packed.prompt;
+        if (packed.multiPrompt) multiPrompt = packed.multiPrompt;
+      } else if (input.motionPrompt) {
+        prompt = assembleShotPrompt(input.motionPrompt);
+      }
+      const audioSeconds = wireClips.reduce(
+        (sum, clip) => sum + (clip.durationSeconds ?? 0),
+        0
+      );
+      const baseDuration =
+        durationHint && durationHint > 0 ? durationHint : audioSeconds;
+      durationHint = raiseShotDurationToCoverAudio(
+        baseDuration,
+        audioSeconds,
+        model
+      );
+    }
+
+    // Step 0: Estimate cost and check the team can afford it. The estimate only
+    // gates affordability — the exact charge is computed from fal's billed
+    // units after the clip completes (see actualCost below).
+    const { duration, usedOwnKey: gatedUsedOwnKey } = await step.do(
+      'check-credits',
+      async () => {
+        const { cost: estimatedCost, duration } = calculateMotionMetadata(
+          {
+            imageUrl: input.imageUrl,
+            referenceOnly: input.referenceOnly,
+            referenceImages,
+            prompt,
+            model,
+            duration: durationHint,
+            fps: input.fps,
+            motionBucket: input.motionBucket,
+            aspectRatio: input.aspectRatio,
+            resolution: input.resolution,
+            generateAudio: input.generateAudio,
+            draft: input.draft,
+            finalFromDraftTaskId: input.finalFromDraft?.taskId,
+          },
+          await getEffectiveFalPricing()
+        );
+        // No honest estimate → gate on the conservative floor (#1069).
+        const cost = gateEstimate(estimatedCost, {
+          model,
+          operation: 'motion-workflow',
+        });
+
+        const falKeyInfo = await scopedDb.credentials.resolveKey('fal');
+        const usedOwnKey = falKeyInfo.source === 'team';
+        if (cost > 0 && !usedOwnKey && !input.reservationId) {
+          const canAfford =
+            await scopedDb.liveRead.billing.hasEnoughCredits(cost);
+          if (!canAfford) {
+            throw new NonRetryableError(
+              `Insufficient credits for motion generation`
+            );
+          }
+        }
+        // `usedOwnKey` rides the step result so the affordability gate above
+        // and the deduction below agree on one pinned read: a key added or
+        // removed mid-run must not let a charge land on a balance this gate
+        // never checked.
+        return { cost, duration, usedOwnKey };
+      }
+    );
+
+    // Step 1: Set status to generating and store model being used
+    const { shotDeleted, videoVersionId, sceneId, manifest } = await step.do(
+      'set-generating-status',
+      async (): Promise<{
+        shotDeleted: boolean;
+        videoVersionId: string | null;
+        sceneId: string | null;
+        // The opened version's manifest, so a content-checker rescue (#1373)
+        // can repoint it at the softened prompt version. Absent on a run that
+        // cached this step before #1373.
+        manifest?: VideoManifest | null;
+      }> => {
+        if (!input.shotId) {
+          return { shotDeleted: false, videoVersionId: null, sceneId: null };
+        }
+
+        const shot = await scopedDb.liveRead.shots.getById(input.shotId);
+
+        if (!shot) {
+          logger.info(
+            `[MotionWorkflow:cf] Shot ${input.shotId} was deleted, skipping workflow`
+          );
+          return { shotDeleted: true, videoVersionId: null, sceneId: null };
+        }
+
+        // The clips this render consumes are recorded ONCE, as the manifest's
+        // `audioClipIds` below (#1786) — never stamped onto the prompt row.
+
+        // A run queued before #1786 still carries the edit for the run to
+        // write (see PreClickEditPayload); nothing else holds the typed text.
+        const preClickEditId = input.userEditProvenance
+          ? (
+              await scopedDb.shotPromptVersions.write({
+                shotId: input.shotId,
+                promptType: 'motion',
+                text: input.userEditText ?? input.prompt,
+                audio: input.priorMotion?.audio ?? null,
+                source: 'user-edit',
+                usesStartFrame: !input.referenceOnly,
+                inputHash: input.userEditProvenance.inputHash,
+                analysisModel: input.userEditProvenance.analysisModel,
+                createdBy: input.userId,
+              })
+            ).id
+          : null;
+        const renderedPromptVersionId =
+          preClickEditId ?? input.motionPromptVersionId ?? null;
+
+        // Open an append-only `video_variants` *version* for this render (#990,
+        // replaces the retired `shot_variants` video slice). It is keyed by
+        // (renderSegmentId, model); per-shot rendering is the degenerate
+        // one-shot segment whose id is the shot's id. The manifest snapshots the
+        // inputs the render consumes — the shot's selected motion-prompt + anchor-frame
+        // image versions (the references ARE the snapshot) + the value-snapshot
+        // duration. The legacy `shots.video*` columns above stay the cached
+        // mirror of whichever version the shot's selection points at.
+        // FK is always live `shots.sceneId`. Packed jobs live-read every
+        // member. Leftover 1-shot tiles must use that same live row —
+        // `input.sceneId` is only a packing key on the storyboard path
+        // (analysis ULID) and will 404 if used as the segment FK. Generate
+        // Motion / batch generate already pin live `shots.sceneId`.
+        const renderSceneId = shot.sceneId ?? input.sceneId ?? null;
+        let openedVideoVersionId: string | null = null;
+        let manifest: VideoManifest | null = null;
+        if (input.sequenceId) {
+          const sequenceId = input.sequenceId;
+          if (!renderSceneId) {
+            throw new WorkflowValidationError(
+              `Shot ${input.shotId} has no scene; cannot open a video render version`
+            );
+          }
+          // Resolve (materializing on first use) the shot's render segment —
+          // per-shot rendering is the degenerate one-shot segment. A packed
+          // in-clip job (#1510) assigns every covered shot to one shared
+          // segment so playback is one clip, not a stitch of copies.
+          const covered = input.coveredShots;
+          const liveMembers =
+            covered && covered.length > 1
+              ? await scopedDb.liveRead.shots.getByIds(
+                  covered.map((member) => member.shotId)
+                )
+              : [shot];
+          // A final lands on the draft's own segment (#1756) — a packed
+          // draft's members must not be re-segmented one by one.
+          const renderSegmentId =
+            input.finalFromDraft?.renderSegmentId ??
+            (liveMembers.length > 1
+              ? await scopedDb.renderSegments.ensureForShots(
+                  liveMembers.map((member) => ({
+                    id: member.id,
+                    sceneId: member.sceneId ?? renderSceneId,
+                    sequenceId,
+                    renderSegmentId: member.renderSegmentId,
+                  }))
+                )
+              : await scopedDb.renderSegments.ensureForShot({
+                  id: shot.id,
+                  sceneId: renderSceneId,
+                  sequenceId,
+                  renderSegmentId: shot.renderSegmentId,
+                }));
+          // Both version ids are pinned at the trigger. There is deliberately no
+          // live fallback for the frame: re-reading the anchor's pointer would
+          // name whatever is selected NOW, and a concurrent select/upscale makes
+          // that a different still than the one this clip rendered from (the
+          // render consumes `input.imageUrl`, snapshotted at the trigger). A
+          // payload without it records null provenance, as pre-#1067 rows do.
+          //
+          // Only the references that rode on the wire are stamped — the same
+          // question billing asks below. A model with no reference slot got
+          // descriptions, so a sheet re-select cannot stale its clip.
+          const sentReferenceKeys = referenceKeysFrom(
+            bindableReferences(
+              getMotionReferenceEndpoint(model),
+              referenceImages ?? [],
+              Boolean(input.imageUrl)
+            )
+          );
+          // The lines the prompt quoted (#1784). Only an audio-capable model
+          // splices them in, so any other model stamps null.
+          const quotedDialogueKey = (
+            dialogue: Parameters<typeof dialogueLinesKey>[0]
+          ) =>
+            videoModelSupportsAudio(model) ? dialogueLinesKey(dialogue) : null;
+          const coveredEntries =
+            covered && covered.length > 1
+              ? covered.map((member) => ({
+                  shotId: member.shotId,
+                  motionPromptVersionId:
+                    member.shotId === input.shotId
+                      ? (preClickEditId ?? member.motionPromptVersionId ?? null)
+                      : (member.motionPromptVersionId ?? null),
+                  frameVersionId: member.frameVersionId ?? null,
+                  usesStartFrame: !member.referenceOnly,
+                  durationMs: Math.round((member.duration ?? 3) * 1000),
+                  audioClipIds: (member.audioClips ?? []).map(
+                    (clip) => clip.id
+                  ),
+                  audioSourceKey: audioSourceKeyFromVoicedLines(
+                    // The top-level lines are the whole packed conversation.
+                    // Every manifest entry, including the lead shot, must
+                    // match that member's own live dialogue key (#1720).
+                    member.voicedLines ?? []
+                  ),
+                  dialogueKey: quotedDialogueKey(member.motionPrompt?.dialogue),
+                  // One clip, one request: every covered shot was sent the
+                  // same references.
+                  referenceKeys: sentReferenceKeys,
+                }))
+              : [
+                  {
+                    shotId: input.shotId,
+                    // No selection-pointer fallback: a payload without the field
+                    // records null provenance rather than whatever is selected now.
+                    motionPromptVersionId: renderedPromptVersionId,
+                    frameVersionId: input.frameVersionId ?? null,
+                    // Provenance stamp: the mode this render ran in, independent
+                    // of the null-`frameVersionId` encoding above.
+                    usesStartFrame: !input.referenceOnly,
+                    durationMs: duration * 1000,
+                    audioClipIds: audioClips.map((clip) => clip.id),
+                    audioSourceKey:
+                      audioSourceKeyFromVoicedLines(authoredLines),
+                    dialogueKey: quotedDialogueKey(
+                      input.motionPrompt?.dialogue
+                    ),
+                    referenceKeys: sentReferenceKeys,
+                  },
+                ];
+          // A final reuses the draft's manifest verbatim (#1756): same
+          // inputs, same hash, so it is exactly as stale as the draft.
+          manifest =
+            input.finalFromDraft?.manifest ??
+            buildVideoManifest(coveredEntries);
+          const inputHash = await computeVideoManifestInputHash(
+            manifest,
+            model
+          );
+          if (inputHash == null && !input.variantOnly) {
+            logger.warn(
+              `[MotionWorkflow:cf] Shot ${input.shotId} primary render is missing pinned frameVersionId/motionPromptVersionId; storing a null hash so the clip is unknown-not-stale rather than born Stale (#1380)`
+            );
+          }
+          const version = await scopedDb.videoVariants.appendVersion({
+            renderSegmentId,
+            sequenceId: input.sequenceId,
+            model,
+            resolution: renderedResolution,
+            manifest,
+            inputHash,
+            status: 'generating',
+            workflowRunId,
+            isPrimary: !input.variantOnly,
+          });
+          openedVideoVersionId = version.id;
+          // Primary motion claims auto-promote; last kickoff wins (#1070).
+          if (!input.variantOnly) {
+            await scopedDb.renderSegments.setPendingPromoteVersionId(
+              renderSegmentId,
+              version.id
+            );
+          }
+        }
+
+        try {
+          await getGenerationChannel(input.sequenceId).emit(
+            'generation.video:progress',
+            {
+              shotId: input.shotId,
+              status: 'generating',
+              model,
+              // Variant-only (#547): don't flip the primary shot to
+              // "generating" in cache — this run only fills a variant version.
+              variantOnly: input.variantOnly,
+            }
+          );
+        } catch (emitError) {
+          logger.error(
+            `[MotionWorkflow:cf] Failed to emit generation.video:progress for shot ${input.shotId}:`,
+            {
+              err: emitError,
+            }
+          );
+        }
+        return {
+          shotDeleted: false,
+          videoVersionId: openedVideoVersionId,
+          sceneId: renderSceneId,
+          manifest,
+        };
+      }
+    );
+
+    if (shotDeleted) {
+      return { videoUrl: '', duration: 0 };
+    }
+
+    // Step 2: Prepare start image — use Cloudflare Image Resizing if Kling model and image exceeds 10MB
+    const startImageUrl = await step.do(
+      'prepare-start-image',
+      async (): Promise<string | null> => {
+        // Reference-only has no still to prepare. `null`, not `undefined`:
+        // a step result is persisted and replayed as JSON, where `undefined`
+        // has no representation and comes back as `null` anyway — returning it
+        // outright keeps the declared type true on the replay path too.
+        // Kling reference-only shots return here too since #1498, so they skip
+        // the compression below — there is no still to compress, and their
+        // sheets are handled by `prepare-reference-images`. Trimmed to agree
+        // with the entry guard above, so a
+        // whitespace-only URL can't slip past as a real still and shift every
+        // reference tag down a slot.
+        if (!input.imageUrl?.trim()) {
+          return null;
+        }
+        const modelConfig = IMAGE_TO_VIDEO_MODELS[model];
+        if (modelConfig.vendor !== 'Kling') {
+          return input.imageUrl;
+        }
+
+        const compressed = await ensureImageUnderLimit(
+          input.imageUrl,
+          KLING_MAX_IMAGE_BYTES
+        );
+        if (!compressed) {
+          return input.imageUrl;
+        }
+
+        logger.info(
+          `[MotionWorkflow:cf] Image ${(compressed.originalSizeBytes / 1024 / 1024).toFixed(1)}MB exceeds limit, using Cloudflare Image Resizing`
+        );
+
+        return compressed.url;
+      }
+    );
+
+    // Kling enforces its 10MB-per-image limit on every URL in the reference
+    // list, not just the start frame — and sheets only started riding that
+    // list when references moved to the O3 reference-to-video endpoint
+    // (#1498); the old inline `elements` path never sent them to Kling. So the
+    // guard above has to cover both halves of the request, not one.
+    referenceImages = await step.do(
+      'prepare-reference-images',
+      async (): Promise<MotionWorkflowInput['referenceImages']> => {
+        const refs = referenceImages ?? [];
+        if (
+          refs.length === 0 ||
+          IMAGE_TO_VIDEO_MODELS[model].vendor !== 'Kling'
+        ) {
+          return referenceImages;
+        }
+        return await Promise.all(
+          refs.map(async (ref) => {
+            if ((ref.kind ?? 'image') !== 'image') return ref;
+            if (!ref.referenceImageUrl) return ref;
+            const compressed = await ensureImageUnderLimit(
+              ref.referenceImageUrl,
+              KLING_MAX_IMAGE_BYTES
+            );
+            if (!compressed) return ref;
+            logger.info(
+              `[MotionWorkflow:cf] Reference image ${(compressed.originalSizeBytes / 1024 / 1024).toFixed(1)}MB exceeds limit, using Cloudflare Image Resizing`
+            );
+            return { ...ref, referenceImageUrl: compressed.url };
+          })
+        );
+      }
+    );
+
+    // A reference clip must be cleared or signed on the likeness ledger
+    // before any model sees it (#1930). A clip attached before the check has
+    // no row, and every trigger lands here, so the run asks.
+    const clipRefs = (referenceImages ?? []).filter(
+      (ref) => ref.kind === 'video'
+    );
+    if (clipRefs.length > 0) {
+      await step.do('check-reference-clip-rights', async () => {
+        for (const ref of clipRefs) {
+          // The ledger row was written for the stored type. A still
+          // classified as an image must not ride as a clip (#2153).
+          const mimeType = getMimeTypeFromExtension(
+            getExtensionFromUrl(ref.referenceImageUrl)
+          );
+          if (!mimeType.startsWith('video/')) {
+            throw new NonRetryableError(
+              `${ref.token ?? 'A reference clip'} is not a video file`
+            );
+          }
+          try {
+            await requireUploadRights(scopedDb.liveRead, [
+              ref.referenceImageUrl,
+            ]);
+          } catch (error) {
+            if (!(error instanceof AttestationRequiredError)) throw error;
+            throw new NonRetryableError(
+              `${ref.token ?? 'A reference clip'}: ${error.message}`
+            );
+          }
+        }
+      });
+    }
+
+    // Step 3: Submit + poll with a bounded same-model retry on content-flag
+    // rejections (#881). Each attempt resubmits a fresh fal job; a content
+    // rejection from submit OR poll re-rolls the whole cycle, while
+    // genuine transient errors still throw and lean on CF's per-step retries.
+    // Non-content provider failures remain a hard stop as before. A clip that
+    // exhausts its budget fails only its own slot — motion-batch's
+    // Promise.allSettled keeps sibling clips and the sequence alive.
+    let videoUrl = '';
+    // Raw usage for the clip that succeeded — `motionCostFromUsage` turns
+    // this into a billed cost + unit count below, switching on the job's via.
+    let billedUsage: TokenUsage | undefined;
+    let lastRejection: string | null = null;
+    // Every rejection in order: the rescue's may lack the `body.<field>`
+    // prefix the reseeds carried, so the final message classifies on all.
+    const rejections: string[] = [];
+    // The job behind the clip that ultimately succeeded — its `submittedAt` /
+    // `usedOwnKey` drive observation timing and credit deduction below.
+    let succeededJob: Awaited<ReturnType<typeof submitMotionJob>> | null = null;
+    // Rescue attempt (#1373): once the reseeds exhaust, one more submit with
+    // the remedy the flagged input calls for — a rewritten prompt when the
+    // prompt was flagged, the fallback video model when the still was (a
+    // flagged still cannot be reseeded or softened away). Both feed the final
+    // error text so the user learns which input to change.
+    let activeModel = model;
+    let softened = false;
+    // One length rewrite per run (#1754) — a second refusal after shortening
+    // means the shot itself is too long to say, which is the user's call.
+    let shortened = false;
+    // The manifest the in-flight version currently carries — repointed at the
+    // softened prompt version when the rescue rewrites it.
+    let renderManifest: VideoManifest | null = manifest ?? null;
+    const triedModels: (typeof model)[] = [model];
+    const maxAttempts = MAX_MOTION_ATTEMPTS + 1;
+
+    /** What the rewritten version must carry forward so staleness still reads. */
+    const loadPromptProvenance = (stepName: string) =>
+      step.do(stepName, async () => {
+        if (input.userEditProvenance) return input.userEditProvenance;
+        const original =
+          input.shotId && input.motionPromptVersionId
+            ? await scopedDb.claims.shotPromptVersions.getByIdForShot(
+                input.motionPromptVersionId,
+                input.shotId
+              )
+            : null;
+        return {
+          inputHash: original?.inputHash ?? null,
+          analysisModel: original?.analysisModel ?? null,
+        };
+      });
+
+    /**
+     * Append the rescue's rewrite as a prompt version and repoint the
+     * in-flight clip's manifest at it. Shared by the content soften (#1373)
+     * and the length shorten (#1754): both replace the prompt mid-run, and
+     * both must leave the original in Versions for the user to revert to.
+     *
+     * The rewrite is appended to history UNSELECTED (#1786): selecting it
+     * mid-run would clobber an edit the user made meanwhile and demote a
+     * regeneration they queued. A primary clip that wins its promote claim
+     * carries it into the selection at completion (`rescuedMotionPrompt`),
+     * and only if the shot still points at the prompt the run started from
+     * and no regeneration is queued.
+     *
+     * A single-shot soften passes the rewritten prose and the version's
+     * `audio` (#1773), so a later render still assembles dialogue and trailer
+     * from the structured parts. ponytail: a shorten, and a packed clip's
+     * soften, pass the model-assembled prompt (dialogue + trailer baked in)
+     * with null audio, and a later render from it appends the trailer again;
+     * structure the shorten the same way if that shows up.
+     */
+    const writeRescuedMotionPrompt = (
+      stepName: string,
+      text: string,
+      provenance: {
+        inputHash: string | null;
+        analysisModel: string | null;
+      },
+      source: 'softened' | 'shortened',
+      audio: MotionAudio | null = null
+    ) =>
+      step.do(stepName, async () => {
+        const shotId = input.shotId;
+        if (!shotId) return renderManifest;
+        const version = await scopedDb.shotPromptVersions.write({
+          shotId,
+          promptType: 'motion',
+          text,
+          audio,
+          // A rescue rewrote the text, so the row is the rewrite, not the spec.
+          source,
+          usesStartFrame: !input.referenceOnly,
+          inputHash: provenance.inputHash,
+          analysisModel: provenance.analysisModel,
+          createdBy: input.userId,
+          select: false,
+        });
+        if (!videoVersionId || !manifest) return manifest ?? null;
+        const rescued = manifest.map((e) => ({
+          ...e,
+          motionPromptVersionId: version.id,
+        }));
+        await scopedDb.videoVariants.update(videoVersionId, {
+          manifest: rescued,
+          inputHash: await computeVideoManifestInputHash(rescued, model),
+        });
+        return rescued;
+      });
+
+    let seedanceInternalRetried = false;
+    for (let attempt = 0; attempt <= MAX_MOTION_ATTEMPTS; attempt++) {
+      let retrySeedanceInternal = false;
+      let internalError = '';
+      const isRescue = attempt === MAX_MOTION_ATTEMPTS;
+      // A final from a draft sends no prompt and cannot change model
+      // (#1756): nothing to soften, nothing to swap.
+      if (isRescue && input.finalFromDraft) break;
+      if (isRescue) {
+        // A rejection with no `body.<field>` prefix (Veo's "could not
+        // generate", sensitive audio) is prompt-shaped: soften.
+        const flags = flaggedInputs(lastRejection ?? '');
+        // The fallback must be able to serve THIS shot. A reference-only shot
+        // flags `body.image_urls` (a reference sheet, not a still), which
+        // matches `flaggedInputs`' image test — so without this check the
+        // rescue would swap to Grok, commit the model onto `video_variants`,
+        // and then die inside `resolveMotionEndpoint` on a team with no xAI
+        // key. `canRenderReferenceOnly` knows the via, so Grok still rescues
+        // the shot wherever it genuinely can.
+        const fallbackCanServe =
+          !input.referenceOnly ||
+          (await canRenderReferenceOnly(
+            MOTION_CONTENT_FALLBACK_MODEL,
+            scopedDb.credentials
+          ));
+        // A draft never swaps vendor (#1756): the user asked for a cheap
+        // Seedance preview, and Grok has no draft mode, so the swap would
+        // bill a full clip on a row stamped 480p. The rejection surfaces and
+        // the user picks another model themselves.
+        const swapModel =
+          flags.image &&
+          model !== MOTION_CONTENT_FALLBACK_MODEL &&
+          fallbackCanServe &&
+          renderedResolution !== DRAFT_RESOLUTION;
+        // A flagged reference sheet cannot be softened away either (the sheet
+        // is the input, not the prose), so a reference-only shot with no
+        // usable fallback falls straight through to the terminal message
+        // rather than burning a rewrite that changes nothing. The same for
+        // refused reference AUDIO (#1756): the recording is the input.
+        const softenPrompt =
+          flags.prompt || (!flags.image && !flags.audioInput);
+        if (!swapModel && !softenPrompt) break;
+
+        const logMeta = {
+          kind: 'motion',
+          model,
+          shotId: input.shotId,
+          sequenceId: input.sequenceId,
+          rejection: lastRejection,
+        };
+        if (softenPrompt) {
+          logger.warn(
+            `[MotionWorkflow:cf] same-prompt reseeds exhausted; softening prompt for shot ${input.shotId}`,
+            { event: CONTENT_REJECTION_SOFTEN_EVENT, ...logMeta }
+          );
+          const provenance = await loadPromptProvenance(
+            'load-motion-prompt-provenance'
+          );
+          // A single shot softens its prose only (#1773): the dialogue lines
+          // live on the shot's dialogue node and the trailer is re-added by
+          // assembly, so neither is handed to the rewrite or baked into the
+          // saved version. A packed clip still softens its assembled prompt.
+          const structured =
+            input.motionPrompt &&
+            !(input.coveredShots && input.coveredShots.length > 1)
+              ? input.motionPrompt
+              : null;
+          let softenedText: string | null = null;
+          try {
+            const softer = await softenRejectedMotionPrompt(step, {
+              scopedDb,
+              workflowRunId,
+              sequenceId: input.sequenceId,
+              userId: input.userId,
+              // A run queued before #1786 carries the typed text on the
+              // payload; its `motionPrompt` is the pre-edit selection.
+              prompt: structured
+                ? (input.userEditText ?? structured.fullPrompt)
+                : prompt,
+              rejection: lastRejection ?? 'unknown rejection',
+              analysisModelId:
+                getAnalysisModelById(provenance.analysisModel ?? '')?.id ??
+                DEFAULT_ANALYSIS_MODEL,
+              shotId: input.shotId,
+              model,
+              reservationId: input.reservationId,
+            });
+            prompt = structured
+              ? assembleShotPrompt({ ...structured, fullPrompt: softer })
+              : softer;
+            softenedText = softer;
+            softened = true;
+          } catch (error) {
+            logger.warn(
+              `[MotionWorkflow:cf] failed to soften prompt for shot ${input.shotId}`,
+              { err: error, rejection: lastRejection }
+            );
+            if (!swapModel) break;
+          }
+          if (softenedText !== null && input.shotId) {
+            renderManifest = await writeRescuedMotionPrompt(
+              'write-softened-motion-prompt',
+              softenedText,
+              provenance,
+              'softened',
+              structured?.audio ?? null
+            );
+          }
+        }
+        if (swapModel) {
+          logger.warn(
+            `[MotionWorkflow:cf] still flagged; falling back to ${MOTION_CONTENT_FALLBACK_MODEL} for shot ${input.shotId}`,
+            {
+              event: CONTENT_REJECTION_FALLBACK_EVENT,
+              ...logMeta,
+              fromModel: model,
+              model: MOTION_CONTENT_FALLBACK_MODEL,
+            }
+          );
+          activeModel = MOTION_CONTENT_FALLBACK_MODEL;
+          triedModels.push(activeModel);
+          if (videoVersionId) {
+            const versionId = videoVersionId;
+            // The in-flight version moves to the fallback model's group so the
+            // switcher shows what actually rendered; the hash follows — over
+            // the softened manifest when the prompt was rescued too.
+            const hashManifest = renderManifest;
+            await step.do('switch-to-fallback-video-model', async () => {
+              await scopedDb.videoVariants.update(versionId, {
+                model: MOTION_CONTENT_FALLBACK_MODEL,
+                ...(hashManifest
+                  ? {
+                      inputHash: await computeVideoManifestInputHash(
+                        hashManifest,
+                        MOTION_CONTENT_FALLBACK_MODEL
+                      ),
+                    }
+                  : {}),
+              });
+            });
+          }
+        }
+      }
+      const tag =
+        (attempt === 0 ? '' : isRescue ? '-rescue' : `-retry-${attempt}`) +
+        (seedanceInternalRetried ? '-internal' : '');
+
+      // Step 3-pre: register the stills BytePlus must see as `asset://`
+      // (#1519). CreateAsset is paced by `BYTEPLUS_ASSET_WRITE_QPM`, so
+      // each create waits its turn with a durable `step.sleep` — outside
+      // the submit step, which therefore never holds a Worker open for a
+      // queue. Only when this model is actually going to Ark; a
+      // fal/xAI/Google submit needs none.
+      const submitVia = await step.do(`resolve-motion-via${tag}`, () =>
+        resolveMotionVia(activeModel, scopedDb.credentials)
+      );
+      // A final from a draft sends no stills (#1756): Ark reuses the draft's.
+      const arkAssets =
+        submitVia === 'byteplus' && !input.finalFromDraft
+          ? await ingestArkAssets(step, {
+              prefix: `motion${tag}`,
+              stills: arkStillsForMotion({
+                imageUrl: startImageUrl ?? undefined,
+                referenceImages,
+              }),
+              ledger: scopedDb.bytePlusAssets,
+              owner: assetLeaseOwner('motion', event.instanceId),
+              credentials: scopedDb.credentials,
+            })
+          : {};
+
+      // Step 3a: Submit. A content rejection surfaces as a sentinel (not
+      // thrown) so the loop owns the retry; a non-content 422 stays a hard
+      // stop; anything else throws for CF's per-step retry.
+      const submitOutcome = await step.do(`submit-motion${tag}`, async () => {
+        // Surface the same-model content-flag re-roll (#881) as in-flight retry
+        // state so the scenes UI shows "Retrying (N/4)…" instead of a spinner
+        // indistinguishable from a hang (#882). `attempt` is 0-indexed; show it
+        // 1-based. The rescue emit also flags what changed (#1373).
+        if (attempt > 0 && input.shotId && input.sequenceId) {
+          await getGenerationChannel(input.sequenceId).emit(
+            'generation.video:progress',
+            {
+              shotId: input.shotId,
+              status: 'generating',
+              phase: 'retrying',
+              attempt: attempt + 1,
+              maxAttempts,
+              model: activeModel,
+              variantOnly: input.variantOnly,
+              ...(isRescue
+                ? {
+                    promptSoftened: softened,
+                    modelFallback: activeModel !== model,
+                  }
+                : {}),
+            }
+          );
+        }
+        try {
+          const job = await submitMotionJob({
+            // `??`: a run queued before #2036 has no such field, and is not
+            // an edit.
+            heldSeedanceEditSeconds: input.seedanceEditSeconds ?? null,
+            imageUrl: startImageUrl ?? undefined,
+            referenceOnly: input.referenceOnly,
+            prompt,
+            model: activeModel,
+            duration,
+            fps: input.fps,
+            motionBucket: input.motionBucket,
+            aspectRatio: input.aspectRatio,
+            ...(input.resolution && { resolution: input.resolution }),
+            generateAudio: input.generateAudio,
+            // Cast/element reference images (#873) — emitted by every model
+            // with a reference-to-video route (`MOTION_REFERENCE_ENDPOINTS`)
+            // and by the native xAI / Ark / Google inline vias; the rest
+            // substitute tokens with descriptions.
+            referenceImages,
+            credentials: scopedDb.credentials,
+            arkAssets,
+            multiPrompt,
+            draft: input.draft,
+            finalFromDraftTaskId: input.finalFromDraft?.taskId,
+          });
+          return { ok: true as const, job };
+        } catch (error) {
+          if (isContentRejectionError(error)) {
+            return {
+              ok: false as const,
+              rejection: extractFalErrorMessage(error),
+            };
+          }
+          // A ceiling the via really enforces (#1754) — ours, thrown before
+          // the request, or the provider's own 422. Not a hard stop and not
+          // worth a CF retry: the loop shortens the prompt and resubmits.
+          if (isPromptTooLongError(error)) {
+            return {
+              ok: false as const,
+              tooLong: true as const,
+              rejection: extractFalErrorMessage(error),
+            };
+          }
+          // Refused before anything was sent, and would be again.
+          if (error instanceof UnusableReferencesError) {
+            throw new NonRetryableError(error.message);
+          }
+          const providerMessage = extractFalErrorMessage(error);
+          const refusal = seedanceSubmitRefusal(providerMessage, submitVia);
+          if (refusal) {
+            logger.warn(
+              `[MotionWorkflow] Ark refused the submit for ${videoVersionId}: ${providerMessage}`
+            );
+            throw new NonRetryableError(refusal);
+          }
+          if (
+            error instanceof Error &&
+            'status' in error &&
+            error.status === 422
+          ) {
+            throw new NonRetryableError(
+              `Motion job submission rejected (422): ${extractFalErrorMessage(error)}`
+            );
+          }
+          // Not a 422 / not a content flag → transient. Let CF retry the step.
+          throw error;
+        }
+      });
+
+      if (!submitOutcome.ok) {
+        lastRejection = submitOutcome.rejection;
+        if ('tooLong' in submitOutcome) {
+          // Reseeding the same prompt cannot fix a length refusal, so this
+          // does not join the content-rejection ladder: shorten once, save
+          // the rewrite as a prompt version the user can see and revert
+          // (#1754), and resubmit. A second refusal is terminal.
+          const hardLimit = videoPromptHardLimit(activeModel);
+          if (shortened || hardLimit === undefined) {
+            throw new NonRetryableError(
+              `${IMAGE_TO_VIDEO_MODELS[activeModel].name} refused this prompt for its length: ${submitOutcome.rejection}`
+            );
+          }
+          logger.warn(
+            `[MotionWorkflow:cf] prompt over ${IMAGE_TO_VIDEO_MODELS[activeModel].name}'s ${hardLimit}-character limit for shot ${input.shotId}; shortening`,
+            {
+              event: 'prompt_shortened_to_fit',
+              kind: 'motion',
+              model: activeModel,
+              shotId: input.shotId,
+              sequenceId: input.sequenceId,
+              promptLength: prompt.length,
+              hardLimit,
+            }
+          );
+          const provenance = await loadPromptProvenance(
+            `load-motion-prompt-provenance-shorten-${attempt}`
+          );
+          prompt = await shortenOverlongMotionPrompt(step, {
+            scopedDb,
+            workflowRunId,
+            sequenceId: input.sequenceId,
+            userId: input.userId,
+            prompt,
+            rejection: submitOutcome.rejection,
+            analysisModelId:
+              getAnalysisModelById(provenance.analysisModel ?? '')?.id ??
+              DEFAULT_ANALYSIS_MODEL,
+            shotId: input.shotId,
+            model: IMAGE_TO_VIDEO_MODELS[activeModel].name,
+            reservationId: input.reservationId,
+            limit: hardLimit,
+            name: `shorten-motion-prompt-${attempt}`,
+          });
+          shortened = true;
+          renderManifest = await writeRescuedMotionPrompt(
+            `write-shortened-motion-prompt-${attempt}`,
+            prompt,
+            provenance,
+            'shortened'
+          );
+          continue;
+        }
+        rejections.push(lastRejection);
+        logger.warn(
+          `[MotionWorkflow:cf] content-flag rejection on submit attempt ${attempt + 1}/${MAX_MOTION_ATTEMPTS} for shot ${input.shotId}: ${submitOutcome.rejection}`
+        );
+        // A final resubmits the same task id (#1756): one refusal is the answer.
+        if (input.finalFromDraft) break;
+        continue;
+      }
+      const { job } = submitOutcome;
+
+      // The draft's task id is the handle "Render at quality" needs (#1756).
+      // Stamped per attempt: a content-flag re-roll is a new Ark task.
+      if (job.draftTaskId && videoVersionId) {
+        const versionId = videoVersionId;
+        const draftTaskId = job.draftTaskId;
+        await step.do(`stamp-draft-task${tag}`, async () => {
+          await scopedDb.videoVariants.update(versionId, { draftTaskId });
+        });
+      }
+
+      // Step 3b: Batched polling — tight loop inside each step.do, checkpoint
+      // between batches. A content-flag failure ends this attempt and re-rolls;
+      // a non-content failure is a hard stop.
+      let rejected: string | null = null;
+      for (let batch = 0; batch < MAX_BATCHES; batch++) {
+        if (batch > 0) {
+          await step.sleep(`motion-batch-wait-${attempt}-${batch}`, 1);
+        }
+
+        const poll = await step.do(
+          // The suffix keeps the second job's polls apart from the first's.
+          `motion-poll-batch-${attempt}-${batch}${seedanceInternalRetried ? '-internal' : ''}`,
+          async (): Promise<MotionPollOutcome> => {
+            const deadline = Date.now() + POLL_BATCH_DURATION_MS;
+
+            while (Date.now() < deadline) {
+              let pollResult: Awaited<ReturnType<typeof pollMotionJob>>;
+              try {
+                pollResult = await pollMotionJob(
+                  job.jobId,
+                  job.modelKey,
+                  scopedDb.credentials,
+                  job.via,
+                  job.endpointId
+                );
+              } catch (error) {
+                if (isContentRejectionError(error)) {
+                  return {
+                    kind: 'rejected',
+                    rejection: extractFalErrorMessage(error),
+                  };
+                }
+                if (
+                  error instanceof Error &&
+                  'status' in error &&
+                  error.status === 422
+                ) {
+                  return {
+                    kind: 'failed',
+                    error: `Motion job polling failed (422): ${extractFalErrorMessage(error)}`,
+                  };
+                }
+                // Transient → let CF retry the poll step.
+                throw error;
+              }
+
+              if (pollResult.progress !== undefined) {
+                logger.info(
+                  `[MotionWorkflow:cf] Progress: ${pollResult.progress}%`
+                );
+              }
+
+              if (pollResult.status === 'completed') {
+                if (pollResult.url) {
+                  let url = pollResult.url;
+                  // Omni Flash defaults to inline base64. A data: MP4 is
+                  // several MB and will fail the 1 MiB step.do cap — park
+                  // it in R2 before this result is checkpointed.
+                  if (!videoUrlFitsWorkflowCheckpoint(url)) {
+                    if (!input.teamId || !input.sequenceId || !input.shotId) {
+                      throw new Error(
+                        'Native Gemini returned inline video bytes too large to checkpoint'
+                      );
+                    }
+                    const googleKey =
+                      job.via === 'google'
+                        ? await scopedDb.credentials.resolveOptionalKey(
+                            'google'
+                          )
+                        : undefined;
+                    const stored = await uploadVideoToStorage({
+                      videoUrl: url,
+                      teamId: input.teamId,
+                      sequenceId: input.sequenceId,
+                      shotId: input.shotId,
+                      sequenceTitle: input.sequenceTitle ?? 'sequence',
+                      sceneTitle: input.sceneTitle,
+                      googleApiKey: googleKey?.key,
+                    });
+                    if (!stored.success) {
+                      throw new Error(stored.error);
+                    }
+                    url = stored.url;
+                  }
+                  logger.info(`[MotionWorkflow:cf] Generation completed`);
+                  return {
+                    kind: 'completed',
+                    url,
+                    usage: pollResult.usage,
+                  };
+                }
+                return classifyMotionFailure(
+                  pollResult.error || 'No URL returned'
+                );
+              }
+              if (pollResult.status === 'failed') {
+                return classifyMotionFailure(
+                  pollResult.error || 'Unknown error'
+                );
+              }
+
+              await new Promise((resolve) =>
+                setTimeout(resolve, POLL_INTERVAL_MS)
+              );
+            }
+
+            return { kind: 'pending' };
+          }
+        );
+
+        if (poll.kind === 'completed') {
+          videoUrl = poll.url;
+          billedUsage = poll.usage;
+          break;
+        }
+        if (poll.kind === 'rejected') {
+          rejected = poll.rejection;
+          break;
+        }
+        if (poll.kind === 'failed') {
+          // One new job, not a Cloudflare retry of the failed task (#2036).
+          if (
+            !seedanceInternalRetried &&
+            !isRescue &&
+            isSeedanceInternalServiceError(poll.error, job.via)
+          ) {
+            retrySeedanceInternal = true;
+            internalError = poll.error;
+            break;
+          }
+          const explained = explainSeedanceFailure(poll.error, job.via);
+          if (explained) {
+            logger.warn(
+              `[MotionWorkflow] Ark job ${job.jobId} failed for ${videoVersionId}: ${poll.error}`
+            );
+          }
+          throw new NonRetryableError(explained ?? poll.error);
+        }
+        // pending → poll the next batch
+      }
+
+      if (videoUrl) {
+        succeededJob = job;
+        if (attempt > 0) {
+          logger.info(
+            `[MotionWorkflow:cf] content-flag retry rescued clip for shot ${input.shotId} on attempt ${attempt + 1}`,
+            {
+              event: CONTENT_REJECTION_RETRY_EVENT,
+              outcome: 'rescued',
+              kind: 'motion',
+              model,
+              attempts: attempt + 1,
+              shotId: input.shotId,
+              sequenceId: input.sequenceId,
+            }
+          );
+        }
+        break;
+      }
+
+      if (retrySeedanceInternal) {
+        seedanceInternalRetried = true;
+        logger.warn(
+          `[MotionWorkflow] Ark job ${job.jobId} failed for ${videoVersionId}; submitting one new job: ${internalError}`
+        );
+        await step.sleep(
+          'seedance-internal-backoff',
+          SEEDANCE_INTERNAL_BACKOFF
+        );
+        // Keeps the new job off the content-flag budget.
+        attempt -= 1;
+        continue;
+      }
+
+      if (rejected) {
+        lastRejection = rejected;
+        rejections.push(rejected);
+        logger.warn(
+          `[MotionWorkflow:cf] content-flag rejection on poll attempt ${attempt + 1}/${MAX_MOTION_ATTEMPTS} for shot ${input.shotId}: ${rejected}`
+        );
+        // A final resubmits the same task id (#1756): same seed, same
+        // assets, same answer. One refusal is the answer.
+        if (input.finalFromDraft) break;
+        continue;
+      }
+
+      // Neither completed nor content-rejected → this attempt timed out. A
+      // timeout isn't a content flag; reseeding won't help and would burn
+      // another full poll budget, so stop here as before.
+      throw new Error(
+        `Motion generation timed out after ${(MAX_BATCHES * POLL_BATCH_DURATION_MS) / 60_000} minutes`
+      );
+    }
+
+    if (!videoUrl) {
+      logger.error(
+        `[MotionWorkflow:cf] content-flag retry exhausted for shot ${input.shotId} after ${triedModels.length > 1 || softened ? maxAttempts : MAX_MOTION_ATTEMPTS} attempts`,
+        {
+          event: CONTENT_REJECTION_RETRY_EVENT,
+          outcome: 'exhausted',
+          kind: 'motion',
+          model: activeModel,
+          attempts:
+            triedModels.length > 1 || softened
+              ? maxAttempts
+              : MAX_MOTION_ATTEMPTS,
+          shotId: input.shotId,
+          sequenceId: input.sequenceId,
+          rejection: lastRejection,
+          softened,
+          models: triedModels,
+        }
+      );
+      throw new NonRetryableError(
+        clipContentRejectionMessage({
+          rejections: rejections.length ? rejections : ['unknown rejection'],
+          models: triedModels.map((m) => IMAGE_TO_VIDEO_MODELS[m].name),
+          softened,
+          // This clip carried no still, so `flags.image` names a reference
+          // sheet and "Regenerate the still" would be a dead end.
+          ...(input.referenceOnly
+            ? {
+                inputs: {
+                  still: {
+                    name: 'a reference sheet',
+                    fix: 'Regenerate the flagged character, location or element reference',
+                  },
+                  prompt: 'the motion prompt',
+                },
+              }
+            : {}),
+        }),
+        'ContentRejectionExhausted'
+      );
+    }
+    if (!succeededJob) {
+      // Unreachable: a non-empty videoUrl is only ever set alongside its job.
+      throw new Error('Motion generation produced a video without a job');
+    }
+    // Capture into a const so the step closures below keep the non-null
+    // narrowing (a `let` could be reassigned, so TS widens it inside closures).
+    const job = succeededJob;
+
+    // The clip is rendered, so the `asset://` stills this job pinned are free
+    // to evict again (#1361). Nothing is deleted — they stay resident and
+    // reusable, which is the whole point of the pool; the lease only stops a
+    // sibling batch deleting a slot out from under an in-flight Seedance job.
+    // The failure half is in `onFailure`; the TTL covers only a run that dies
+    // without reaching either. Whatever via the clip finally rendered on: an
+    // earlier attempt may have leased stills on Ark and then re-rolled onto a
+    // model that is not there (#1531). Released by this run's owner, so a
+    // sibling shot still polling the same sheet keeps its own lease.
+    //
+    // Caught OUTSIDE the step (so its retries still run): a release that
+    // never lands must not throw away a rendered, paid-for clip. The lease
+    // TTL frees the stills instead.
+    try {
+      await step.do('release-byteplus-asset-leases', async () =>
+        scopedDb.bytePlusAssets.releaseOwner(
+          assetLeaseOwner('motion', event.instanceId)
+        )
+      );
+    } catch (releaseError) {
+      if (isEngineAbortError(releaseError)) throw releaseError;
+      logger.error(
+        `[MotionWorkflow:cf] Failed to release BytePlus asset leases for shot ${input.shotId}; the lease TTL frees them`,
+        { err: releaseError }
+      );
+    }
+
+    // Exact charge from the via's reported usage (the check-credits `cost`
+    // was only an estimate for the affordability gate). The via owns endpoint
+    // aliasing (fal Seedance-with-refs bills on its reference-to-video
+    // endpoint, #873) and unit normalisation.
+    //
+    // In its own step: this reads live pricing from D1, and every provider
+    // interaction above is already memoized in completed steps, so a failed
+    // read replays just this lookup instead of falling through to a $0 charge
+    // that the `actualCost > 0` guard below would silently skip (#1069).
+    const billing = await step.do('price-motion-generation', async () =>
+      motionCostFromUsage(job.via, billedUsage, {
+        modelKey: job.modelKey,
+        // The same question submit asked (#1559): references this model can
+        // actually carry. A shot whose only attachment is an audio element
+        // went to the prompt-only endpoint, and must be billed at its rate.
+        hasReferenceImages:
+          bindableReferences(
+            getMotionReferenceEndpoint(job.modelKey),
+            referenceImages ?? [],
+            Boolean(input.imageUrl)
+          ).length > 0,
+        referenceOnly: input.referenceOnly,
+      })
+    );
+    const actualCost = billing.cost;
+
+    // Motion is submitted to an async queue and collected by polling, so the
+    // `generateVideo()` call returns before the video exists — a middleware
+    // span there would time the submit and carry no cost, duration, or
+    // output. Record it here instead, where all three are known.
+    await step.do('record-motion-observation', async () => {
+      recordMediaGenerationSpan({
+        model: activeModel,
+        provider: job.via,
+        activity: 'video',
+        durationMs: Date.now() - job.submittedAt,
+        costMicros: actualCost,
+        unitsBilled: billing.unitsBilled,
+        inputTokens: billedUsage?.promptTokens,
+        outputTokens: billedUsage?.completionTokens,
+        usedOwnKey: job.usedOwnKey,
+        prompt,
+        outputUrl: videoUrl,
+        observationName: 'motion',
+        tags: ['motion'],
+        userId: input.userId,
+        sessionId: input.sequenceId,
+        metadata: { model: activeModel, shotId: input.shotId },
+      });
+    });
+
+    // Before the deduction guard — see recordFalUsageStep (#1069). Native
+    // providers whose units would corrupt a fal median skip the sample.
+    const falUsage = billing.recordFalUsage
+      ? await recordFalUsageStep(step, scopedDb, {
+          endpointId: billing.endpointId,
+          unitsBilled: billing.unitsBilled,
+          // The adapter's jobId is fal's request id — joins this charge to its
+          // billing-events record for the hourly reconcile.
+          requestId: job.jobId,
+        })
+      : {};
+
+    // Step 3: Upload video to storage. Both filename titles ride the payload
+    // (`input.sequenceTitle` / `input.sceneTitle`); a payload without them
+    // gets the static slug rather than a live read of the sequence row.
+    const { shotId } = input;
+    const storageResult = shotId
+      ? await step.do('upload-to-storage', async () => {
+          if (!input.teamId || !input.sequenceId) {
+            throw new Error('Missing teamId or sequenceId for storage upload');
+          }
+
+          const googleKey =
+            succeededJob.via === 'google'
+              ? await scopedDb.credentials.resolveOptionalKey('google')
+              : undefined;
+          const result = await uploadVideoToStorage({
+            videoUrl,
+            teamId: input.teamId,
+            sequenceId: input.sequenceId,
+            shotId,
+            sequenceTitle: input.sequenceTitle ?? 'sequence',
+            sceneTitle: input.sceneTitle,
+            googleApiKey: googleKey?.key,
+          });
+
+          if (!result.success) {
+            throw new Error('Failed to upload video');
+          }
+
+          return { path: result.path, url: result.url };
+        })
+      : undefined;
+    if (storageResult) videoUrl = storageResult.url;
+
+    // Charge only for a clip the team can see: a failed upload fails the run
+    // and onFailure zeroes the reservation (#1845).
+    //
+    // Settle the spawn-time reservation against fal's billed cost. If this
+    // run never reserved (BYOK / unpriced), deductWorkflowCredits falls back
+    // to an atomic try-deduct.
+    if (actualCost > 0 && input.teamId && !gatedUsedOwnKey) {
+      await step.do('deduct-credits', async () => {
+        await deductWorkflowCredits({
+          scopedDb,
+          costMicros: actualCost,
+          usedOwnKey: job.usedOwnKey,
+          description: `Motion generation (${activeModel})`,
+          idempotencyKey: `${event.instanceId}:motion`,
+          reservationId: input.reservationId,
+          metadata: {
+            ...falUsage,
+            model: activeModel,
+            shotId: input.shotId,
+            sequenceId: input.sequenceId,
+            duration: duration,
+          },
+          workflowName: 'MotionWorkflow:cf',
+        });
+      });
+    }
+
+    if (shotId && storageResult) {
+      // Step 4: Finalize the render — flip the `video_variants` version to
+      // `completed` and (for a primary render) repoint the shot's selection,
+      // mirroring `shots.video*` + the render segment's selection pointer (#990,
+      // see motion-workflow-persist).
+      await step.do('update-shot', async () => {
+        if (!videoVersionId || !sceneId || !input.sequenceId) {
+          // No open version (shotId present without the sequence-scoped
+          // dual-write) — nothing to finalize. The set-generating guard makes
+          // this unreachable for real triggers; logged for safety.
+          logger.warn(
+            `[MotionWorkflow:cf] No video version to finalize for shot ${shotId}; skipping`
+          );
+          return;
+        }
+        const outcome = await persistMotionCompletion({
+          scopedDb,
+          shotId,
+          sequenceId: input.sequenceId,
+          sceneId,
+          videoVersionId,
+          model: activeModel,
+          upload: { url: storageResult.url, path: storageResult.path },
+          actorId: input.userId,
+          variantOnly: input.variantOnly,
+          rescuedMotionPrompt: rescuedMotionPromptOf(
+            shotId,
+            manifest,
+            renderManifest
+          ),
+          emit: async (event, payload) => {
+            try {
+              await getGenerationChannel(input.sequenceId).emit(event, payload);
+            } catch (emitError) {
+              logger.error(
+                `[MotionWorkflow:cf] Failed to emit generation.video:progress for shot ${shotId}:`,
+                { err: emitError }
+              );
+            }
+          },
+        });
+
+        if (outcome.status === 'shot-deleted') {
+          logger.info(
+            `[MotionWorkflow:cf] Shot ${shotId} was deleted, skipping final update`
+          );
+        }
+        if (outcome.status === 'cancelled') {
+          logger.info(
+            `[MotionWorkflow:cf] version ${videoVersionId} was cancelled mid-render; discarding result`
+          );
+        }
+      });
+
+      // Provenance (#1180). Recorded even when the shot was deleted mid-render:
+      // the video is in R2 either way, and an untraceable object is exactly what
+      // this record exists to prevent. No content hash — a 1080p clip would have
+      // to be buffered whole to compute one; contentSha256 is unpopulated
+      // until we hash the small kinds. The storage key and fal request id
+      // carry the trace.
+      if (videoVersionId && input.teamId) {
+        const provenanceVersionId = videoVersionId;
+        const provenanceTeamId = input.teamId;
+        await step.do('record-provenance', async () => {
+          await recordProvenance(scopedDb.provenance, {
+            teamId: provenanceTeamId,
+            userId: input.userId,
+            assetKind: 'video_variant',
+            assetId: provenanceVersionId,
+            storageKey: buildR2Key(STORAGE_BUCKETS.VIDEOS, storageResult.path),
+            provider: job.via,
+            model: activeModel,
+            providerRequestId: job.jobId,
+            workflowRunId: event.instanceId,
+            prompt,
+            sequenceId: input.sequenceId,
+            shotId,
+            // Image-to-video: the start frame is a reference image, and whether
+            // one was supplied is the first question in a likeness complaint.
+            referenceImageCount: input.imageUrl ? 1 : 0,
+          });
+        });
+      }
+    }
+
+    // Return the video URL and duration
+    return { videoUrl, duration };
+  }
+
+  protected override async onFailure({
+    event,
+    error,
+    scopedDb,
+  }: {
+    event: Readonly<WorkflowEvent<MotionWorkflowInput>>;
+    error: string;
+    scopedDb: WorkflowScopedDb;
+  }): Promise<void> {
+    const input = event.payload;
+    const model = input.model || DEFAULT_VIDEO_MODEL;
+
+    // The success span is recorded in runImpl, which every failure exit skips
+    // (submit 422, hard poll failure, poll-budget timeout, content-rejection
+    // exhaustion, step-retry exhaustion). Emitting here — the one choke point
+    // all of them pass through — is what keeps motion's error rate visible in
+    // PostHog alongside image and audio. No duration: the start time lives in
+    // a step return this hook can't see.
+    const via = await resolveMotionVia(model, scopedDb.credentials);
+    const shown = explainSeedanceFailure(error, via) ?? error;
+    recordMediaGenerationSpan({
+      model,
+      provider: via,
+      activity: 'video',
+      prompt: input.prompt,
+      errorType: isContentRejectionError(error)
+        ? 'content_filter'
+        : 'provider_error',
+      errorMessage: error,
+      observationName: 'motion',
+      tags: ['motion'],
+      userId: input.userId,
+      sessionId: input.sequenceId,
+      metadata: { model, shotId: input.shotId },
+    });
+
+    // Motion is always sequence-scoped (every trigger sets both ids), and the
+    // dual-write needs sequenceId for the `video_variants` version — so gate on
+    // both.
+    if (input.shotId && input.sequenceId) {
+      const { shotId, sequenceId } = input;
+      await persistMotionFailure({
+        scopedDb,
+        shotId,
+        model,
+        error: shown,
+        workflowRunId: event.instanceId,
+        variantOnly: input.variantOnly,
+        emit: async (event2, payload) => {
+          try {
+            await getGenerationChannel(sequenceId).emit(event2, payload);
+          } catch (emitError) {
+            logger.error(
+              `[MotionWorkflow:cf] Failed to emit generation.video:progress for shot ${shotId}:`,
+              { err: emitError }
+            );
+          }
+        },
+      });
+    }
+
+    if (isContentRejectionError(error)) {
+      logger.warn(
+        `[MotionWorkflow:cf] shot ${input.shotId} failed a content checker`,
+        {
+          event: CONTENT_REJECTION_EVENT,
+          kind: 'motion',
+          model,
+          shotId: input.shotId,
+          sequenceId: input.sequenceId,
+          error,
+        }
+      );
+    }
+
+    // Unpin this shot's ACR slots (#1361), the lease half of what
+    // `zeroReservation` does for credits in the batch's own onFailure. Without
+    // it a failed run holds its slots for the full TTL, which is how a bad
+    // batch starves the next good one. Last, and not caught: this runs inside
+    // the base class's `emit-failure` step, so a throw retries the step, and
+    // the base class keeps the real failure message if it never succeeds.
+    //
+    // Only this run's own leases. The batch parent must NOT sweep the whole
+    // fan-out here — a terminal parent does not imply dead children (#839),
+    // and unpinning a slot a live sibling is still polling is exactly the 400
+    // the lease exists to prevent.
+    await scopedDb.bytePlusAssets.releaseOwner(
+      assetLeaseOwner('motion', event.instanceId)
+    );
+
+    logger.error(
+      `[MotionWorkflow:cf] Motion generation failed for shot ${input.shotId}: ${error}`
+    );
+  }
+}

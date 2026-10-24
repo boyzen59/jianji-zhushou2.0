@@ -1,0 +1,456 @@
+/**
+ * The `characterBibleWorkflow` durable workflow.
+ *
+ * Fans out to the `CharacterSheetWorkflow` child via Pattern 3
+ * (`spawnAndAwaitChild`) rather than generating each sheet inline, so the
+ * parent stays thin and every child gets its own retry budget. See
+ * await-child.ts.
+ */
+
+import { DEFAULT_IMAGE_MODEL } from '@/models/models';
+import { sheetStartedSummary } from '@/sequences/model-label';
+import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
+import type { CharacterMinimal } from '@/platform/server/db/schema';
+import { buildCharacterInsert } from './cast-records';
+import {
+  assertQueuedWithLooks,
+  computeCharacterSheetHashFromDto,
+} from './sheet-snapshots';
+import type { SheetPayload } from './sheet-snapshots';
+import { spawnAndAwaitChild } from '@/platform/server/workflow/await-child';
+import { contentRejectionSummary } from '@/models/content-rejection';
+import { OpenStoryWorkflowEntrypoint } from '@/platform/server/workflow/base-workflow';
+import { WorkflowValidationError } from '@/platform/server/workflow/errors';
+import type {
+  CharacterBibleWorkflowInput,
+  CharacterSheetWorkflowInput,
+  CharacterSheetWorkflowResult,
+  CharacterVoiceWorkflowInput,
+  CharacterVoiceWorkflowResult,
+} from '@/platform/server/workflow/types';
+import { SEED_VOICE_DEFAULT_TAKES } from '@/cast/seed-voice';
+import { usesVoice } from '@/cast/voice';
+import { newVoiceProvider } from '@/models/server/seed-speech-config';
+import type { WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
+import { getLogger } from '@/platform/logger';
+
+const logger = getLogger(['openstory', 'workflow', 'character-bible']);
+
+const PARENT_BINDING_NAME = 'CHARACTER_BIBLE_WORKFLOW';
+
+export class CharacterBibleWorkflow extends OpenStoryWorkflowEntrypoint<CharacterBibleWorkflowInput> {
+  protected override readonly failureLabel = 'Character design';
+
+  protected override async runImpl(
+    event: Readonly<WorkflowEvent<CharacterBibleWorkflowInput>>,
+    step: WorkflowStep,
+    scopedDb: WorkflowScopedDb
+  ): Promise<CharacterMinimal[]> {
+    const input = event.payload;
+
+    // Step 1: Insert character records into the database. Always runs, so a
+    // resumed run finds its rows already present.
+    const createdCharacters = await step.do(
+      'create-character-records',
+      async () => {
+        if (!input.sequenceId || !input.userId || !input.teamId) {
+          return [];
+        }
+
+        // Upsert on (sequenceId, characterId): the Script stage already
+        // created these rows sheet-less, so this keeps their ids and flips
+        // them to `generating`. A voice-only character (#1585) is completed
+        // by design with no sheet version, so nothing waits on it. A failed
+        // sheet stays `failed` on the row; the parent stays at Casting (#1727).
+        // The upsert's returned row is the one read of live state here: it
+        // says whether the character already holds a voice (never design a
+        // second — a saved voice is an account-wide slot) and whether the
+        // user switched voices off for it while the run was stopped.
+        const results: Array<{
+          id: string;
+          characterId: string;
+          bibleVersionId: string | null;
+          lookId: string;
+          lookVersionId: string;
+          lookName: string;
+          lookStyling: string | null;
+          voiceId: string | null;
+          voiceDescription: string | null;
+          useVoice: boolean | null;
+        }> = [];
+        for (const character of input.characterBible) {
+          const created = await scopedDb.characters.create(
+            buildCharacterInsert({
+              sequenceId: input.sequenceId,
+              character,
+              sheetStatus: character.voiceOnly ? 'completed' : 'generating',
+            }),
+            { source: 'analysis', createdBy: null }
+          );
+          // The sheet this run draws is the default look's (#2015), which
+          // the upsert just wrote the analysed clothing onto.
+          const look = created.looks.find((l) => l.id === created.lookId);
+          if (!look) {
+            throw new WorkflowValidationError(
+              `Character ${created.id} has no default look`
+            );
+          }
+          results.push({
+            id: created.id,
+            characterId: created.characterId,
+            bibleVersionId: created.selectedBibleVersionId,
+            lookId: look.id,
+            lookVersionId: look.lookVersionId,
+            lookName: look.name,
+            lookStyling: look.styling,
+            voiceId: created.voiceId,
+            voiceDescription: created.voiceDescription,
+            useVoice: created.useVoice,
+          });
+        }
+        return results;
+      }
+    );
+
+    if (input.characterBible.length === 0) {
+      return [];
+    }
+    // A step result cached before #2015 carries no look.
+    assertQueuedWithLooks(...createdCharacters);
+
+    // Create mapping from characterId to database id
+    const characterIdToDbId = new Map<string, string>(
+      createdCharacters.map((c) => [c.characterId, c.id])
+    );
+    // What each row landed on: its bible version (#1600) and default look
+    // (#2015). The sheet claim is taken only while both still hold.
+    const createdByDbId = new Map(createdCharacters.map((c) => [c.id, c]));
+    /** The returned row wears its default look, the one this run drew. */
+    const defaultLookOf = (characterDbId: string) => {
+      const created = createdByDbId.get(characterDbId);
+      if (!created) {
+        throw new WorkflowValidationError(
+          `Character ${characterDbId} was not created by this run`
+        );
+      }
+      return {
+        lookId: created.lookId,
+        lookName: created.lookName,
+        // The run draws the default look only, so the rows it hands back
+        // wear it and list no other: a scene that picks another look gets
+        // that look's sheet from the plan's references wave, which reads the
+        // looks from D1.
+        looks: [],
+      };
+    };
+
+    const characterSheetBinding = this.env.CHARACTER_SHEET_WORKFLOW;
+
+    const imageModel = input.imageModel ?? DEFAULT_IMAGE_MODEL;
+
+    // Voice-only characters get no child: nothing to draw (#1585).
+    const sheetCharacters = input.characterBible.filter((c) => !c.voiceOnly);
+    const voiceOnlyCharacters = input.characterBible.filter((c) => c.voiceOnly);
+    if (voiceOnlyCharacters.length > 0) {
+      logger.info(
+        `[CharacterBibleWorkflow:cf] Skipping sheets for ${voiceOnlyCharacters.length} voice-only character(s): ` +
+          voiceOnlyCharacters.map((c) => c.name).join(', ')
+      );
+    }
+
+    // Step 2: Fan out one CharacterSheetWorkflow child per on-screen character. Spawns
+    // happen in parallel via Promise.all; the awaits use Promise.allSettled
+    // so a single timed-out child does not tank the entire parent run.
+    const spawnPromises = sheetCharacters.map(async (character, index) => {
+      const characterDbId = characterIdToDbId.get(character.characterId);
+      if (!characterDbId) {
+        throw new WorkflowValidationError(
+          `[CharacterBibleWorkflow:cf] No DB id found for character ${character.characterId}; ` +
+            `create-character-records did not return a matching row`
+        );
+      }
+
+      const created = createdByDbId.get(characterDbId);
+      // A created row means `create-character-records` had the sequence.
+      const sheetSequenceId = input.sequenceId;
+      if (!created || !sheetSequenceId) {
+        throw new WorkflowValidationError(
+          `[CharacterBibleWorkflow:cf] No created row for ${characterDbId}`
+        );
+      }
+      const unclaimedFields: SheetPayload<CharacterSheetWorkflowInput> = {
+        userId: input.userId,
+        teamId: input.teamId,
+        sequenceId: input.sequenceId,
+        reservationId: input.reservationId,
+        characterDbId,
+        lookId: created.lookId,
+        lookVersionId: created.lookVersionId,
+        // The bible run draws each character's default look, which has no
+        // face to be drawn from.
+        face: null,
+        lookStyling: created.lookStyling,
+        // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard: a result cached before #1600
+        bibleVersionId: created.bibleVersionId ?? null,
+        characterName: character.name,
+        // The bible the row holds (`buildCharacterInsert`), so the stamped
+        // hash matches what a regenerate or a staleness check computes from
+        // the row (#1113).
+        characterMetadata: character,
+        imageModel,
+      };
+      // A pipeline sheet is tracked like any other (#1113): stamped with its
+      // input hash, and landed through a claim a bible edit revokes. The
+      // claim is conditional (#1863): an edit between the snapshot above and
+      // this write found no claim to revoke, so the claim is not taken and
+      // the run parks its sheet.
+      const unclaimed = {
+        ...unclaimedFields,
+        snapshotInputHash:
+          await computeCharacterSheetHashFromDto(unclaimedFields),
+      };
+      const sheetVersionId = await step.do(
+        `claim-character-sheet-${index}`,
+        async () =>
+          (
+            await scopedDb.characterLooks.claimSheet(
+              unclaimedFields.lookId,
+              unclaimedFields,
+              {
+                markGenerating: false,
+                activity: {
+                  sequenceId: sheetSequenceId,
+                  actorId: input.userId,
+                  summary: sheetStartedSummary(character.name, imageModel),
+                },
+              }
+            )
+          ).versionId
+      );
+      const childPayload: CharacterSheetWorkflowInput = {
+        ...unclaimed,
+        sheetVersionId,
+      };
+
+      const childResult = await spawnAndAwaitChild<
+        CharacterSheetWorkflowInput,
+        CharacterSheetWorkflowResult
+      >(step, {
+        binding: characterSheetBinding,
+        parentBindingName: PARENT_BINDING_NAME,
+        parentInstanceId: event.instanceId,
+        childId: `character-sheet:${characterDbId}`,
+        childPayload,
+        spawnStepName: `spawn-character-sheet-${index}`,
+        awaitStepName: `await-character-sheet-${index}`,
+        timeout: '30 minutes',
+      });
+
+      return {
+        character,
+        characterDbId,
+        childResult,
+      };
+    });
+
+    // Voices (#1553 / #1715) ride alongside the sheets: insert a generating
+    // husk, then spawn one child per speaking character that resolves
+    // `usesVoice()` true and has none yet. A failed child is logged (its own
+    // `onFailure` emitted the realtime `failed` event for the card) and the
+    // run goes on — that character's lines just have no designed voice for
+    // dialogue TTS (#1554). If spawn never starts, this parent fails the husk.
+    const sequenceId = input.sequenceId;
+    const voiceByCharacterId = new Map<string, string>();
+    for (const row of createdCharacters) {
+      if (row.voiceId) voiceByCharacterId.set(row.characterId, row.voiceId);
+    }
+    const voicePromises = createdCharacters
+      .filter(
+        (row) =>
+          sequenceId !== undefined &&
+          input.speakingCharacterIds.includes(row.characterId) &&
+          usesVoice(row, { generateVoices: input.generateVoices }) &&
+          !row.voiceId
+      )
+      .map(async (row) => {
+        const character = input.characterBible.find(
+          (c) => c.characterId === row.characterId
+        );
+        if (!character || sequenceId === undefined) return;
+        let huskId: string | undefined;
+        try {
+          const claim = await step.do(
+            `mark-voice-generating-${row.characterId}`,
+            async () =>
+              await scopedDb.characters.createPendingVoiceClaim(
+                row.id,
+                input.userId,
+                {
+                  activity: {
+                    sequenceId,
+                    summary: `Started a voice for ${character.name}`,
+                  },
+                }
+              )
+          );
+          huskId = claim.version.id;
+          if (!claim.created && claim.version.workflowRunId) {
+            return;
+          }
+          const childPayload: CharacterVoiceWorkflowInput = {
+            userId: input.userId,
+            teamId: input.teamId,
+            sequenceId,
+            reservationId: input.reservationId,
+            characterDbId: row.id,
+            characterBible: character,
+            voiceDescription: row.voiceDescription ?? '',
+            analysisModelId: input.analysisModelId,
+            voiceProvider: newVoiceProvider(),
+            takes: SEED_VOICE_DEFAULT_TAKES,
+            targetVersionId: claim.version.id,
+          };
+          const result = await spawnAndAwaitChild<
+            CharacterVoiceWorkflowInput,
+            CharacterVoiceWorkflowResult
+          >(step, {
+            binding: this.env.CHARACTER_VOICE_WORKFLOW,
+            parentBindingName: PARENT_BINDING_NAME,
+            parentInstanceId: event.instanceId,
+            childId: `character-voice:${row.id}`,
+            childPayload,
+            spawnStepName: `spawn-character-voice-${row.characterId}`,
+            awaitStepName: `await-character-voice-${row.characterId}`,
+            timeout: '30 minutes',
+          });
+          if (result.voiceId) {
+            voiceByCharacterId.set(row.characterId, result.voiceId);
+          }
+        } catch (err) {
+          logger.error(
+            `[CharacterBibleWorkflow:cf] Child character-voice failed for ${character.name}:`,
+            { err }
+          );
+          // Spawn never started → child onFailure will not run. Fail the
+          // husk so the unique live claim does not block Generate.
+          if (huskId) {
+            await scopedDb.characters.markVoiceClaimTerminal(
+              huskId,
+              'failed',
+              err instanceof Error ? err.message : String(err)
+            );
+          }
+        }
+      });
+
+    const settled = await Promise.allSettled(spawnPromises);
+    await Promise.all(voicePromises);
+
+    const seqCharacters: CharacterMinimal[] = [];
+    const failures: { name: string; reason: string }[] = [];
+    for (const [index, outcome] of settled.entries()) {
+      if (outcome.status === 'rejected') {
+        // Keep the sibling sheets and let the parent stay at Casting so the
+        // user can retry the misses (#1727). The child's `onFailure` already
+        // wrote `failed` on the row and emitted the realtime event.
+        const character = sheetCharacters[index];
+        const name = character?.name ?? `index ${index}`;
+        const reason =
+          outcome.reason instanceof Error
+            ? outcome.reason.message
+            : String(outcome.reason);
+        logger.error(
+          `[CharacterBibleWorkflow:cf] Child character-sheet failed for ${name}:`,
+          {
+            err: outcome.reason,
+          }
+        );
+        failures.push({ name, reason });
+        if (!character) continue;
+        const characterDbId = characterIdToDbId.get(character.characterId);
+        if (!characterDbId) continue;
+        seqCharacters.push({
+          ...defaultLookOf(characterDbId),
+          id: characterDbId,
+          characterId: character.characterId,
+          name: character.name,
+          sheetImageUrl: null,
+          sheetStatus: 'failed' as const,
+          sheetInputHash: null,
+          selectedSheetVersionId: null,
+          physicalDescription: character.physicalDescription,
+          voiceOnly: false,
+          isPerson: character.isPerson,
+          voiceId: voiceByCharacterId.get(character.characterId) ?? null,
+          consistencyTag: character.consistencyTag,
+        });
+        continue;
+      }
+
+      const { character, characterDbId, childResult } = outcome.value;
+
+      seqCharacters.push({
+        ...defaultLookOf(characterDbId),
+        id: characterDbId,
+        characterId: character.characterId,
+        name: character.name,
+        sheetImageUrl: childResult.sheetImageUrl,
+        sheetStatus: 'completed' as const,
+        sheetInputHash: null,
+        selectedSheetVersionId: childResult.sheetVersionId ?? null,
+        physicalDescription: character.physicalDescription,
+        voiceOnly: false,
+        isPerson: character.isPerson,
+        voiceId: voiceByCharacterId.get(character.characterId) ?? null,
+        consistencyTag: character.consistencyTag,
+      });
+    }
+
+    for (const character of voiceOnlyCharacters) {
+      const characterDbId = characterIdToDbId.get(character.characterId);
+      if (!characterDbId) {
+        throw new WorkflowValidationError(
+          `[CharacterBibleWorkflow:cf] No DB id found for voice-only character ${character.characterId}; ` +
+            `create-character-records did not return a matching row`
+        );
+      }
+      seqCharacters.push({
+        ...defaultLookOf(characterDbId),
+        id: characterDbId,
+        characterId: character.characterId,
+        name: character.name,
+        sheetImageUrl: null,
+        sheetStatus: 'completed' as const,
+        sheetInputHash: null,
+        selectedSheetVersionId: null,
+        physicalDescription: character.physicalDescription,
+        voiceOnly: true,
+        isPerson: character.isPerson,
+        voiceId: voiceByCharacterId.get(character.characterId) ?? null,
+        consistencyTag: character.consistencyTag,
+      });
+    }
+
+    if (failures.length > 0) {
+      logger.error(
+        contentRejectionSummary(failures) ??
+          `Character sheet generation failed for ${failures.length} of ${settled.length} character(s); ` +
+            `staying at Casting so the user can retry: ${failures.map((f) => `${f.name} (${f.reason})`).join('; ')}`
+      );
+    }
+
+    return seqCharacters;
+  }
+
+  protected override onFailure({
+    error,
+  }: {
+    event: Readonly<WorkflowEvent<CharacterBibleWorkflowInput>>;
+    error: string;
+    scopedDb: WorkflowScopedDb;
+  }): void {
+    logger.error(
+      `[CharacterBibleWorkflow:cf] Character sheet generation failed: ${error}`
+    );
+  }
+}

@@ -1,0 +1,316 @@
+import { describe, expect, it } from 'vitest';
+import { TEST_FAL_PRICING as FAL_PRICING } from './fal-pricing-fixture';
+import {
+  DEFAULT_IMAGE_MODEL,
+  DEFAULT_MUSIC_MODEL,
+  DEFAULT_VIDEO_MODEL,
+} from '@/models/models';
+import {
+  estimateCharacterSheetCount,
+  estimateStoryboardCost,
+} from './cost-estimation';
+import {
+  estimateTtsCost,
+  TYPICAL_DIALOGUE_CHARS_PER_SHOT,
+  VOICE_ESTIMATE_COST,
+} from './elevenlabs-pricing';
+import { multiplyMicros } from './money';
+import { estimateStoryboardPreflightCost } from './storyboard-preflight-cost';
+import { estimateSceneCount } from '@/sequences/time-estimate';
+
+const base = {
+  imageModel: DEFAULT_IMAGE_MODEL,
+  aspectRatio: '16:9' as const,
+  pricing: FAL_PRICING,
+};
+
+describe('estimateStoryboardPreflightCost', () => {
+  it('uses target duration for pre-Enhance short scripts (aligns with ActionCost)', () => {
+    const script = 'A detective finds a letter under the door.';
+    const withDuration = estimateStoryboardPreflightCost({
+      ...base,
+      script,
+      targetDurationSeconds: 30,
+      autoGenerateMotion: false,
+      autoGenerateMusic: false,
+    });
+    const expected = estimateStoryboardCost({
+      ...base,
+      estimatedSceneCount: estimateSceneCount(script, {
+        targetDurationSeconds: 30,
+      }),
+      autoGenerateMotion: false,
+      autoGenerateMusic: false,
+    });
+    expect(withDuration).toBe(expected);
+    expect(
+      estimateSceneCount(script, { targetDurationSeconds: 30 })
+    ).toBeGreaterThan(estimateSceneCount(script));
+  });
+
+  it('a stray legacy "Shot N — Xs" line no longer inflates the clip count (#1621)', () => {
+    // Enhance stopped emitting these (#1621); pre-flight now bills one guessed
+    // shot per scene label until the shot-list pass runs, whether or not the
+    // script still carries old shot-shaped lines.
+    const oneShot = [
+      'Scene 1 — 10s',
+      'INT. HALLWAY - NIGHT',
+      'She opens the door.',
+    ].join('\n');
+    const legacyTwoShotLines = [
+      'Scene 1 — 10s',
+      'INT. HALLWAY - NIGHT',
+      'Shot 1 — 4s',
+      'She opens the door.',
+      'Shot 2 — 6s',
+      'Cut to the hallway beyond.',
+    ].join('\n');
+    const quote = (script: string) =>
+      Number(
+        estimateStoryboardPreflightCost({
+          ...base,
+          script,
+          autoGenerateMotion: true,
+          videoModels: [DEFAULT_VIDEO_MODEL],
+        })
+      );
+    expect(quote(legacyTwoShotLines)).toBe(quote(oneShot));
+  });
+
+  it('bills by scene labels, one guessed shot per scene, regardless of stray shot-shaped lines', () => {
+    const oneShotScenes = [
+      'Scene 1 — 10s',
+      'She opens the door.',
+      'Scene 2 — 8s',
+      'She waits.',
+      'Scene 3 — 5s',
+      'A glance.',
+    ].join('\n');
+    const withLegacyShotLines = [
+      'Scene 1 — 10s',
+      'Shot 1 — 4s',
+      'She opens the door.',
+      'Shot 2 — 6s',
+      'Cut to the hallway beyond.',
+      'Scene 2 — 8s',
+      'She waits.',
+      'Scene 3 — 5s',
+      'A glance.',
+    ].join('\n');
+    const quote = (script: string) =>
+      Number(
+        estimateStoryboardPreflightCost({
+          ...base,
+          script,
+          autoGenerateMotion: true,
+          videoModels: [DEFAULT_VIDEO_MODEL],
+        })
+      );
+    // Same 3 scene labels either way: the shot-list pass, not Enhance, now
+    // owns coverage, so pre-flight cannot see the eventual 2nd shot yet.
+    expect(quote(withLegacyShotLines)).toBe(quote(oneShotScenes));
+  });
+
+  it('a known shotCount wins over heading count', () => {
+    const script = 'Scene 1 — 10s\nINT. HALL - NIGHT\nShe opens the door.';
+    const quote = (shotCount?: number) =>
+      Number(
+        estimateStoryboardPreflightCost({
+          ...base,
+          script,
+          autoGenerateMotion: true,
+          videoModels: [DEFAULT_VIDEO_MODEL],
+          shotCount,
+        })
+      );
+    expect(quote(5)).toBeGreaterThan(quote());
+  });
+
+  it('treats a target under 5s as auto', () => {
+    const script = 'A detective finds a letter under the door.';
+    const auto = estimateStoryboardPreflightCost({
+      ...base,
+      script,
+      autoGenerateMotion: false,
+    });
+    const zero = estimateStoryboardPreflightCost({
+      ...base,
+      script,
+      targetDurationSeconds: 0,
+      autoGenerateMotion: false,
+    });
+    expect(zero).toBe(auto);
+    const underFloor = estimateStoryboardPreflightCost({
+      ...base,
+      script,
+      targetDurationSeconds: 4,
+      autoGenerateMotion: false,
+    });
+    expect(underFloor).toBe(auto);
+  });
+
+  it('keeps labelled scene totals when a title page precedes them (#2077)', () => {
+    const labeled = 'Scene 1 — 10s\nINT. HALL - NIGHT\nShe opens the door.';
+    const withFront = `THE RAIN SHIFT\n\nCHARACTERS\nSara, tired.\n\n${labeled}`;
+    const quote = (script: string) =>
+      Number(
+        estimateStoryboardPreflightCost({
+          ...base,
+          script,
+          autoGenerateMotion: true,
+          videoModels: [DEFAULT_VIDEO_MODEL],
+        })
+      );
+    expect(quote(withFront)).toBe(quote(labeled));
+  });
+
+  it('quotes an unlabelled paste from the whole script, front matter included (#2077)', () => {
+    // The quote runs before the scene split, so a character list still
+    // counts. The shot-list pass drops it later. This is the accepted
+    // exception: the gate holds the word-count ceiling, not the filmed length.
+    const scenes = 'INT. KITCHEN - NIGHT\nSARAH\nTea?\n\nJOHN\nPlease.';
+    const withFront = `THE RAIN SHIFT\n\nCHARACTERS\n${'Sara, a tired nurse who has worked the night shift for ten years. '.repeat(8)}\n\n${scenes}`;
+    const quote = (script: string) =>
+      Number(
+        estimateStoryboardPreflightCost({
+          ...base,
+          script,
+          autoGenerateMotion: true,
+          videoModels: [DEFAULT_VIDEO_MODEL],
+        })
+      );
+    expect(quote(withFront)).toBeGreaterThan(quote(scenes));
+  });
+
+  it('quotes a long unlabelled paste by its playing time, not a 30-scene cap (#1593)', () => {
+    // ~20 pages of screenplay: 40 sluglines, ~3,600 words ≈ 20 minutes.
+    const scene =
+      'INT. HALL - NIGHT\n' + 'She walks the long hall. '.repeat(18);
+    const feature = Array.from({ length: 40 }, () => scene).join('\n\n');
+    const quote = (script: string) =>
+      Number(
+        estimateStoryboardPreflightCost({
+          ...base,
+          script,
+          autoGenerateMotion: true,
+          videoModels: [DEFAULT_VIDEO_MODEL],
+          autoGenerateMusic: true,
+          audioModels: [DEFAULT_MUSIC_MODEL],
+        })
+      );
+    // Capped at 30 stills × 5s clips, the film quoted barely above a 30-scene
+    // short. By playing time it is hundreds of clips.
+    expect(quote(feature)).toBeGreaterThan(5 * quote(scene.repeat(3)));
+    expect(estimateSceneCount(feature)).toBe(40);
+  });
+
+  it('only bills motion when autoGenerateMotion is true', () => {
+    const script = 'Scene 1 — 5s\nA room.\n\nScene 2 — 5s\nAnother room.';
+    const stills = Number(
+      estimateStoryboardPreflightCost({
+        ...base,
+        script,
+        autoGenerateMotion: false,
+        videoModels: [DEFAULT_VIDEO_MODEL],
+      })
+    );
+    const withMotion = Number(
+      estimateStoryboardPreflightCost({
+        ...base,
+        script,
+        autoGenerateMotion: true,
+        videoModels: [DEFAULT_VIDEO_MODEL],
+      })
+    );
+    expect(withMotion).toBeGreaterThan(stills);
+  });
+
+  it('ignores videoModels when motion is off (regenerate dead-arg trap)', () => {
+    const script = 'Scene 1 — 5s\nA room.';
+    const stills = estimateStoryboardPreflightCost({
+      ...base,
+      script,
+      autoGenerateMotion: false,
+    });
+    const withDeadVideoModels = estimateStoryboardPreflightCost({
+      ...base,
+      script,
+      autoGenerateMotion: false,
+      videoModels: [DEFAULT_VIDEO_MODEL],
+    });
+    expect(withDeadVideoModels).toBe(stills);
+  });
+
+  it('requires motion for music billing', () => {
+    const script = 'Scene 1 — 5s\nA room.';
+    const stills = Number(
+      estimateStoryboardPreflightCost({
+        ...base,
+        script,
+        autoGenerateMotion: false,
+        autoGenerateMusic: true,
+        audioModels: [DEFAULT_MUSIC_MODEL],
+      })
+    );
+    const motionOnly = Number(
+      estimateStoryboardPreflightCost({
+        ...base,
+        script,
+        autoGenerateMotion: true,
+        videoModels: [DEFAULT_VIDEO_MODEL],
+        autoGenerateMusic: false,
+        audioModels: [DEFAULT_MUSIC_MODEL],
+      })
+    );
+    const motionAndMusic = Number(
+      estimateStoryboardPreflightCost({
+        ...base,
+        script,
+        autoGenerateMotion: true,
+        videoModels: [DEFAULT_VIDEO_MODEL],
+        autoGenerateMusic: true,
+        audioModels: [DEFAULT_MUSIC_MODEL],
+        targetDurationSeconds: 30,
+      })
+    );
+    expect(stills).toBeLessThan(motionOnly);
+    expect(motionAndMusic).toBeGreaterThan(motionOnly);
+  });
+
+  it('prices one new voice per estimated character when voices are on (#1553)', () => {
+    const script = 'Scene 1 — 5s\nA room.\n\nScene 2 — 5s\nAnother room.';
+    const off = estimateStoryboardPreflightCost({
+      ...base,
+      script,
+      stopAt: 'references',
+    });
+    const on = estimateStoryboardPreflightCost({
+      ...base,
+      script,
+      stopAt: 'references',
+      generateVoices: true,
+    });
+    const scenes = estimateSceneCount(script);
+    expect(on - off).toBe(
+      multiplyMicros(VOICE_ESTIMATE_COST, estimateCharacterSheetCount(scenes))
+    );
+  });
+
+  it('reserves TTS on the dialogue slice even when Voices is off (#1554)', () => {
+    const script = 'Scene 1 — 5s\nA room.\n\nScene 2 — 5s\nAnother room.';
+    const images = estimateStoryboardPreflightCost({
+      ...base,
+      script,
+      stopAt: 'images',
+    });
+    const dialogue = estimateStoryboardPreflightCost({
+      ...base,
+      script,
+      stopAt: 'dialogue',
+    });
+    const scenes = estimateSceneCount(script);
+    expect(dialogue - images).toBeGreaterThanOrEqual(
+      estimateTtsCost(scenes * TYPICAL_DIALOGUE_CHARS_PER_SHOT)
+    );
+  });
+});

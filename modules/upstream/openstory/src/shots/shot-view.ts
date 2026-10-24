@@ -1,0 +1,463 @@
+/**
+ * ShotView — a shot with the rows a read path resolves alongside it.
+ *
+ * A shot owns no assets. Its still lives on the anchor `frame`'s selected
+ * `frame_variants` row, its prompt on the selected `frame_prompt_versions` row,
+ * and its video on the `video_variants` row the shot's render segment points
+ * at. This type is the assembled read model — it exposes those rows AS
+ * THEMSELVES rather than flattening them into a third set of names.
+ */
+
+import type {
+  AssemblableMotionPrompt,
+  MotionDialogue,
+} from './scene-analysis.schema';
+import type {
+  Frame,
+  FramePromptVersion,
+  FrameVariant,
+  Shot,
+  VideoVariant,
+} from '@/platform/server/db/schema';
+import type { SHOT_GENERATION_STATUSES } from '@/platform/server/db/schema/shots';
+import type { DialogueLineTiming } from '@/shots/shot-dialogue';
+
+/** A shot's still lifecycle, as {@link readinessImageStatus} derives it. */
+export type ImageStatus = (typeof SHOT_GENERATION_STATUSES)[number];
+
+/**
+ * The narrow slice of a shot's sources that readiness tallies are derived from
+ * — a still url and a video lifecycle, nothing else.
+ *
+ * Exists so a caller that only needs counts (`GET /api/v1/sequences`) can read
+ * five scalar columns instead of materialising a full {@link ShotView} per
+ * shot: the wide view carries `shots.metadata`, the visual prompt and the
+ * motion prompt, which together made listing a page of sequences approach the
+ * 128 MB isolate ceiling (#1161). The derivations below are shared with
+ * {@link toShotView}, so the two paths cannot report different readiness.
+ */
+export type ShotReadiness = {
+  /** `frame_variants.url` of the anchor frame's SELECTED image version. */
+  selectedImageUrl: string | null;
+  /** `frame_variants.url` of the anchor frame's newest `kind: 'preview'` row. */
+  previewImageUrl: string | null;
+  /** Whether `render_segments.selectedVideoVersionId` resolves to a version. */
+  hasSelectedVideo: boolean;
+  /** `status` of the newest non-`variantOnly` render, or null if none exists. */
+  primaryVideoStatus: VideoVariant['status'] | null;
+  /**
+   * `status` of the anchor frame's newest primary non-preview
+   * `frame_variants` row, or null if none exists (#1942).
+   */
+  primaryImageStatus: FrameVariant['status'] | null;
+};
+
+/**
+ * The still url a shot exposes, or null while it has none: the selected
+ * variant's stored url, else the fast preview variant's CDN url.
+ */
+export function readinessImageUrl(
+  readiness: Pick<ShotReadiness, 'selectedImageUrl' | 'previewImageUrl'>
+): string | null {
+  return readiness.selectedImageUrl ?? readiness.previewImageUrl ?? null;
+}
+
+/**
+ * A shot's video status. The newest primary render's lifecycle wins; a shot
+ * with no primary render behind its selection reads `completed` (pre-#1067
+ * rows), and one with neither reads `pending` — see {@link ShotView.videoStatus}.
+ */
+export function readinessVideoStatus(
+  readiness: Pick<ShotReadiness, 'hasSelectedVideo' | 'primaryVideoStatus'>
+): VideoVariant['status'] {
+  return (
+    readiness.primaryVideoStatus ??
+    (readiness.hasSelectedVideo ? 'completed' : 'pending')
+  );
+}
+
+/**
+ * A shot's still status (#1942). The newest primary render's lifecycle wins:
+ * an open row (`pending` claim or `generating`) reads `generating`, a failed
+ * one `failed`. A completed or cancelled one — a cancel is the user standing
+ * down, not a state of the still — and a frame with no primary row read from
+ * the selection: `completed` with a selected still, else `pending`.
+ */
+export function readinessImageStatus(
+  readiness: Pick<ShotReadiness, 'selectedImageUrl' | 'primaryImageStatus'>
+): ImageStatus {
+  const status = readiness.primaryImageStatus;
+  switch (status) {
+    case 'pending':
+    case 'generating':
+      return 'generating';
+    case 'failed':
+      return 'failed';
+    case 'completed':
+    case 'cancelled':
+    case null:
+      return readiness.selectedImageUrl !== null ? 'completed' : 'pending';
+    default: {
+      const unhandled: never = status;
+      throw new Error(`Unhandled image status: ${String(unhandled)}`);
+    }
+  }
+}
+
+export type ShotGridSheet = {
+  url: string | null;
+  status: FrameVariant['status'] | null;
+};
+
+/**
+ * The rows a shot's view is assembled from. An object (not positional args) so
+ * adding a source can't silently re-bind an existing one. Required, not
+ * optional, so a new read path can't quietly assemble an empty view for a shot
+ * that has one.
+ */
+export type ShotViewSources = {
+  /** The anchor frame's selected `frame_variants` row. */
+  image: FrameVariant | null;
+  /**
+   * The anchor frame's newest non-discarded `kind: 'preview'` row (#1101) —
+   * the pre-prompt stand-in shown while the real still is still being made.
+   * Never selectable, so it is resolved as its own source rather than through
+   * `frames.selectedImageVersionId`.
+   */
+  preview: FrameVariant | null;
+  /** The anchor frame's selected `frame_prompt_versions` row. */
+  imagePromptVersion: FramePromptVersion | null;
+  /**
+   * The anchor frame's newest primary non-preview `frame_variants` row — its
+   * lifecycle IS the shot's image status (#1942). Separate from `image` for
+   * the same reason `primaryVideo` is separate from `video`.
+   */
+  primaryImage: FrameVariant | null;
+  /** The version `render_segments.selectedVideoVersionId` points at. */
+  video: VideoVariant | null;
+  /**
+   * The newest non-`variantOnly` render for the shot's segment — its lifecycle
+   * IS the shot's video status. Separate from `video` because only a
+   * `completed` version is ever selectable, so the pointer alone can never
+   * express generating/failed.
+   */
+  primaryVideo: VideoVariant | null;
+  gridSheet?: ShotGridSheet | null;
+  motionPrompt?: AssemblableMotionPrompt | null;
+  /** See {@link ShotView.dialogue}. */
+  dialogue?: MotionDialogue | null;
+  /** See {@link ShotView.dialogueTiming}. */
+  dialogueTiming?: DialogueLineTiming[] | null;
+  /**
+   * In-flight variant upscale: the generating framing version the promote
+   * claim points at, when it already has a cropped-tile url (minted at
+   * click). Regular still gens are also `generating` with a null url, so
+   * the url is the discriminator.
+   */
+  pendingUpscaleUrl?: string | null;
+};
+
+export type ShotView = Shot & {
+  /** The anchor frame — owns the selection pointers. */
+  frame: Frame;
+  image: FrameVariant | null;
+  imagePromptVersion: FramePromptVersion | null;
+  primaryImage: FrameVariant | null;
+  /** Derived, not stored — see {@link readinessImageStatus}. */
+  imageStatus: ImageStatus;
+  /** The failed primary row's error; null unless `imageStatus` is `failed`. */
+  imageError: string | null;
+  /**
+   * Derived, not stored: the newest non-discarded `kind: 'preview'` version
+   * (#1101). Bytes live in our bucket (ImageWorkflow copies them off the
+   * provider URL). Fallback behind `image.url`, never a selectable still.
+   */
+  previewThumbnailUrl: string | null;
+  /**
+   * When that preview row was opened: the time its sketch was started. Read
+   * by {@link sketchIsNewerThanClip}.
+   */
+  previewCreatedAt: Date | null;
+  video: VideoVariant | null;
+  primaryVideo: VideoVariant | null;
+  /**
+   * Derived, not stored: the newest primary render's lifecycle wins, so
+   * re-rolling over a good video reads 'generating'. Falls back to the
+   * selection for pre-#1067 rows that have no primary render behind them, and
+   * to 'pending' when nothing has been rendered at all — a shot awaiting its
+   * first render is exactly what the dropped `shots.videoStatus` column meant
+   * by its `DEFAULT 'pending'`, and "not yet rendered" is how every eligibility
+   * check spells "generate this one".
+   */
+  videoStatus: VideoVariant['status'];
+  gridSheet: ShotGridSheet | null;
+  motionPrompt: AssemblableMotionPrompt | null;
+  /**
+   * What the shot says now (#1657): its selected `shot_dialogue_versions`
+   * row, resolved by `shotDialogueResolver` — the same answer a render
+   * speaks. Present with or without a motion prompt. Null only on a view
+   * assembled without prompts (a planning read), never "silent": a silent
+   * shot is `{ presence: false, lines: [] }`.
+   */
+  dialogue: MotionDialogue | null;
+  /**
+   * When each line is heard in the shot's dialogue clip (#1853), derived on
+   * read from the selected section and its speech (`sectionLineTiming`) —
+   * never stored. The theatre times subtitles with it. Null on a view
+   * assembled without it, or a shot with no recording: lines are then
+   * untimed, not silent.
+   */
+  dialogueTiming: DialogueLineTiming[] | null;
+  /** Cropped tile for an in-flight variant upscale, or null. */
+  pendingUpscaleUrl: string | null;
+  /**
+   * Client-only: grid-cell index for the CSS overlay while an upscale runs.
+   * Server assembly always sends null; optimistic select and SSE clear it.
+   */
+  pendingUpscaleIndex: number | null;
+};
+
+/**
+ * What `/sequences` compare views and the Studio reference picker read
+ * (#1897). A full {@link ShotView} carries shot and frame metadata plus both
+ * variant rows; listing every shot of every sequence on that shape peaked
+ * near the 128 MB isolate ceiling.
+ */
+export type SequenceListShot = {
+  id: string;
+  sequenceId: string;
+  sceneId: string | null;
+  /** Selected still url. Null while the anchor frame has no selected image. */
+  imageUrl: string | null;
+  imageStatus: ImageStatus;
+  /** Selected clip url. Null while the segment has no selected video file. */
+  videoUrl: string | null;
+  videoStatus: VideoVariant['status'];
+  /** Selected visual-prompt text. */
+  visualPrompt: string | null;
+  /** Selected motion-prompt text (`shot_prompt_versions.text`). */
+  motionPrompt: string | null;
+};
+
+export function sequenceListShotFromView(shot: ShotView): SequenceListShot {
+  return {
+    id: shot.id,
+    sequenceId: shot.sequenceId,
+    sceneId: shot.sceneId,
+    imageUrl: shot.image?.url ?? null,
+    imageStatus: shot.imageStatus,
+    videoUrl: shot.video?.url ?? null,
+    videoStatus: shot.videoStatus,
+    visualPrompt: shot.imagePromptVersion?.text || null,
+    motionPrompt: shot.motionPrompt?.fullPrompt || null,
+  };
+}
+
+/**
+ * Assemble a shot whose anchor frame row is absent. Every shot should own one
+ * (migration backfill + `shots.ensureAnchorFrames`), but a batch read that
+ * left-joins must not DROP a frameless shot — that would make it vanish from
+ * the list.
+ */
+export function shotViewMissingFrame(
+  shot: Shot,
+  video: Pick<
+    ShotViewSources,
+    'video' | 'primaryVideo' | 'motionPrompt' | 'dialogue' | 'dialogueTiming'
+  >
+): ShotView {
+  const frame: Frame = {
+    // Synthetic in-memory placeholder ONLY — never persisted and never used for
+    // a frame_variants lookup. `id: shot.id` deliberately resurrects the
+    // migration-only frame.id == shot.id equality the rest of the codebase
+    // forbids at runtime (frames.ts `getAnchorByShot`); it is safe solely
+    // because a frameless shot has no variants to resolve by frame id. Do NOT
+    // pass this id to any `frame_variants`/`frame_prompt_versions` query.
+    id: shot.id,
+    shotId: shot.id,
+    sequenceId: shot.sequenceId,
+    orderIndex: 0,
+    role: 'first',
+    selectedImageVersionId: null,
+    selectedImagePromptVersionId: null,
+    pendingPromoteVersionId: null,
+    createdAt: shot.createdAt,
+    updatedAt: shot.updatedAt,
+  };
+  // A frameless shot still has a video: video hangs off the segment.
+  return toShotView(shot, frame, {
+    image: null,
+    preview: null,
+    imagePromptVersion: null,
+    primaryImage: null,
+    ...video,
+  });
+}
+
+export function toShotView(
+  shot: Shot,
+  frame: Frame,
+  sources: ShotViewSources
+): ShotView {
+  const { image, preview, imagePromptVersion, primaryImage, video } = sources;
+  const { primaryVideo } = sources;
+  const imageStatus = readinessImageStatus({
+    selectedImageUrl: image?.url ?? null,
+    primaryImageStatus: primaryImage?.status ?? null,
+  });
+  return {
+    ...shot,
+    frame,
+    image,
+    previewThumbnailUrl: preview?.url ?? null,
+    previewCreatedAt: preview?.createdAt ?? null,
+    imagePromptVersion,
+    primaryImage,
+    imageStatus,
+    imageError: imageStatus === 'failed' ? (primaryImage?.error ?? null) : null,
+    video,
+    primaryVideo,
+    videoStatus: readinessVideoStatus({
+      hasSelectedVideo: video !== null,
+      primaryVideoStatus: primaryVideo?.status ?? null,
+    }),
+    gridSheet: sources.gridSheet ?? null,
+    motionPrompt: sources.motionPrompt ?? null,
+    dialogue: sources.dialogue ?? null,
+    dialogueTiming: sources.dialogueTiming ?? null,
+    pendingUpscaleUrl: sources.pendingUpscaleUrl ?? null,
+    pendingUpscaleIndex: null,
+  };
+}
+
+/** Crop url on a generating pending-promote version; otherwise null. */
+export function pendingUpscaleUrlFromVersion(
+  version: FrameVariant | null | undefined
+): string | null {
+  if (
+    !version ||
+    version.status !== 'generating' ||
+    !version.url ||
+    !isBrowserDisplayableStillUrl(version.url)
+  ) {
+    return null;
+  }
+  return version.url;
+}
+
+/**
+ * Trim URLs (`/cdn-cgi/image/trim=`) only resolve through a Cloudflare
+ * Image Resizing edge. Patching one into `image.url` is what #1193's broken
+ * preview was. `/r2/` and ordinary https URLs are safe to show.
+ */
+export function isBrowserDisplayableStillUrl(url: string): boolean {
+  return !url.includes('/cdn-cgi/image/');
+}
+
+/**
+ * Optimistic shot after the user picks a grid tile: keep the current still
+ * (or swap in a displayable crop), spin the frame, remember the cell index
+ * for the CSS overlay, and drop the old motion so the player doesn't keep
+ * playing the previous video over the new start frame.
+ */
+export function shotAfterVariantSelect(
+  shot: ShotView,
+  imageUrl?: string,
+  variantIndex?: number
+): ShotView {
+  return {
+    ...shot,
+    image:
+      imageUrl && shot.image ? { ...shot.image, url: imageUrl } : shot.image,
+    imageStatus: 'generating',
+    imageError: null,
+    pendingUpscaleUrl: imageUrl ?? shot.pendingUpscaleUrl ?? null,
+    pendingUpscaleIndex: variantIndex ?? shot.pendingUpscaleIndex ?? null,
+    video: null,
+    videoStatus: 'pending',
+  };
+}
+
+/**
+ * The rows a motion-eligibility decision reads. Narrower than `ShotView` so a
+ * caller holding a partial projection can still ask the question.
+ */
+type MotionEligibilityShot = {
+  imageStatus: ImageStatus;
+  image: Pick<FrameVariant, 'url'> | null;
+  videoStatus: ShotView['videoStatus'];
+};
+
+/**
+ * Is this shot eligible for a user-driven batch motion generate?
+ *
+ * Shared because there are four call sites: `batchGenerateMotionFn`, which
+ * actually spawns the work, and three client views that recompute the same set
+ * optimistically — the scenes-view spinner set, scene-list's "Generate all"
+ * button and cost preview, and the add-model menu. They drifted once when
+ * `'cancelled'` was added on the server side only; reference-only would drift
+ * them again, since a sequence that never renders a still leaves `imageStatus`
+ * at `'pending'` forever and the still half of the rule then excludes every
+ * shot — hiding the button outright.
+ *
+ * `'cancelled'` is eligible here and NOT in smart retry: a cancel excludes a
+ * shot from AUTO retry, not from a user asking again.
+ */
+export function isBatchMotionEligible(
+  shot: MotionEligibilityShot,
+  referenceOnly: boolean
+): boolean {
+  const hasStill = shot.imageStatus === 'completed' && !!shot.image?.url;
+  return (
+    (referenceOnly || hasStill) &&
+    (shot.videoStatus === 'pending' ||
+      shot.videoStatus === 'failed' ||
+      shot.videoStatus === 'cancelled')
+  );
+}
+
+/**
+ * Is this shot's clip currently rendering? Same still-gate rationale as
+ * {@link isBatchMotionEligible} — without it a reference-only sequence never
+ * reports an in-flight render, so the progress banner never appears.
+ */
+export function isMotionGenerating(
+  shot: MotionEligibilityShot,
+  referenceOnly: boolean
+): boolean {
+  const hasStill = shot.imageStatus === 'completed' && !!shot.image?.url;
+  return (referenceOnly || hasStill) && shot.videoStatus === 'generating';
+}
+
+/**
+ * Is the shot's sketch newer than its clip (#2111)? A sketch is redrawn only
+ * when a reference-only shot's prompt changes, so a clip that finished before
+ * the sketch was started shows a shot that is no longer written. The rail and
+ * the theatre then show the sketch; a new render brings the clip back.
+ *
+ * Times, not ids: clips copied in by migrations reuse their shot's id, which
+ * sorts before the shot's first sketch. A clip with no finish time keeps
+ * showing. Ceiling: a prompt edited while its clip was rendering lets that
+ * clip win when it lands.
+ */
+export function sketchIsNewerThanClip(shot: {
+  previewCreatedAt: Date | null;
+  video: { generatedAt: Date | null } | null;
+}): boolean {
+  const drawn = shot.previewCreatedAt;
+  const finished = shot.video?.generatedAt;
+  // `new Date`: a patched cache row can hold the ISO string.
+  return (
+    !!drawn &&
+    !!finished &&
+    new Date(drawn).getTime() > new Date(finished).getTime()
+  );
+}
+
+/** The clip the rail shows for a shot: none while its sketch is newer. */
+export function shownClipUrl(shot: {
+  previewCreatedAt: Date | null;
+  video: { url: string | null; generatedAt: Date | null } | null;
+}): string | null {
+  return sketchIsNewerThanClip(shot) ? null : (shot.video?.url ?? null);
+}

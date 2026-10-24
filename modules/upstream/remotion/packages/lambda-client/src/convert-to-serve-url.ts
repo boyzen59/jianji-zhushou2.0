@@ -1,0 +1,26 @@
+import {getAwsRegionMetadata} from './aws-region-metadata';
+import {DOCS_URL} from './docs-url';
+import type {AwsRegion} from './regions';
+
+export const convertToServeUrlImplementation = ({
+	urlOrId,
+	region,
+	bucketName,
+}: {
+	urlOrId: string;
+	region: AwsRegion;
+	bucketName: string;
+}) => {
+	if (urlOrId.startsWith('src/')) {
+		throw new Error(
+			`Remotion Lambda can only render based on a URL in the cloud. It seems like you passed a local file: ${urlOrId}. Read the setup guide for Remotion Lambda ${DOCS_URL}/docs/lambda/setup`,
+		);
+	}
+
+	if (urlOrId.startsWith('http://') || urlOrId.startsWith('https://')) {
+		return urlOrId;
+	}
+
+	const {dnsSuffix} = getAwsRegionMetadata(region);
+	return `https://${bucketName}.s3.${region}.${dnsSuffix}/sites/${urlOrId}/index.html`;
+};

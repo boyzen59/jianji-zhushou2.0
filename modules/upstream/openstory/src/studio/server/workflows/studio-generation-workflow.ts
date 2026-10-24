@@ -1,0 +1,707 @@
+/**
+ * Images and Videos (#1274).
+ *
+ * Sequence models only — `generateImageWithProvider` for stills; for clips
+ * `mode` picks the endpoint (see `text-to-video.ts`). Native Grok, BytePlus
+ * Ark, and billed fal units work the same way as sequences.
+ *
+ *   1. set-running
+ *   2. generate-image, or submit/poll video (retried on a content flag;
+ *      one new job after Ark's InternalServiceError, #2036)
+ *   3. capture credits against the run envelope from reported units
+ *   4. upload outputs to R2
+ *   5. record-video-observation (clips only; stills record inside generateImage)
+ *   6. record-provenance
+ *   7. persist-result on the reserved `generated_assets` row — last, so a
+ *      failure anywhere before it leaves the row `failed`, never
+ *      `completed` then flipped
+ *   8. notify-content-feed — PostHog event for the Slack content feed (#1667)
+ */
+
+import {
+  CONTENT_REJECTION_EVENT,
+  clipContentRejectionMessage,
+  isContentRejectionError,
+} from '@/models/content-rejection';
+import { extractFalErrorMessage } from '@/models/fal-error';
+import {
+  explainSeedanceFailure,
+  isSeedanceInternalServiceError,
+  seedanceSubmitRefusal,
+  SEEDANCE_INTERNAL_BACKOFF,
+} from '@/motion/seedance-edit';
+import { IMAGE_TO_VIDEO_MODELS } from '@/models/models';
+import type { MediaVia } from '@/models/via';
+import { ZERO_MICROS } from '@/billing/money';
+import {
+  deductWorkflowCredits,
+  recordFalUsageStep,
+} from '@/billing/server/workflow-deduction';
+import { recordProvenance } from '@/platform/server/compliance/provenance';
+import { aspectRatioToImageSize } from '@/models/aspect-ratios';
+import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
+import type { GeneratedAssetOutput } from '@/platform/server/db/schema';
+import { generateImageWithProvider } from '@/stills/server/image-generation';
+import { assetLeaseOwner } from '@/models/server/byteplus-asset-pool';
+import { ingestArkAssets } from '@/models/server/byteplus-asset-steps';
+import { resolveMotionVia } from '@/motion/server/motion-generation';
+import { videoUrlFitsWorkflowCheckpoint } from '@/motion/server/video-storage';
+import { captureStudioGenerationCompleted } from '@/platform/server/observability/content-feed';
+import { recordMediaGenerationSpan } from '@/platform/server/observability/ai-otel';
+import { getLogger } from '@/platform/logger';
+import { toCdnUrl } from '@/platform/server/storage/buckets';
+import { isEngineAbortError } from '@/platform/server/workflow/errors';
+import type { StudioCreateInput } from '@/studio/schema';
+import {
+  pollStudioVideoJob,
+  studioVideoCostFromUsage,
+  arkStillsForStudio,
+  submitStudioVideoJob,
+} from '@/studio/server/studio-video-generation';
+import { tagStudioReferences } from '@/studio/text-to-video';
+import { uploadStudioImage, uploadStudioVideo } from '@/studio/server/upload';
+import { OpenStoryWorkflowEntrypoint } from '@/platform/server/workflow/base-workflow';
+import type { StudioGenerationWorkflowInput } from '@/platform/server/workflow/types';
+import type { TokenUsage } from '@tanstack/ai';
+import type { WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
+import { NonRetryableError } from 'cloudflare:workflows';
+
+const logger = getLogger(['openstory', 'workflow', 'studio']);
+
+const POLL_BATCH_DURATION_MS = 30_000;
+const POLL_INTERVAL_MS = 3_000;
+const MAX_BATCHES = 60;
+const MAX_MOTION_ATTEMPTS = 3;
+
+type StudioPollOutcome =
+  | { kind: 'pending' }
+  | { kind: 'completed'; url: string; usage?: TokenUsage }
+  | { kind: 'rejected'; rejection: string }
+  | { kind: 'failed'; error: string };
+
+function classifyMotionFailure(message: string): StudioPollOutcome {
+  return isContentRejectionError(message)
+    ? { kind: 'rejected', rejection: message }
+    : { kind: 'failed', error: `Motion generation failed: ${message}` };
+}
+
+export class StudioGenerationWorkflow extends OpenStoryWorkflowEntrypoint<StudioGenerationWorkflowInput> {
+  protected override readonly failureLabel = 'Studio generation';
+
+  protected override async runImpl(
+    event: Readonly<WorkflowEvent<StudioGenerationWorkflowInput>>,
+    step: WorkflowStep,
+    scopedDb: WorkflowScopedDb
+  ): Promise<{ assetId: string; outputs: GeneratedAssetOutput[] }> {
+    const { assetId, input } = event.payload;
+
+    await step.do('set-running', async () => {
+      await scopedDb.generatedAssets.markRunning(assetId);
+    });
+
+    if (input.activity === 'image') {
+      return this.runImage(event, input, step, scopedDb);
+    }
+    return this.runVideo(event, input, step, scopedDb);
+  }
+
+  private async runImage(
+    event: Readonly<WorkflowEvent<StudioGenerationWorkflowInput>>,
+    input: Extract<StudioCreateInput, { activity: 'image' }>,
+    step: WorkflowStep,
+    scopedDb: WorkflowScopedDb
+  ): Promise<{ assetId: string; outputs: GeneratedAssetOutput[] }> {
+    const { assetId, teamId, userId } = event.payload;
+    const { imageModel } = input;
+    const imageSize = aspectRatioToImageSize(input.aspectRatio);
+
+    // Generate and store in ONE step: a via that answers with inline bytes
+    // has no URL to pass on, and the whole image would otherwise ride the
+    // 1 MiB checkpoint between the two (#1638, #1645).
+    const generated = await step.do('generate-image', async () => {
+      logger.info(
+        `[StudioGenerationWorkflow] Generating image ${assetId} with ${imageModel}`
+      );
+      const result = await generateImageWithProvider(
+        {
+          model: imageModel,
+          prompt: input.referenceImages.length
+            ? tagStudioReferences(input.prompt)
+            : input.prompt,
+          imageSize,
+          resolution: input.resolution,
+          numImages: 1,
+          ...(input.referenceImages.length > 0 && {
+            referenceImageUrls: input.referenceImages,
+          }),
+        },
+        {
+          credentials: scopedDb.credentials,
+          observability: {
+            observationName: 'studio-image',
+            tags: ['studio', 'image'],
+            userId,
+            metadata: { assetId, model: imageModel },
+          },
+        }
+      );
+
+      const generatedImageUrl = result.imageUrls[0];
+      if (!generatedImageUrl) {
+        throw new Error('Image generation did not return any image URLs');
+      }
+      const upload = await uploadStudioImage({
+        imageUrl: generatedImageUrl,
+        teamId,
+        assetId,
+      });
+      return { upload, metadata: result.metadata, via: result.via };
+    });
+
+    const upload = generated.upload;
+    const imageMetadata = generated.metadata;
+
+    const imageCost = imageMetadata.cost ?? ZERO_MICROS;
+    const falUsage =
+      generated.via === 'fal'
+        ? await recordFalUsageStep(step, scopedDb, imageMetadata)
+        : {};
+
+    if (imageCost > 0 && !imageMetadata.usedOwnKey) {
+      await step.do('deduct-credits', async () => {
+        await deductWorkflowCredits({
+          scopedDb,
+          costMicros: imageCost,
+          usedOwnKey: imageMetadata.usedOwnKey,
+          description: `Studio image (${imageModel})`,
+          idempotencyKey: `${event.instanceId}:studio-image`,
+          reservationId: event.payload.reservationId,
+          metadata: {
+            ...falUsage,
+            model: imageModel,
+            assetId,
+          },
+          workflowName: 'StudioGenerationWorkflow',
+        });
+      });
+    }
+
+    const outputs: GeneratedAssetOutput[] = [
+      { url: upload.url, contentType: upload.contentType },
+    ];
+
+    await step.do('record-provenance', async () => {
+      await recordProvenance(scopedDb.provenance, {
+        teamId,
+        userId,
+        assetKind: 'generated_asset',
+        assetId,
+        storageKey: upload.path,
+        provider: generated.via,
+        model: imageMetadata.endpointId,
+        providerRequestId: imageMetadata.requestId,
+        workflowRunId: event.instanceId,
+        prompt: input.prompt,
+      });
+    });
+
+    await step.do('persist-result', async () => {
+      await scopedDb.generatedAssets.markCompleted(assetId, {
+        outputs,
+        costMicros: imageCost,
+        provider: generated.via,
+      });
+    });
+
+    await this.notifyContentFeed(event, input, outputs, step);
+
+    return { assetId, outputs };
+  }
+
+  private async runVideo(
+    event: Readonly<WorkflowEvent<StudioGenerationWorkflowInput>>,
+    input: Extract<StudioCreateInput, { activity: 'video' }>,
+    step: WorkflowStep,
+    scopedDb: WorkflowScopedDb
+  ): Promise<{ assetId: string; outputs: GeneratedAssetOutput[] }> {
+    const { assetId, teamId, userId } = event.payload;
+    const { videoModel } = input;
+
+    let videoUrl = '';
+    let billedUsage: TokenUsage | undefined;
+    let lastRejection: string | null = null;
+    let seedanceInternalRetried = false;
+    let succeededJob: Awaited<ReturnType<typeof submitStudioVideoJob>> | null =
+      null;
+
+    for (let attempt = 0; attempt < MAX_MOTION_ATTEMPTS; attempt++) {
+      let retrySeedanceInternal = false;
+      let internalError = '';
+      const tag =
+        (attempt === 0 ? '' : `-retry-${attempt}`) +
+        (seedanceInternalRetried ? '-internal' : '');
+      // Register the user's stills with BytePlus before the submit step
+      // (#1519) — see MotionWorkflow for why this sits outside it.
+      const submitVia = await step.do(`resolve-video-via${tag}`, () =>
+        resolveMotionVia(videoModel, scopedDb.credentials)
+      );
+      // A final from a draft sends no stills (#1756): Ark reuses the draft's.
+      const arkAssets =
+        submitVia === 'byteplus' && !event.payload.finalFromDraftTaskId
+          ? await ingestArkAssets(step, {
+              prefix: `studio${tag}`,
+              stills: arkStillsForStudio(input, event.payload.noPersonImages),
+              ledger: scopedDb.bytePlusAssets,
+              owner: assetLeaseOwner('studio', event.instanceId),
+              credentials: scopedDb.credentials,
+            })
+          : {};
+      const submitOutcome = await step.do(`submit-video${tag}`, async () => {
+        try {
+          const job = await submitStudioVideoJob({
+            arkAssets,
+            prompt: input.prompt,
+            model: videoModel,
+            duration: input.duration,
+            aspectRatio: input.aspectRatio,
+            resolution: input.resolution,
+            generateAudio: input.generateAudio,
+            mode: input.mode,
+            referenceImages: input.referenceImages,
+            referenceVideos: input.referenceVideos,
+            referenceAudio: input.referenceAudio,
+            startImageUrl: input.startImageUrl,
+            sourceVideoUrl: input.sourceVideoUrl,
+            endImageUrl: input.endImageUrl,
+            draft: input.draft,
+            finalFromDraftTaskId: event.payload.finalFromDraftTaskId,
+            credentials: scopedDb.credentials,
+          });
+          return { ok: true as const, job };
+        } catch (error) {
+          if (isContentRejectionError(error)) {
+            return {
+              ok: false as const,
+              rejection: extractFalErrorMessage(error),
+            };
+          }
+          const providerMessage = extractFalErrorMessage(error);
+          const refusal = seedanceSubmitRefusal(providerMessage, submitVia);
+          if (refusal) {
+            logger.warn(
+              `[StudioGenerationWorkflow] Ark refused the submit for ${assetId}: ${providerMessage}`
+            );
+            throw new NonRetryableError(refusal);
+          }
+          if (
+            error instanceof Error &&
+            'status' in error &&
+            error.status === 422
+          ) {
+            throw new NonRetryableError(
+              `Video job submission rejected (422): ${extractFalErrorMessage(error)}`
+            );
+          }
+          throw error;
+        }
+      });
+
+      if (!submitOutcome.ok) {
+        lastRejection = submitOutcome.rejection;
+        logger.warn(
+          `[StudioGenerationWorkflow] content-flag rejection on submit attempt ${attempt + 1}/${MAX_MOTION_ATTEMPTS} for ${assetId}: ${submitOutcome.rejection}`,
+          { event: CONTENT_REJECTION_EVENT }
+        );
+        continue;
+      }
+      const { job } = submitOutcome;
+
+      let rejected: string | null = null;
+      for (let batch = 0; batch < MAX_BATCHES; batch++) {
+        if (batch > 0) {
+          await step.sleep(`video-batch-wait-${attempt}-${batch}`, 1);
+        }
+
+        const poll = await step.do(
+          // The suffix keeps the second job's polls apart from the first's.
+          `video-poll-batch-${attempt}-${batch}${seedanceInternalRetried ? '-internal' : ''}`,
+          async (): Promise<StudioPollOutcome> => {
+            const deadline = Date.now() + POLL_BATCH_DURATION_MS;
+            while (Date.now() < deadline) {
+              let pollResult: Awaited<ReturnType<typeof pollStudioVideoJob>>;
+              try {
+                pollResult = await pollStudioVideoJob(
+                  job,
+                  scopedDb.credentials
+                );
+              } catch (error) {
+                if (isContentRejectionError(error)) {
+                  return {
+                    kind: 'rejected',
+                    rejection: extractFalErrorMessage(error),
+                  };
+                }
+                if (
+                  error instanceof Error &&
+                  'status' in error &&
+                  error.status === 422
+                ) {
+                  return {
+                    kind: 'failed',
+                    error: `Video job polling failed (422): ${extractFalErrorMessage(error)}`,
+                  };
+                }
+                throw error;
+              }
+
+              if (pollResult.status === 'completed') {
+                if (pollResult.url) {
+                  let url = pollResult.url;
+                  if (!videoUrlFitsWorkflowCheckpoint(url)) {
+                    const googleKey =
+                      job.via === 'google'
+                        ? await scopedDb.credentials.resolveOptionalKey(
+                            'google'
+                          )
+                        : undefined;
+                    const stored = await uploadStudioVideo({
+                      videoUrl: url,
+                      teamId,
+                      assetId,
+                      googleApiKey: googleKey?.key,
+                    });
+                    url = stored.url;
+                  }
+                  return {
+                    kind: 'completed',
+                    url,
+                    usage: pollResult.usage,
+                  };
+                }
+                return classifyMotionFailure(
+                  pollResult.error || 'No URL returned'
+                );
+              }
+              if (pollResult.status === 'failed') {
+                return classifyMotionFailure(
+                  pollResult.error || 'Unknown error'
+                );
+              }
+
+              await new Promise((resolve) =>
+                setTimeout(resolve, POLL_INTERVAL_MS)
+              );
+            }
+            return { kind: 'pending' };
+          }
+        );
+
+        if (poll.kind === 'completed') {
+          videoUrl = poll.url;
+          billedUsage = poll.usage;
+          break;
+        }
+        if (poll.kind === 'rejected') {
+          rejected = poll.rejection;
+          break;
+        }
+        if (poll.kind === 'failed') {
+          // One new job, not a Cloudflare retry of the failed task (#2036).
+          if (
+            !seedanceInternalRetried &&
+            isSeedanceInternalServiceError(poll.error, job.via)
+          ) {
+            retrySeedanceInternal = true;
+            internalError = poll.error;
+            break;
+          }
+          const explained = explainSeedanceFailure(poll.error, job.via);
+          if (explained) {
+            logger.warn(
+              `[StudioGenerationWorkflow] Ark job ${job.jobId} failed for ${assetId}: ${poll.error}`
+            );
+          }
+          throw new NonRetryableError(explained ?? poll.error);
+        }
+      }
+
+      if (videoUrl) {
+        succeededJob = job;
+        break;
+      }
+      if (retrySeedanceInternal) {
+        seedanceInternalRetried = true;
+        logger.warn(
+          `[StudioGenerationWorkflow] Ark job ${job.jobId} failed for ${assetId}; submitting one new job: ${internalError}`
+        );
+        await step.sleep(
+          'seedance-internal-backoff',
+          SEEDANCE_INTERNAL_BACKOFF
+        );
+        // Keeps the new job off the content-flag budget.
+        attempt -= 1;
+        continue;
+      }
+      if (rejected) {
+        lastRejection = rejected;
+        continue;
+      }
+      throw new Error(
+        `Video generation timed out after ${(MAX_BATCHES * POLL_BATCH_DURATION_MS) / 60_000} minutes`
+      );
+    }
+
+    if (!videoUrl || !succeededJob) {
+      throw new NonRetryableError(
+        clipContentRejectionMessage({
+          rejections: [lastRejection ?? 'unknown rejection'],
+          models: [IMAGE_TO_VIDEO_MODELS[videoModel].name],
+          softened: false,
+          // Text-to-video: no start still to regenerate — the only image
+          // input is an optional reference (#1373).
+          inputs: {
+            still: input.referenceImages.length
+              ? {
+                  name: 'a reference image',
+                  fix: 'Swap the reference image',
+                }
+              : undefined,
+            prompt: 'the prompt',
+            audio: {
+              name: 'a reference audio clip',
+              fix: 'Remove or swap the reference audio',
+            },
+          },
+        }),
+        'ContentRejectionExhausted'
+      );
+    }
+    const job = succeededJob;
+
+    // The clip is rendered: unpin every still this run leased (#1361, #1531),
+    // whichever via the last attempt used. The failure half is in onFailure.
+    // Caught outside the step (its retries still run): a release that never
+    // lands must not throw away a rendered clip. The lease TTL frees them.
+    try {
+      await step.do('release-byteplus-asset-leases', async () =>
+        scopedDb.bytePlusAssets.releaseOwner(
+          assetLeaseOwner('studio', event.instanceId)
+        )
+      );
+    } catch (releaseError) {
+      if (isEngineAbortError(releaseError)) throw releaseError;
+      logger.error(
+        `[StudioGenerationWorkflow] Failed to release BytePlus asset leases for ${assetId}; the lease TTL frees them`,
+        { err: releaseError }
+      );
+    }
+
+    const billing = await step.do('price-video-generation', async () =>
+      studioVideoCostFromUsage(job, billedUsage)
+    );
+    const videoCost = billing.cost;
+
+    if (billing.recordFalUsage) {
+      await recordFalUsageStep(
+        step,
+        scopedDb,
+        {
+          endpointId: billing.endpointId,
+          unitsBilled: billing.unitsBilled,
+          numImages: 1,
+        },
+        'record-video-fal-usage'
+      );
+    }
+
+    const videoUpload = await step.do('upload-video', async () => {
+      const googleKey =
+        job.via === 'google'
+          ? await scopedDb.credentials.resolveOptionalKey('google')
+          : undefined;
+      try {
+        return await uploadStudioVideo({
+          videoUrl,
+          teamId,
+          assetId,
+          googleApiKey: googleKey?.key,
+        });
+      } catch (error) {
+        // The storage error names the R2 key: log it, show the user a line.
+        logger.warn(
+          `[StudioGenerationWorkflow] Upload failed for ${assetId}: ${error instanceof Error ? error.message : String(error)}`
+        );
+        throw new Error("Couldn't save the video. Try again.", {
+          cause: error,
+        });
+      }
+    });
+
+    // Charge only for a clip the team can see: a failed upload fails the run
+    // and onFailure zeroes the reservation.
+    if (videoCost > 0 && !job.usedOwnKey) {
+      await step.do('deduct-video-credits', async () => {
+        await deductWorkflowCredits({
+          scopedDb,
+          costMicros: videoCost,
+          usedOwnKey: job.usedOwnKey,
+          description: `Studio video (${videoModel})`,
+          idempotencyKey: `${event.instanceId}:studio-video`,
+          reservationId: event.payload.reservationId,
+          metadata: {
+            model: videoModel,
+            assetId,
+            requestId: job.jobId,
+          },
+          workflowName: 'StudioGenerationWorkflow',
+        });
+      });
+    }
+
+    const outputs: GeneratedAssetOutput[] = [
+      { url: videoUpload.url, contentType: videoUpload.contentType },
+    ];
+
+    await step.do('record-video-observation', async () => {
+      recordMediaGenerationSpan({
+        model: videoModel,
+        provider: job.via,
+        activity: 'video',
+        costMicros: videoCost,
+        unitsBilled: billing.unitsBilled,
+        inputTokens: billedUsage?.promptTokens,
+        outputTokens: billedUsage?.completionTokens,
+        usedOwnKey: job.usedOwnKey,
+        prompt: input.prompt,
+        outputUrl: videoUpload.url,
+        observationName: 'studio-video',
+        tags: ['studio', 'motion'],
+        userId,
+        sessionId: assetId,
+        metadata: { model: videoModel, assetId },
+      });
+    });
+
+    await step.do('record-provenance', async () => {
+      await recordProvenance(scopedDb.provenance, {
+        teamId,
+        userId,
+        assetKind: 'generated_asset',
+        assetId,
+        storageKey: videoUpload.path,
+        provider: job.via,
+        model: billing.endpointId,
+        providerRequestId: job.jobId,
+        workflowRunId: event.instanceId,
+        prompt: input.prompt,
+      });
+    });
+
+    await step.do('persist-result', async () => {
+      await scopedDb.generatedAssets.markCompleted(assetId, {
+        outputs,
+        costMicros: videoCost,
+        provider: job.via,
+        // The handle "Render at quality" renders the final from (#1756).
+        draftTaskId: job.draftTaskId,
+      });
+    });
+
+    // Only failures logged here before, so a finished run left no way to reach
+    // the video from the logs. Absolute so the URL is openable as printed.
+    logger.info(
+      `[StudioGenerationWorkflow] Asset ${assetId} completed: ${
+        toCdnUrl(videoUpload.url) ?? videoUpload.url
+      }`,
+      { assetId, providerRequestId: job.jobId, model: videoModel }
+    );
+
+    await this.notifyContentFeed(event, input, outputs, step);
+
+    return { assetId, outputs };
+  }
+
+  private async notifyContentFeed(
+    event: Readonly<WorkflowEvent<StudioGenerationWorkflowInput>>,
+    input: StudioCreateInput,
+    outputs: GeneratedAssetOutput[],
+    step: WorkflowStep
+  ): Promise<void> {
+    const output = outputs[0];
+    if (!output?.url) return;
+    await step.do('notify-content-feed', async () => {
+      captureStudioGenerationCompleted({
+        distinctId: event.payload.userId,
+        teamId: event.payload.teamId,
+        assetId: event.payload.assetId,
+        activity: input.activity,
+        model: input.activity === 'image' ? input.imageModel : input.videoModel,
+        mediaUrl: output.url,
+        contentType: output.contentType,
+        prompt: input.prompt,
+        aspectRatio: input.aspectRatio,
+        ...(input.activity === 'video' && { duration: input.duration }),
+      });
+      return { ok: true as const };
+    });
+  }
+
+  protected override async onFailure({
+    event,
+    error,
+    scopedDb,
+  }: {
+    event: Readonly<WorkflowEvent<StudioGenerationWorkflowInput>>;
+    error: string;
+    scopedDb: WorkflowScopedDb;
+  }): Promise<void> {
+    const { assetId, userId, input } = event.payload;
+    // An image run only learns its via from the generate result, so a failed
+    // one keeps the row's queue-time label.
+    let videoVia: MediaVia | undefined;
+    if (input.activity === 'video') {
+      videoVia = await resolveMotionVia(input.videoModel, scopedDb.credentials);
+      // Image failures are already recorded inside generateImageWithProvider.
+      recordMediaGenerationSpan({
+        model: input.videoModel,
+        provider: videoVia,
+        activity: 'video',
+        prompt: input.prompt,
+        errorType: isContentRejectionError(error)
+          ? 'content_filter'
+          : 'provider_error',
+        errorMessage: error,
+        observationName: 'studio-video',
+        tags: ['studio', 'motion'],
+        userId,
+        sessionId: assetId,
+        metadata: { model: input.videoModel, assetId },
+      });
+    }
+    const shown =
+      input.activity === 'video'
+        ? (explainSeedanceFailure(error, videoVia, {
+            images: input.referenceImages,
+            videos: input.referenceVideos,
+          }) ?? error)
+        : error;
+    await scopedDb.generatedAssets.markFailed(assetId, shown, videoVia);
+    if (input.activity === 'video') {
+      // Unpin this run's ACR stills (#1531). Not caught: this runs inside the
+      // base class's retried `emit-failure` step, which keeps the real
+      // failure message if the release never lands.
+      await scopedDb.bytePlusAssets.releaseOwner(
+        assetLeaseOwner('studio', event.instanceId)
+      );
+    }
+    if (isContentRejectionError(error)) {
+      logger.warn(
+        `[StudioGenerationWorkflow] Asset ${assetId} failed: ${error}`
+      );
+    } else {
+      logger.error(
+        `[StudioGenerationWorkflow] Asset ${assetId} failed: ${error}`
+      );
+    }
+  }
+}

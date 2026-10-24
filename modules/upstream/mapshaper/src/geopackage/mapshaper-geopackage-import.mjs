@@ -1,0 +1,533 @@
+import { GeoJSONParser } from '../geojson/geojson-import';
+import { mergeDatasets } from '../dataset/mapshaper-merging';
+import { stop, warn, warnOnce } from '../utils/mapshaper-logging';
+import utils from '../utils/mapshaper-utils';
+import require from '../mapshaper-require';
+import { initProjLibrary } from '../crs/mapshaper-projections';
+import { runningInBrowser } from '../mapshaper-env';
+import { probablyDecimalDegreeBounds } from '../geom/mapshaper-latlon';
+import { getDatasetBounds, datasetHasPaths, copyDatasetForExport } from '../dataset/mapshaper-dataset-utils';
+import { layerHasPoints } from '../dataset/mapshaper-layer-utils';
+import { forEachArcId } from '../paths/mapshaper-path-utils';
+import { buildTopology } from '../topology/mapshaper-topology';
+
+// `input` is a {content, filename} object (as produced by the file-import
+// pipeline). We accept the wrapper rather than just the bytes so we can
+// release the caller's `input.content` reference once we've written the
+// data to a temp file -- a 1GB GeoPackage no longer pins both the in-memory
+// buffer and the on-disk copy for the duration of the parse.
+export async function importGeoPackage(input, optsArg) {
+  var opts = optsArg || {};
+  var geopackage = require('@ngageoint/geopackage');
+  var gpkg;
+  var datasets;
+  var tmpPath = null;
+  // Cache only a *string* filename for recovery purposes. If input.content
+  // is a buffer, openGeoPackage() will create a temp file for us and the
+  // recovery path goes through that tmpPath instead.
+  var sourceFilename = utils.isString(input.content) ? input.content : input.filename;
+
+  if (!geopackage || !geopackage.GeoPackageAPI) {
+    stop('GeoPackage library is not loaded');
+  }
+
+  ({gpkg, tmpPath} = await openGeoPackage(input, geopackage));
+  var availableLayers;
+  var filterApplied;
+  var unreadableLayers;
+  try {
+    try {
+      ({datasets, availableLayers, filterApplied, unreadableLayers} = readFeatureTableDatasets(gpkg, opts));
+    } catch (e) {
+      if (!runningInBrowser() && isLocalCsProjError(e)) {
+        gpkg.close();
+        if (tmpPath) {
+          sanitizeGeoPackageCrsMetadata(tmpPath);
+        } else if (sourceFilename) {
+          tmpPath = copyGeoPackageTempFile(sourceFilename);
+          sanitizeGeoPackageCrsMetadata(tmpPath);
+        } else {
+          throw e;
+        }
+        gpkg = await geopackage.GeoPackageAPI.open(tmpPath);
+        ({datasets, availableLayers, filterApplied, unreadableLayers} = readFeatureTableDatasets(gpkg, opts));
+      } else {
+        throw e;
+      }
+    }
+  } finally {
+    gpkg.close();
+    removeTempGeoPackageFile(tmpPath);
+  }
+
+  if (datasets.length === 0) {
+    return {
+      layers: [{name: '', data: null}],
+      info: {
+        _gpkg_available_layers: availableLayers,
+        _gpkg_unreadable_layers: unreadableLayers,
+        _gpkg_placeholder: !!filterApplied
+      }
+    };
+  }
+
+  await initProjLib(datasets);
+  var merged = mergeGeoPackageDatasets(datasets);
+  var mergedArr = Array.isArray(merged) ? merged : [merged];
+  mergedArr.forEach(function(ds) {
+    ds.info = ds.info || {};
+    ds.info._gpkg_available_layers = availableLayers;
+    ds.info._gpkg_unreadable_layers = unreadableLayers;
+  });
+  return merged;
+}
+
+async function openGeoPackage(input, geopackage) {
+  var content = input.content || input.filename;
+  var source;
+  var tmpPath = null;
+  if (utils.isString(content)) {
+    if (!runningInBrowser()) {
+      try {
+        return {
+          gpkg: await geopackage.GeoPackageAPI.open(content),
+          tmpPath: null
+        };
+      } catch (e) {
+        if (!isLocalCsProjError(e)) throw e;
+        tmpPath = copyGeoPackageTempFile(content);
+        sanitizeGeoPackageCrsMetadata(tmpPath);
+        return {
+          gpkg: await geopackage.GeoPackageAPI.open(tmpPath),
+          tmpPath: tmpPath
+        };
+      }
+    }
+    source = content;
+  } else if (!runningInBrowser()) {
+    tmpPath = writeGeoPackageTempFile(content);
+    // The buffer is now duplicated on disk; release every in-process
+    // reference so a 1GB GeoPackage doesn't pin 1GB of RAM for the rest
+    // of the parse.
+    input.content = null;
+    content = null;
+    try {
+      return {
+        gpkg: await geopackage.GeoPackageAPI.open(tmpPath),
+        tmpPath: tmpPath
+      };
+    } catch (e) {
+      if (!isLocalCsProjError(e)) throw e;
+      sanitizeGeoPackageCrsMetadata(tmpPath);
+      return {
+        gpkg: await geopackage.GeoPackageAPI.open(tmpPath),
+        tmpPath: tmpPath
+      };
+    }
+  } else {
+    // Browser path: we don't have a filesystem to write to; the
+    // GeoPackage library reads directly from the typed array.
+    source = new Uint8Array(content);
+  }
+  return {
+    gpkg: await geopackage.GeoPackageAPI.open(source),
+    tmpPath: null
+  };
+}
+
+function isLocalCsProjError(err) {
+  var msg = err && err.message ? String(err.message) : '';
+  return msg.includes("havn't handled \"_\" in keyword yet") ||
+    msg.includes('LOCAL_CS');
+}
+
+function writeGeoPackageTempFile(content) {
+  var fs = require('fs');
+  var os = require('os');
+  var path = require('path');
+  var unique = Date.now() + '-' + process.pid + '-' + Math.random().toString(36).slice(2);
+  var tmpPath = path.join(os.tmpdir(), 'mapshaper-gpkg-import-' + unique + '.gpkg');
+  if (Buffer.isBuffer(content)) {
+    fs.writeFileSync(tmpPath, content);
+  } else if (content instanceof Uint8Array) {
+    fs.writeFileSync(tmpPath, Buffer.from(content.buffer, content.byteOffset, content.byteLength));
+  } else if (content instanceof ArrayBuffer) {
+    fs.writeFileSync(tmpPath, Buffer.from(content));
+  } else {
+    fs.writeFileSync(tmpPath, Buffer.from(new Uint8Array(content)));
+  }
+  return tmpPath;
+}
+
+function copyGeoPackageTempFile(filepath) {
+  var fs = require('fs');
+  var os = require('os');
+  var path = require('path');
+  var unique = Date.now() + '-' + process.pid + '-' + Math.random().toString(36).slice(2);
+  var tmpPath = path.join(os.tmpdir(), 'mapshaper-gpkg-import-' + unique + '.gpkg');
+  fs.copyFileSync(filepath, tmpPath);
+  return tmpPath;
+}
+
+function sanitizeGeoPackageCrsMetadata(filepath) {
+  var Database = require('better-sqlite3');
+  var db = new Database(filepath);
+  try {
+    // GDAL may write LOCAL_CS definitions that proj4 can't parse.
+    // Normalize to 'undefined' so GeoPackageAPI.open() won't throw.
+    db.prepare("UPDATE gpkg_spatial_ref_sys SET definition = 'undefined' WHERE definition LIKE 'LOCAL_CS[%'").run();
+  } finally {
+    db.close();
+  }
+}
+
+function removeTempGeoPackageFile(filepath) {
+  if (!filepath) return;
+  var fs = require('fs');
+  if (fs.existsSync(filepath)) {
+    fs.unlinkSync(filepath);
+  }
+}
+
+// load lookup tables for epsg codes if needed (for browser)
+async function initProjLib(datasets) {
+  for (const dataset of datasets) {
+    if (dataset.info?.crs_string) {
+      await initProjLibrary({crs: dataset.info.crs_string});
+    }
+  }
+}
+
+function readFeatureTableDatasets(gpkg, opts) {
+  var selected = getSelectedGeoPackageLayers(opts);
+  var availableLayers = gpkg.getFeatureTables() || [];
+  var tables = filterGeoPackageTables(availableLayers, selected);
+  var filterApplied = Array.isArray(selected) && selected.length > 0;
+  var unreadableLayers = [];
+  var datasets = [];
+  tables.forEach(function(table) {
+    try {
+      datasets.push(readFeatureTable(gpkg, table, opts));
+    } catch (e) {
+      // The caller recovers from a CRS parsing failure by rewriting the file's
+      // CRS metadata and re-reading, so that error must not be swallowed here.
+      if (isLocalCsProjError(e)) throw e;
+      unreadableLayers.push(table);
+      warn(formatUnreadableTableMessage(table, e));
+    }
+  });
+  return {
+    datasets: datasets,
+    availableLayers: availableLayers,
+    filterApplied: filterApplied,
+    unreadableLayers: unreadableLayers
+  };
+}
+
+// A GeoPackage can advertise feature tables that aren't readable. USGS National
+// Map vector products, for instance, list a CLIPPOLY table in gpkg_contents and
+// gpkg_geometry_columns after dropping the table itself from the file. GDAL
+// skips such layers with a warning; do the same rather than failing the whole
+// import over one bad table.
+function formatUnreadableTableMessage(table, err) {
+  var msg = err && err.message ? String(err.message) : '';
+  var reason = /^Table does not exist:/.test(msg) ?
+    'the table is listed in the GeoPackage metadata but is missing from the file' :
+    msg || 'unknown error';
+  return 'Skipping GeoPackage layer "' + table + '": ' + reason;
+}
+
+function getSelectedGeoPackageLayers(opts) {
+  if (!opts) return null;
+  return opts.gpkg_layers || opts.layers || null;
+}
+
+function filterGeoPackageTables(tables, selected) {
+  if (!Array.isArray(selected) || selected.length === 0) return tables;
+  var index = selected.reduce(function(memo, name) {
+    memo[name] = true;
+    return memo;
+  }, {});
+  return tables.filter(function(name) {
+    return !!index[name];
+  });
+}
+
+function mergeGeoPackageDatasets(datasets) {
+  var groups = groupGeoPackageDatasets(datasets);
+  var merged = groups.reduce(function(memo, group) {
+    return memo.concat(mergeGeoPackageDatasetGroup(group));
+  }, []);
+  return merged.length == 1 ? merged[0] : merged;
+}
+
+function mergeGeoPackageDatasetGroup(group) {
+  var pathDatasets = [];
+  var pointDatasets = [];
+  var dataDatasets = [];
+
+  group.forEach(function(dataset) {
+    var kind = getDatasetGeometryKind(dataset);
+    if (kind == 'path') {
+      pathDatasets.push(dataset);
+    } else if (kind == 'point') {
+      pointDatasets.push(dataset);
+    } else {
+      dataDatasets.push(dataset);
+    }
+  });
+
+  var output = [];
+  if (dataDatasets.length > 0) {
+    output.push(dataDatasets.length == 1 ? dataDatasets[0] : mergeDatasets(dataDatasets));
+  }
+  if (pointDatasets.length > 0) {
+    output.push(pointDatasets.length == 1 ? pointDatasets[0] : mergeDatasets(pointDatasets));
+  }
+  if (pathDatasets.length > 0) {
+    var groupedPaths = groupPathDatasetsBySharedArcs(pathDatasets);
+    if (groupedPaths.mergedDataset) {
+      output.push(groupedPaths.mergedDataset);
+    } else {
+      groupedPaths.components.forEach(function(component) {
+        output.push(component.length == 1 ? component[0] : mergeDatasets(component));
+      });
+    }
+  }
+  return output;
+}
+
+function groupGeoPackageDatasets(datasets) {
+  var index = {};
+  datasets.forEach(function(dataset) {
+    var key = getGeoPackageDatasetGroupKey(dataset);
+    if (!index[key]) index[key] = [];
+    index[key].push(dataset);
+  });
+  return Object.keys(index).map(function(key) {
+    return index[key];
+  });
+}
+
+function getGeoPackageDatasetGroupKey(dataset) {
+  var info = dataset.info || {};
+  var crs = info.geopackage_crs || null;
+  if (isDataOnlyDataset(dataset)) {
+    return 'data-only';
+  }
+  if (crs) {
+    var org = normalizeCrsOrg(crs.organization);
+    var code = normalizeNumericCode(crs.organization_coordsys_id);
+    if (isTrustedCrsAuthority(org) && code !== null && !(org == 'NONE' && code <= 0)) {
+      return 'crs:' + org + ':' + code;
+    }
+    if (isUsableWkt1Definition(crs.definition)) {
+      return 'wkt:' + crs.definition;
+    }
+  }
+  return probablyDecimalDegreeBounds(getDatasetBounds(dataset)) ?
+    'unknown:unprojected' :
+    'unknown:projected';
+}
+
+function isDataOnlyDataset(dataset) {
+  return (dataset.layers || []).every(function(lyr) {
+    return !lyr.geometry_type;
+  });
+}
+
+function getDatasetGeometryKind(dataset) {
+  if (isDataOnlyDataset(dataset)) return 'data';
+  if (datasetHasPaths(dataset)) return 'path';
+  var hasPoints = (dataset.layers || []).some(function(lyr) {
+    return layerHasPoints(lyr);
+  });
+  return hasPoints ? 'point' : 'data';
+}
+
+function groupPathDatasetsBySharedArcs(datasets) {
+  if (datasets.length < 2) {
+    return {
+      mergedDataset: datasets[0] || null,
+      components: []
+    };
+  }
+  var copy = datasets.map(copyDatasetForExport);
+  var merged = mergeDatasets(copy);
+  if (!merged.arcs || merged.arcs.size() === 0) {
+    return {
+      mergedDataset: null,
+      components: datasets.map(function(dataset) { return [dataset]; })
+    };
+  }
+  buildTopology(merged);
+  var parent = datasets.map(function(_, i) { return i; });
+  var arcOwner = new Map();
+  merged.layers.forEach(function(layer, layerIdx) {
+    var seen = new Set();
+    forEachArcId(layer.shapes || [], function(arcId) {
+      seen.add(arcId < 0 ? ~arcId : arcId);
+    });
+    seen.forEach(function(absId) {
+      if (!arcOwner.has(absId)) {
+        arcOwner.set(absId, layerIdx);
+      } else {
+        union(parent, layerIdx, arcOwner.get(absId));
+      }
+    });
+  });
+  var components = {};
+  datasets.forEach(function(dataset, i) {
+    var root = find(parent, i);
+    if (!components[root]) components[root] = [];
+    components[root].push(dataset);
+  });
+  var grouped = Object.keys(components).map(function(key) {
+    return components[key];
+  });
+  if (grouped.length == 1) {
+    return {
+      mergedDataset: merged,
+      components: []
+    };
+  }
+  return {
+    mergedDataset: null,
+    components: grouped
+  };
+}
+
+function find(parent, i) {
+  var p = parent[i];
+  if (p !== i) {
+    parent[i] = find(parent, p);
+  }
+  return parent[i];
+}
+
+function union(parent, a, b) {
+  var ra = find(parent, a);
+  var rb = find(parent, b);
+  if (ra !== rb) {
+    parent[rb] = ra;
+  }
+}
+
+function normalizeNumericCode(val) {
+  var n = +val;
+  return Number.isFinite(n) ? n : null;
+}
+
+function normalizeCrsOrg(org) {
+  if (!org || org == 'undefined') return null;
+  return String(org).toUpperCase();
+}
+
+function isTrustedCrsAuthority(org) {
+  return org == 'EPSG' || org == 'ESRI' || org == 'NONE';
+}
+
+function convertOrgToProjString(crs) {
+  var org = crs.organization.toLowerCase();
+  if (org == 'epsg' || org == 'esri') {
+    return org + ':' + crs.organization_coordsys_id;
+  }
+  return null;
+}
+
+function readFeatureTable(gpkg, table, opts) {
+  var featureDao = gpkg.getFeatureDao(table);
+  var iterator = featureDao.queryForEach();
+  var importer = new GeoJSONParser(opts);
+  var crs = getTableCrs(gpkg, table);
+
+  for (var row of iterator) {
+    var featureRow = featureDao.getRow(row);
+    var feature = convertFeatureRow(featureRow);
+    if (feature) {
+      importer.parseObject(feature);
+    }
+  }
+
+  var dataset = importer.done();
+  dataset.layers.forEach(function(lyr) {
+    lyr.name = table;
+  });
+  dataset.info = dataset.info || {};
+  dataset.info.geopackage_crs = crs;
+  if (isUsableWkt1Definition(crs?.definition)) {
+    dataset.info.wkt1 = crs.definition;
+  } else if (crs?.organization && crs.organization !== 'undefined') {
+    var crsString = convertOrgToProjString(crs);
+    if (crsString) {
+      dataset.info.crs_string = crsString;
+    }
+  }
+  return dataset;
+}
+
+function isUsableWkt1Definition(defn) {
+  if (!defn || defn === 'undefined') return false;
+  // GDAL may emit LOCAL_CS["Undefined SRS", ...] for null CRS;
+  // this is not a usable projected/geographic CRS for mapshaper.
+  if (/^\s*LOCAL_CS\[/i.test(defn)) return false;
+  return true;
+}
+
+function convertFeatureRow(featureRow) {
+  var feature = {
+    type: 'Feature',
+    properties: {},
+    geometry: null
+  };
+  try {
+    var geomData = featureRow.geometry;
+    if (geomData) {
+      feature.geometry = geomData.toGeoJSON();
+    }
+  } catch (e) {
+    // skip feature if geometry can't be parsed
+    return null;
+  }
+  var geomColName = featureRow.geometryColumn && featureRow.geometryColumn.name;
+  for (var key in featureRow.values) {
+    if (Object.prototype.hasOwnProperty.call(featureRow.values, key) &&
+        key !== geomColName) {
+      feature.properties[key] = featureRow.values[key];
+    }
+  }
+  feature.id = featureRow.id;
+  return feature;
+}
+
+function getTableCrs(gpkg, table) {
+  var contents, srsId, srs;
+  try {
+    contents = gpkg.getTableContents(table);
+    srsId = contents && (contents.srs_id ?? contents.srsId);
+    if (srsId > -1) {
+      srs = gpkg.getSrs(srsId);
+    }
+  } catch (e) {
+    srs = null;
+  }
+  return srs ? normalizeSrs(srs) : null;
+}
+
+function normalizeSrs(srs) {
+  var obj = {
+    id: srs.srs_id ?? srs.srsId ?? null,
+    organization: srs.organization ?? null,
+    organization_coordsys_id: srs.organization_coordsys_id ?? srs.organizationCoordsysId ?? null,
+    definition: srs.definition ?? null,
+    description: srs.description ?? null
+  };
+  var wkt2 = srs.definition_12_063 ?? srs.definition12063 ?? null;
+  if (wkt2 && wkt2 !== 'undefined') {
+    obj.definition_12_063 = wkt2;
+    if (!obj.definition) {
+      warnOnce('Unable to import WKT2 CRS from GeoPackage');
+    }
+  }
+  return obj;
+}

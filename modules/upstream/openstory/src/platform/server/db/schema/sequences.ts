@@ -1,0 +1,255 @@
+/**
+ * Sequences Schema
+ * Core content creation entities for video sequences
+ */
+
+import type { AspectRatio } from '@/models/aspect-ratios';
+import type { Resolution } from '@/models/resolutions';
+import type { InferInsertModel, InferSelectModel } from 'drizzle-orm';
+import { index, integer, snakeCase, text } from 'drizzle-orm/sqlite-core';
+import { generateId } from '@/platform/id';
+import { user } from './auth';
+// NOTE: shots imported in index.ts to avoid circular dependency
+// shots.ts imports sequences for foreign key reference
+import { styles } from './libraries';
+import { teams } from './teams';
+import type { GenerationStage } from '@/sequences/pipeline';
+import type { StoredStyleConfig } from '@/look/style-config';
+
+// Enum values as constants (SQLite doesn't have native enums)
+export const SEQUENCE_STATUSES = [
+  'draft',
+  'processing',
+  'completed',
+  'failed',
+  'archived',
+] as const;
+export type SequenceStatus = (typeof SEQUENCE_STATUSES)[number];
+
+export const MUSIC_STATUSES = [
+  'pending',
+  'generating',
+  'completed',
+  'failed',
+] as const;
+export type MusicStatus = (typeof MUSIC_STATUSES)[number];
+
+/**
+ * Sequences table
+ * Main video sequence/project entity
+ */
+export const sequences = snakeCase.table(
+  'sequences',
+  {
+    id: text()
+      .$defaultFn(() => generateId())
+      .primaryKey()
+      .notNull(),
+    teamId: text()
+      .notNull()
+      .references(() => teams.id, { onDelete: 'cascade' }),
+    title: text({ length: 500 }).notNull(),
+    script: text(),
+    // used to track the status of the sequence
+    status: text().$type<SequenceStatus>().default('draft').notNull(),
+    statusError: text(),
+    // CF Workflows instance id of the most recent /storyboard run. Lets the
+    // cron reconciler (reconcile-all.ts) verify a stuck 'processing' row
+    // against the instance's real status instead of leaving it spinning
+    // forever when the workflow dies without persisting an outcome (#839).
+    workflowRunId: text({ length: 100 }),
+    createdAt: integer({ mode: 'timestamp' })
+      .$defaultFn(() => new Date())
+      .notNull(),
+    updatedAt: integer({ mode: 'timestamp' })
+      .$defaultFn(() => new Date())
+      .notNull(),
+    createdBy: text().references(() => user.id, {
+      onDelete: 'set null',
+    }),
+    updatedBy: text().references(() => user.id, {
+      onDelete: 'set null',
+    }),
+    styleId: text()
+      .notNull()
+      .references(() => styles.id, { onDelete: 'set null' }),
+    // The live `sequence_style_versions` row (#1600): the recipe this sequence
+    // renders with, copied from styles.config on create / style change so
+    // catalog edits cannot stale existing work. Null while an automatic style
+    // is still being derived (#1213), and on a row a pre-#1600 worker wrote.
+    selectedStyleVersionId: text(),
+    // LEGACY snapshot column (#1600). Read only as the fallback for a
+    // sequence with no style version, never written. The `legacy` name keeps
+    // the SQL column but makes every raw reader a compile error. Drop it after
+    // a second backfill in a later deploy.
+    legacyStyleConfig: text('style_config', {
+      mode: 'json',
+    }).$type<StoredStyleConfig>(),
+    aspectRatio: text({ length: 10 })
+      .$type<AspectRatio>()
+      // Literal on purpose: a SQL default is DDL, and the schema may not
+      // value-import a domain. `aspect-ratios.test.ts` pins it to DEFAULT_ASPECT_RATIO.
+      .default('16:9' satisfies AspectRatio)
+      .notNull(),
+    // Output resolution tier every generation in this sequence is asked for
+    // (#1449). SQL default pinned to the literal '720p' to match the deployed
+    // column default — DEFAULT_RESOLUTION must NOT be written here: SQLite
+    // can't ALTER a column default without a full table rebuild, which
+    // CASCADE-deletes child rows on D1 (#612).
+    resolution: text({ length: 10 })
+      .$type<Resolution>()
+      .default('720p')
+      .notNull(),
+
+    // SQL default pinned to the literal 'anthropic/claude-haiku-4.5' to match
+    // every deployed DB's column default. DEFAULT_ANALYSIS_MODEL (see
+    // models.config.ts) must NOT be written here: SQLite can't ALTER a
+    // column default without a full table rebuild, which CASCADE-deletes
+    // child rows on D1 (#612). The scoped create (db/scoped/sequences.ts)
+    // substitutes DEFAULT_ANALYSIS_MODEL for an omitted analysisModel,
+    // mirroring imageModel / videoModel below.
+    analysisModel: text({ length: 100 })
+      .default('anthropic/claude-haiku-4.5')
+      .notNull(),
+    analysisDurationMs: integer().default(0).notNull(),
+    // SQL default pinned to the literal 'nano_banana_2' to match every deployed
+    // DB's column default. DEFAULT_IMAGE_MODEL was bumped to 'gpt_image_2'
+    // WITHOUT a migration; SQLite can't ALTER a column default without a full
+    // table rebuild, which CASCADE-deletes child rows on D1 (#612). The scoped
+    // create (db/scoped/sequences.ts) substitutes DEFAULT_IMAGE_MODEL for an
+    // omitted imageModel, mirroring videoModel below.
+    imageModel: text({ length: 100 }).default('nano_banana_2').notNull(),
+    // SQL default is pinned to 'kling_v3_pro' to match every deployed DB's
+    // column default (#801 changed DEFAULT_VIDEO_MODEL to grok WITHOUT a
+    // migration; SQLite can't ALTER a column default without a full table
+    // rebuild, which CASCADE-deletes child rows on D1 — see AGENTS.md). So
+    // db:generate stays clean. The app must NOT rely on this default: the
+    // scoped create (db/scoped/sequences.ts) substitutes DEFAULT_VIDEO_MODEL
+    // for an omitted videoModel, and create-sequences always passes the
+    // user's resolved selection. drizzle inlines `.default()` and ignores
+    // `$defaultFn` when both are set, so an app-level grok default can't live
+    // here.
+    videoModel: text({ length: 100 }).default('kling_v3_pro').notNull(),
+    workflow: text({ length: 100 }),
+
+    // The sequence's audio-model SETTING (like imageModel / videoModel) — the
+    // model a new primary track is asked of. Not a mirror of any track.
+    musicModel: text({ length: 100 }),
+    // The music track the sequence plays (#1115): a `sequence_music_variants`
+    // row. Soft pointer (no FK), like `selectedStyleVersionId`. Every scoped
+    // read projects the row's url / path / generatedAt under the old
+    // `musicUrl` / `musicPath` / `musicGeneratedAt` names.
+    selectedMusicVariantId: text(),
+    // The live music prompt: a `sequence_music_prompt_versions` row, projected
+    // as `musicPrompt` / `musicTags` / `musicPromptInputHash`. A pointer, not
+    // the newest row — an AI write whose hash already exists resolves to the
+    // older row.
+    selectedMusicPromptVersionId: text(),
+    // The claim (#1130): the primary track run whose result may take the
+    // pointer. Set by the trigger, consumed by completion in one guarded
+    // UPDATE, cleared by failure only while it still names that run's row.
+    pendingPromoteMusicVariantId: text(),
+    // Whether the sequence's background music is included in theatre playback
+    // and MP4 export. Default on (mirrors the old #687 "Include music in merged
+    // video" checkbox). Toggling it off mutes only the music track — scene and
+    // dialogue audio are unaffected (#834).
+    includeMusic: integer({ mode: 'boolean' }).default(true).notNull(),
+
+    // Poster image (sequence-level preview generated from the script). Stored
+    // in R2 as an origin-relative `/r2/` URL (#1117, #894) — rows written
+    // before that fix hold a provider CDN URL that may have expired, and fall
+    // back to the player's empty state until the sequence regenerates.
+    posterUrl: text(),
+
+    // Dedup for the "your video is ready" email (#1276). Conceptual key is
+    // `${sequenceId}:ready` — claimed with a CAS write so workflow step
+    // retries and smart-retry re-completes cannot double-send.
+    readyEmailSentAt: integer({ mode: 'timestamp' }),
+
+    // Sequence default for "does a shot animate from a rendered still"
+    // (`shots.useStartFrame` overrides it per shot, NULL = inherit; resolve
+    // with `usesStartFrame()`, never raw). Off by default: a new sequence
+    // renders reference-only, straight to video from the cast / location /
+    // element sheets, and this is the opt-in back to the frame-based
+    // workflow. Replaced the inverted `referenceOnly` (ADD COLUMN + backfill +
+    // DROP COLUMN, no rebuild, #612). Set at creation and never toggled
+    // after (no update path takes it): the storyboard trigger
+    // snapshots it onto the workflow payload,
+    // and every stored motion prompt's input hash folds the resolved mode in,
+    // so flipping it re-stales the prompts rather than mixing two styles.
+    generateStartFrames: integer({ mode: 'boolean' }).default(false).notNull(),
+
+    // Sequence default for "design an ElevenLabs voice per speaking
+    // character" (#1553). `characters.useVoice` overrides it per character,
+    // NULL = inherit; resolve with `usesVoice()`. Off by default: a saved
+    // voice spends an account-wide ElevenLabs slot. Snapshotted onto the
+    // storyboard payload at the trigger like `generateStartFrames`.
+    generateVoices: integer({ mode: 'boolean' }).default(false).notNull(),
+
+    // Render motion as Ark drafts (#1756): 480p previews the user approves
+    // shot by shot, then renders at quality from the draft's task id.
+    // Honoured only by models with `supportsDraftMode` on the BytePlus via;
+    // other models render as usual. Snapshotted onto every motion payload at
+    // the trigger like `resolution`.
+    draftMotion: integer({ mode: 'boolean' }).default(false).notNull(),
+
+    // Film length the user asked for, in seconds (#1593). NULL = auto: as
+    // long as the script needs. Only Enhance (and the rail chip afterwards)
+    // writes this; Generate without Enhance leaves NULL. Generation never
+    // reads it; the credit estimate and chip do. Each scene's length is its
+    // script label and its shots divide that.
+    targetDurationSeconds: integer(),
+
+    // How far the current/last run was asked to go — the only word on it
+    // (#1118 dropped the derived auto-generate columns). Nullable in SQL
+    // only; create always writes it and #1118 backfilled older rows. How far
+    // it got is not stored: what is left is the generation plan, derived
+    // from live rows (#1816, #1819).
+    generationStopAt: text().$type<GenerationStage>(),
+
+    // Suggested location IDs used during generation (for pre-populating the UI)
+    suggestedLocationIds: text({
+      mode: 'json',
+    }).$type<string[]>(),
+  },
+  (table) => [
+    index('idx_sequences_created_at').on(table.createdAt),
+    index('idx_sequences_status').on(table.status),
+    index('idx_sequences_style_id').on(table.styleId),
+    index('idx_sequences_team_id').on(table.teamId),
+  ]
+);
+
+// Type exports
+/** The stored row, legacy snapshot included (scoped module only). */
+export type SequenceRecord = InferSelectModel<typeof sequences>;
+
+/**
+ * A sequence with its style snapshot resolved from the selected
+ * `sequence_style_versions` row (#1600). What every scoped read returns.
+ */
+export type Sequence = Omit<SequenceRecord, 'legacyStyleConfig'> & {
+  styleConfig: StoredStyleConfig | null;
+} & SequenceMusicProjection;
+
+/**
+ * The music surface every scoped read projects from the version tables
+ * (#1115) — the selected prompt row, the selected track row, and the newest
+ * primary track row's lifecycle. Read-only: nothing writes these names.
+ */
+type SequenceMusicProjection = {
+  musicPrompt: string | null;
+  musicTags: string | null;
+  musicPromptInputHash: string | null;
+  musicUrl: string | null;
+  musicPath: string | null;
+  musicGeneratedAt: Date | null;
+  musicStatus: MusicStatus;
+  musicError: string | null;
+};
+
+/** A new sequence row. Its style snapshot is written as its first version. */
+export type NewSequence = Omit<
+  InferInsertModel<typeof sequences>,
+  'legacyStyleConfig' | 'selectedStyleVersionId'
+>;

@@ -1,0 +1,84 @@
+import { countArcsInShapes } from '../paths/mapshaper-path-utils';
+import { getSliverTest } from '../polygons/mapshaper-slivers';
+import { getDefaultSliverThreshold } from '../polygons/mapshaper-slivers';
+import { editShapes } from '../paths/mapshaper-shape-utils';
+import { applyDefaultGapWidthOpts, getSliverFilter } from '../polygons/mapshaper-slivers';
+import { message } from '../utils/mapshaper-logging';
+import utils from '../utils/mapshaper-utils';
+import cmd from '../mapshaper-cmd';
+import { absArcId } from '../paths/mapshaper-arc-utils';
+import { markLayerChanged, noteLayerWillChange } from '../undo/mapshaper-undo-tracking';
+
+// Remove small-area polygon rings (very simple implementation of sliver removal)
+// TODO: more sophisticated sliver detection (e.g. could consider ratio of area to perimeter)
+// TODO: consider merging slivers into adjacent polygons to prevent gaps from forming
+// TODO: consider separate gap removal function as an alternative to merging slivers
+//
+cmd.filterSlivers = function(lyr, dataset, opts) {
+  if (lyr.geometry_type != 'polygon') {
+    return 0;
+  }
+  return filterSlivers(lyr, dataset, opts);
+};
+
+function filterSlivers(lyr, dataset, optsArg) {
+  var opts = applyDefaultGapWidthOpts(optsArg);
+  // Legacy area path only: keep the historical sliver-control=1 default.
+  // Do not inject it before applyDefaultGapWidthOpts, or the implicit default
+  // would lock the command onto the area path.
+  if (opts.gap_width == null && opts.sliver_control == null) {
+    opts.sliver_control = 1;
+  }
+  var filterData = getSliverFilter(lyr, dataset, opts);
+  var ringTest = filterData.filter;
+  var removed = 0;
+  var pathFilter = function(path, i, paths) {
+    if (ringTest(path, i, paths)) {
+      removed++;
+      return null;
+    }
+  };
+
+  noteLayerWillChange(lyr, {operation: 'filter-slivers', unit: 'shapes'});
+  editShapes(lyr.shapes, pathFilter);
+  markLayerChanged(lyr, {operation: 'filter-slivers', unit: 'shapes'});
+  message(utils.format("Removed %'d sliver%s using %s", removed, utils.pluralSuffix(removed), filterData.label));
+
+  // Remove null shapes (likely removed by clipping/erasing, although possibly already present)
+  if (opts.remove_empty) {
+    cmd.filterFeatures(lyr, dataset.arcs, {remove_empty: true, verbose: false});
+  }
+  return removed;
+}
+
+export function filterClipSlivers(lyr, clipLyr, arcs) {
+  var threshold = getDefaultSliverThreshold(lyr, arcs);
+  // message('Using variable sliver threshold (based on ' + (threshold / 1e6) + ' sqkm)');
+  var ringTest = getSliverTest(arcs, threshold, 1);
+  var flags = new Uint8Array(arcs.size());
+  var removed = 0;
+  var pathFilter = function(path) {
+    var prevArcs = 0,
+        newArcs = 0;
+    for (var i=0, n=path && path.length || 0; i<n; i++) {
+      if (flags[absArcId(path[i])] > 0) {
+        newArcs++;
+      } else {
+        prevArcs++;
+      }
+    }
+    // filter paths that contain arcs from both original and clip/erase layers
+    //   and are small
+    if (newArcs > 0 && prevArcs > 0 && ringTest(path)) {
+      removed++;
+      return null;
+    }
+  };
+
+  countArcsInShapes(clipLyr.shapes, flags);
+  noteLayerWillChange(lyr, {operation: 'filter-clip-slivers', unit: 'shapes'});
+  editShapes(lyr.shapes, pathFilter);
+  markLayerChanged(lyr, {operation: 'filter-clip-slivers', unit: 'shapes'});
+  return removed;
+}
+

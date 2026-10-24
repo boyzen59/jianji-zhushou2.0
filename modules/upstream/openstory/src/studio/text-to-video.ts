@@ -1,0 +1,627 @@
+/**
+ * Studio clips (#1274). Sequence video keys still pick the family; the
+ * `mode` picks the endpoint:
+ *
+ *   - `text`      — the family's text-to-video sibling (prompt only)
+ *   - `reference` — reference-to-video: up to N stills bound in the prompt as
+ *                   `@Image1`…`@ImageN`
+ *   - `frames`    — image-to-video: a start frame, plus an end frame where the
+ *                   endpoint has `end_image_url` (Kling, Seedance, H3 Max,
+ *                   Omni Flash)
+ *   - `edit`      — rewrite an existing clip (#1925): the source rides as
+ *                   `@Video1` and the length follows it (`duration: 'auto'`).
+ *                   Seedance 2.5 on Ark only (`studioSupportsMode`).
+ *
+ * Client-safe: no env, no adapters.
+ */
+
+import { needsLikenessCheck } from '@/cast/upload-rights';
+import {
+  IMAGE_TO_VIDEO_MODELS,
+  isValidImageToVideoModel,
+  videoPromptHardLimit,
+  type ImageToVideoModel,
+} from '@/models/models';
+import {
+  assertPromptWithinHardLimit,
+  warnLongPrompt,
+} from '@/models/prompt-length';
+import { motionResolutionTokensForModel } from '@/motion/model-capabilities';
+import type { AspectRatio } from '@/models/aspect-ratios';
+import {
+  DEFAULT_RESOLUTION,
+  pickVideoResolution,
+  type Resolution,
+} from '@/models/resolutions';
+
+const STUDIO_TEXT_TO_VIDEO_ENDPOINTS = {
+  grok_imagine_video_1_5: 'xai/grok-imagine-video/v1.5/text-to-video',
+  gemini_omni_flash: 'fal-ai/gemini-omni-1.1-flash',
+  kling_v3_pro: 'fal-ai/kling-video/v3/pro/text-to-video',
+  minimax_h3_max: 'minimax/h3-max/text-to-video',
+  seedance_v2: 'bytedance/seedance-2.0/enterprise/v2/text-to-video',
+  seedance_v2_5: 'bytedance/seedance-2.5/text-to-video',
+  seedance_v2_mini: 'bytedance/seedance-2.0/mini/text-to-video',
+} as const satisfies Record<ImageToVideoModel, string>;
+
+const RANGE = (min: number, max: number): readonly number[] =>
+  Array.from({ length: max - min + 1 }, (_, i) => min + i);
+
+/** Seconds the T2V sibling accepts. Empty = duration is not a request field. */
+const STUDIO_VIDEO_DURATIONS = {
+  grok_imagine_video_1_5: RANGE(1, 15),
+  gemini_omni_flash: RANGE(3, 10),
+  kling_v3_pro: RANGE(3, 15),
+  minimax_h3_max: RANGE(5, 15),
+  seedance_v2: RANGE(4, 15),
+  seedance_v2_5: RANGE(4, 30),
+  seedance_v2_mini: RANGE(4, 15),
+} as const satisfies Record<ImageToVideoModel, readonly number[]>;
+
+/** Of our `AspectRatio` set, the ones the T2V sibling accepts. */
+const STUDIO_VIDEO_ASPECTS = {
+  grok_imagine_video_1_5: ['16:9', '1:1', '9:16'],
+  gemini_omni_flash: ['16:9', '9:16'],
+  kling_v3_pro: ['16:9', '9:16', '1:1'],
+  minimax_h3_max: ['16:9', '1:1', '9:16'],
+  seedance_v2: ['16:9', '1:1', '9:16'],
+  seedance_v2_5: ['16:9', '1:1', '9:16'],
+  seedance_v2_mini: ['16:9', '1:1', '9:16'],
+} as const satisfies Record<ImageToVideoModel, readonly AspectRatio[]>;
+
+const STUDIO_VIDEO_HAS_AUDIO = {
+  grok_imagine_video_1_5: false,
+  gemini_omni_flash: false,
+  kling_v3_pro: true,
+  minimax_h3_max: false,
+  seedance_v2: true,
+  seedance_v2_5: true,
+  seedance_v2_mini: true,
+} as const satisfies Record<ImageToVideoModel, boolean>;
+
+export const STUDIO_VIDEO_MODES = [
+  'text',
+  'reference',
+  'frames',
+  'edit',
+] as const;
+
+export type StudioVideoMode = (typeof STUDIO_VIDEO_MODES)[number];
+
+type StudioReferenceEndpoint = {
+  endpointId: string;
+  /** Request field the stills go in. */
+  imageField: 'image_urls' | 'reference_image_urls';
+  /** How the prompt names still N (1-based). */
+  imageTag: (n: number) => string;
+  maxImages: number;
+  /** Bound in the prompt as `@Video1`… unless `videoTag` overrides. */
+  maxVideos: number;
+  /** Bound in the prompt as `@Audio1`… unless `audioTag` overrides. */
+  maxAudio: number;
+  /**
+   * Combined stills + clips + audio cap. Fal H3 Max r2v rejects more than
+   * 12 files even when each list is within its own max (9/3/3 = 15).
+   */
+  maxCombined?: number;
+  /** Request field for reference clips. Defaults to `video_urls`. */
+  videoField?: 'video_urls' | 'reference_video_urls';
+  /** Request field for reference audio. Defaults to `audio_urls`. */
+  audioField?: 'audio_urls' | 'reference_audio_urls';
+  videoTag?: (n: number) => string;
+  audioTag?: (n: number) => string;
+  /** Shown when the reference sibling is a different Kling/Grok tier. */
+  note?: string;
+};
+
+const atImage = (n: number): string => `@Image${n}`;
+const atVideo = (n: number): string => `@Video${n}`;
+const atAudio = (n: number): string => `@Audio${n}`;
+const h3Image = (n: number): string => `Image ${n}`;
+
+/** Reference-to-video siblings. */
+const STUDIO_REFERENCE_ENDPOINTS: Partial<
+  Record<ImageToVideoModel, StudioReferenceEndpoint>
+> = {
+  seedance_v2: {
+    endpointId: 'bytedance/seedance-2.0/enterprise/v2/reference-to-video',
+    imageField: 'image_urls',
+    imageTag: atImage,
+    maxImages: 9,
+    maxVideos: 3,
+    maxAudio: 3,
+  },
+  seedance_v2_5: {
+    endpointId: 'bytedance/seedance-2.5/reference-to-video',
+    imageField: 'image_urls',
+    imageTag: atImage,
+    maxImages: 9,
+    maxVideos: 3,
+    maxAudio: 3,
+  },
+  seedance_v2_mini: {
+    endpointId: 'bytedance/seedance-2.0/mini/reference-to-video',
+    imageField: 'image_urls',
+    imageTag: atImage,
+    maxImages: 9,
+    maxVideos: 3,
+    maxAudio: 3,
+  },
+  grok_imagine_video_1_5: {
+    endpointId: 'xai/grok-imagine-video/v1.5/reference-to-video',
+    imageField: 'reference_image_urls',
+    // xAI numbers references from zero.
+    imageTag: (n) => `<IMAGE_${n - 1}>`,
+    maxImages: 7,
+    maxVideos: 0,
+    maxAudio: 0,
+  },
+  kling_v3_pro: {
+    endpointId: 'fal-ai/kling-video/o3/pro/reference-to-video',
+    imageField: 'image_urls',
+    imageTag: atImage,
+    maxImages: 4,
+    maxVideos: 0,
+    maxAudio: 0,
+    note: 'Reference mode runs on Kling O3 Pro, the tier with a reference endpoint. Start and end frames are not available in this mode.',
+  },
+  gemini_omni_flash: {
+    endpointId: 'fal-ai/gemini-omni-1.1-flash/reference-to-video',
+    imageField: 'image_urls',
+    // Google numbers references from zero.
+    imageTag: (n) => `<IMAGE_REF_${n - 1}>`,
+    maxImages: 7,
+    maxVideos: 0,
+    maxAudio: 0,
+  },
+  // Per-type 9/3/3; fal combined cap is 12 files. Filling every list (15)
+  // 422s — `maxCombined` is the real ceiling.
+  minimax_h3_max: {
+    endpointId: 'minimax/h3-max/reference-to-video',
+    imageField: 'reference_image_urls',
+    imageTag: h3Image,
+    videoField: 'reference_video_urls',
+    audioField: 'reference_audio_urls',
+    videoTag: (n) => `Video ${n}`,
+    audioTag: (n) => `Audio ${n}`,
+    maxImages: 9,
+    maxVideos: 3,
+    maxAudio: 3,
+    maxCombined: 12,
+  },
+};
+
+export function studioReferenceEndpoint(
+  model: ImageToVideoModel
+): StudioReferenceEndpoint | null {
+  return STUDIO_REFERENCE_ENDPOINTS[model] ?? null;
+}
+
+/** Image-to-video endpoints whose schema has `end_image_url`. */
+const STUDIO_END_FRAME_MODELS = {
+  kling_v3_pro: true,
+  minimax_h3_max: true,
+  seedance_v2: true,
+  seedance_v2_5: true,
+  seedance_v2_mini: true,
+  gemini_omni_flash: true,
+} as const satisfies Partial<Record<ImageToVideoModel, true>>;
+
+/** 0 when the model has no reference-to-video sibling. */
+export function studioReferenceLimit(model: ImageToVideoModel): number {
+  return STUDIO_REFERENCE_ENDPOINTS[model]?.maxImages ?? 0;
+}
+
+/** 0 when the reference endpoint takes no video clips. */
+export function studioVideoRefLimit(model: ImageToVideoModel): number {
+  return STUDIO_REFERENCE_ENDPOINTS[model]?.maxVideos ?? 0;
+}
+
+/** 0 when the reference endpoint takes no audio. */
+export function studioAudioLimit(model: ImageToVideoModel): number {
+  return STUDIO_REFERENCE_ENDPOINTS[model]?.maxAudio ?? 0;
+}
+
+/** Combined stills+clips+audio cap, or null when the endpoint has none. */
+export function studioCombinedRefCap(model: ImageToVideoModel): number | null {
+  return STUDIO_REFERENCE_ENDPOINTS[model]?.maxCombined ?? null;
+}
+
+export function studioSupportsEndFrame(model: ImageToVideoModel): boolean {
+  return model in STUDIO_END_FRAME_MODELS;
+}
+
+/**
+ * Models that can rewrite an existing clip (#1925). Seedance 2.5 edits on Ark
+ * (the source as a reference video, `duration: -1`). Omni Flash, Kling, H3
+ * and Grok 1.5 have no edit API; Seedance 2.0's enterprise video-to-video is
+ * unwired.
+ */
+export const STUDIO_EDIT_MODEL = 'seedance_v2_5' satisfies ImageToVideoModel;
+
+export function studioSupportsMode(
+  model: ImageToVideoModel,
+  mode: StudioVideoMode
+): boolean {
+  if (mode === 'edit') return model === STUDIO_EDIT_MODEL;
+  return mode !== 'reference' || studioReferenceLimit(model) > 0;
+}
+
+/**
+ * Only a Seedance clip is edited (#1925): Seedance rewriting another
+ * family's clip is a different look, not an edit of it.
+ */
+export function studioCanEditSource(videoModel: unknown): boolean {
+  return (
+    typeof videoModel === 'string' &&
+    isValidImageToVideoModel(videoModel) &&
+    studioSupportsAutoDuration(videoModel)
+  );
+}
+
+/**
+ * Whether a studio run took an uploaded reference clip; such a clip is never
+ * edited (#1925). A generated reference clip came from gated inputs, so it
+ * does not count (#1930).
+ */
+export function studioUsedUploadedReferenceVideo(input: {
+  referenceVideos?: unknown;
+}): boolean {
+  return (
+    Array.isArray(input.referenceVideos) &&
+    input.referenceVideos.some(
+      (url) => typeof url !== 'string' || needsLikenessCheck(url)
+    )
+  );
+}
+
+/** The instruction Seedance reads an edit from: the source is `@Video1`. */
+export function studioEditPrompt(prompt: string): string {
+  return /^\s*edit @?video1\b/i.test(prompt)
+    ? prompt
+    : `Edit @Video1. ${prompt}`;
+}
+
+/** Prompt-token prefix, not a media kind (that is `StudioReferenceKind`). */
+export type StudioReferenceToken = 'Image' | 'Video' | 'Audio';
+
+/**
+ * `ImageN` / `VideoN` / `AudioN` tokens (what the pill stores) → the
+ * provider's syntax: `@ImageN` by default, or the model's own still tag.
+ *
+ * Case-insensitive, and an `@` the user typed or pasted is consumed rather
+ * than blocking the match (#1748): `@image1` reaches Grok as `<IMAGE_0>`, not
+ * as literal prose the model never binds.
+ */
+export function tagStudioReferences(
+  prompt: string,
+  model?: ImageToVideoModel
+): string {
+  const reference = model ? STUDIO_REFERENCE_ENDPOINTS[model] : undefined;
+  const imageTag = reference?.imageTag ?? atImage;
+  const videoTag = reference?.videoTag ?? atVideo;
+  const audioTag = reference?.audioTag ?? atAudio;
+  return prompt.replace(
+    /(^|[^A-Za-z0-9_-])@?(image|video|audio)(\d+)(?=[^A-Za-z0-9_-]|$)/gi,
+    (_match, prefix: string, kind: string, digits: string) => {
+      const n = Number(digits);
+      const lower = kind.toLowerCase();
+      if (lower === 'image') return `${prefix}${imageTag(n)}`;
+      if (lower === 'video') return `${prefix}${videoTag(n)}`;
+      return `${prefix}${audioTag(n)}`;
+    }
+  );
+}
+
+/**
+ * Matches each name, with or without the `@` the pill renders, on a word
+ * boundary that tolerates the spaces a name contains. Longest first so
+ * "Sienna Blake Jr" wins over "Sienna Blake".
+ */
+function aliasPattern(aliases: readonly string[]): RegExp {
+  const forms = [...aliases]
+    .sort((a, b) => b.length - a.length)
+    .map((a) => a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|');
+  return new RegExp(`(^|[^A-Za-z0-9_-])@?(${forms})(?=[^A-Za-z0-9_-]|$)`, 'gi');
+}
+
+/**
+ * A named reference (talent, location, element) stays spelled by its name in
+ * the composer — `@Sienna Blake` reads as the person, `@Image3` does not
+ * (#1748). The name is swapped for the positional token on the way to the
+ * model, where only the slot has meaning.
+ *
+ * ponytail: first alias wins on a duplicate name; disambiguate by index if
+ * two talent ever share one.
+ */
+export function resolveStudioAliases(
+  prompt: string,
+  aliases: readonly { alias: string; token: string }[]
+): string {
+  const named = aliases.filter((a) => a.alias.trim().length > 0);
+  if (named.length === 0) return prompt;
+  const byAlias = new Map<string, string>();
+  for (const { alias, token } of named) {
+    const key = alias.toLowerCase();
+    if (!byAlias.has(key)) byAlias.set(key, token);
+  }
+  return prompt.replace(
+    aliasPattern(named.map((a) => a.alias)),
+    (match, prefix: string, form: string) => {
+      const token = byAlias.get(form.toLowerCase());
+      return token === undefined ? match : `${prefix}${token}`;
+    }
+  );
+}
+
+/**
+ * Drop a named reference's mentions when its tile goes away — the positional
+ * counterpart is `renumberStudioReferences`, which cannot see a name.
+ */
+export function dropStudioAlias(prompt: string, alias: string): string {
+  if (alias.trim().length === 0) return prompt;
+  return prompt.replace(
+    aliasPattern([alias]),
+    (_match, prefix: string) => prefix
+  );
+}
+
+/**
+ * References the prompt names that nothing is attached to (#1748):
+ * `@Image5` with two stills on the composer, or `@bluesamurai` when that
+ * talent was never attached. Returned in the composer's spelling, in the
+ * order they appear, deduped.
+ *
+ * Two shapes count as naming a reference. A slot token (`Image5`, `@image5`)
+ * is checked against what is attached for its kind — the pill stores it bare,
+ * so it counts with or without the `@`. Anything else only counts with an
+ * explicit `@`, which is the user saying "this is a reference"; a bare word
+ * is prose. `@` mid-word is left alone so an email address is not a warning.
+ */
+export function unresolvedStudioReferences(
+  prompt: string,
+  attached: Record<'image' | 'video' | 'audio', number>,
+  /** Names of the attached references (talent, locations, elements). */
+  aliases: readonly string[] = []
+): string[] {
+  const names = aliases
+    .filter((alias) => alias.trim().length > 0)
+    .map((alias) => alias.toLowerCase());
+  const found: string[] = [];
+  const pattern =
+    /(^|[^A-Za-z0-9_-])@?(image|video|audio)(\d+)(?=[^A-Za-z0-9_-]|$)|(^|[^A-Za-z0-9_-])@([A-Za-z0-9_-]+)/gi;
+
+  for (const match of prompt.matchAll(pattern)) {
+    const kind = match[2]?.toLowerCase();
+    if (kind === 'image' || kind === 'video' || kind === 'audio') {
+      const n = Number(match[3]);
+      if (n >= 1 && n <= attached[kind]) continue;
+      const label = kind[0]?.toUpperCase() + kind.slice(1);
+      if (!found.includes(`@${label}${n}`)) found.push(`@${label}${n}`);
+      continue;
+    }
+    const word = match[5];
+    if (word === undefined) continue;
+    // A name can hold spaces, so match the rest of the prompt from the `@`,
+    // not just the first word after it.
+    const from = match.index + (match[4]?.length ?? 0) + 1;
+    const rest = prompt.slice(from).toLowerCase();
+    if (names.some((name) => rest.startsWith(name))) continue;
+    if (!found.includes(`@${word}`)) found.push(`@${word}`);
+  }
+  return found;
+}
+
+/**
+ * Drop the `Image{removed+1}` token and shift the ones after it down by one,
+ * so the prompt keeps pointing at the same stills after a tile is removed.
+ */
+export function renumberStudioReferences(
+  prompt: string,
+  removedIndex: number,
+  kind: StudioReferenceToken = 'Image'
+): string {
+  return prompt.replace(
+    new RegExp(`(^|[^A-Za-z0-9_-])@?${kind}(\\d+)(?=[^A-Za-z0-9_-]|$)`, 'gi'),
+    (match: string, prefix: string, digits: string) => {
+      const n = Number(digits);
+      if (n === removedIndex + 1) return prefix;
+      if (n > removedIndex + 1) return `${prefix}${kind}${n - 1}`;
+      return match;
+    }
+  );
+}
+
+/**
+ * The model's own spelling of a tier, or undefined when it takes none (#1449).
+ * The tokens come from the i2v endpoint's generated schema — the studio T2V
+ * and reference-to-video siblings advertise the same enum, so there is one
+ * source for both routes rather than a hand-kept copy that can drift.
+ */
+export function studioVideoResolution(
+  model: ImageToVideoModel,
+  resolution: Resolution | undefined
+): string | undefined {
+  const options = motionResolutionTokensForModel(model);
+  if (options.length === 0) return undefined;
+  return pickVideoResolution(options, resolution ?? DEFAULT_RESOLUTION);
+}
+
+export function studioVideoEndpointId(
+  model: ImageToVideoModel,
+  mode: StudioVideoMode = 'text'
+): string {
+  switch (mode) {
+    case 'text':
+      return STUDIO_TEXT_TO_VIDEO_ENDPOINTS[model];
+    // Priced and labelled as the reference sibling: an edit is a
+    // reference-to-video task with the source as its one clip.
+    case 'edit':
+    case 'reference': {
+      const reference = STUDIO_REFERENCE_ENDPOINTS[model];
+      if (!reference) {
+        throw new Error(`${model} has no reference-to-video endpoint`);
+      }
+      return reference.endpointId;
+    }
+    case 'frames':
+      return IMAGE_TO_VIDEO_MODELS[model].id;
+  }
+}
+
+/** Every fal endpoint a studio clip can hit, for the pricing refresh. */
+export function studioVideoEndpointIds(): string[] {
+  return [
+    ...Object.values(STUDIO_TEXT_TO_VIDEO_ENDPOINTS),
+    ...Object.values(STUDIO_REFERENCE_ENDPOINTS).map((e) => e.endpointId),
+  ];
+}
+
+export function studioVideoSupportsAudio(model: ImageToVideoModel): boolean {
+  return STUDIO_VIDEO_HAS_AUDIO[model];
+}
+
+/** Every second count the model accepts, ascending. Empty = not a request field. */
+export function studioVideoDurations(
+  model: ImageToVideoModel
+): readonly number[] {
+  return STUDIO_VIDEO_DURATIONS[model];
+}
+
+/**
+ * A clip length, or `'auto'`: the model picks it (#1925). Seedance only —
+ * fal takes the string `'auto'`, Ark `duration: -1`.
+ */
+export type StudioDuration = number | 'auto';
+
+const STUDIO_AUTO_DURATION = {
+  seedance_v2: true,
+  seedance_v2_5: true,
+  seedance_v2_mini: true,
+} as const satisfies Partial<Record<ImageToVideoModel, true>>;
+
+export function studioSupportsAutoDuration(model: ImageToVideoModel): boolean {
+  return model in STUDIO_AUTO_DURATION;
+}
+
+/** `'auto'` where the model takes it, else the nearest second it accepts. */
+export function snapStudioVideoDuration(
+  requested: StudioDuration | undefined,
+  model: ImageToVideoModel
+): StudioDuration {
+  if (requested === 'auto' && studioSupportsAutoDuration(model)) return 'auto';
+  return snapStudioSeconds(requested === 'auto' ? undefined : requested, model);
+}
+
+/**
+ * Seconds to price a clip at. Auto holds the model's longest clip — the
+ * settle bills what the provider reports, and the leftover is released.
+ */
+export function studioBillableSeconds(
+  duration: StudioDuration | undefined,
+  model: ImageToVideoModel
+): number {
+  if (duration === 'auto') {
+    const valid = STUDIO_VIDEO_DURATIONS[model];
+    return valid[valid.length - 1] ?? 5;
+  }
+  return snapStudioSeconds(duration, model);
+}
+
+function snapStudioSeconds(
+  requested: number | undefined,
+  model: ImageToVideoModel
+): number {
+  const valid = STUDIO_VIDEO_DURATIONS[model];
+  if (valid.length === 0) return requested ?? 5;
+  const target = requested ?? valid[0] ?? 5;
+  return valid.reduce((best, value) =>
+    Math.abs(value - target) < Math.abs(best - target) ? value : best
+  );
+}
+
+function encodeDuration(
+  seconds: StudioDuration,
+  model: ImageToVideoModel
+): string | number {
+  if (seconds === 'auto') return 'auto';
+  switch (model) {
+    case 'kling_v3_pro':
+    case 'seedance_v2':
+    case 'seedance_v2_5':
+    case 'seedance_v2_mini':
+      return String(seconds);
+    default:
+      return seconds;
+  }
+}
+
+type StudioVideoInput = {
+  prompt: string;
+  model: ImageToVideoModel;
+  duration?: StudioDuration;
+  aspectRatio?: AspectRatio;
+  resolution?: Resolution;
+  generateAudio?: boolean;
+};
+
+export type StudioVideoRequest = {
+  prompt: string;
+  /** Whole seconds; the longest clip when `auto` (see `studioBillableSeconds`). */
+  duration: number;
+  /** The model picks the length: fal `'auto'`, Ark `duration: -1`. */
+  auto: boolean;
+  modelOptions: Record<string, unknown>;
+};
+
+/**
+ * Fal T2V body for a sequence video key (reference mode adds its media
+ * fields on top). Native Grok ignores `modelOptions` and uses `prompt` +
+ * `duration` + size.
+ */
+export function buildStudioVideoInput(
+  options: StudioVideoInput
+): StudioVideoRequest {
+  const { model, prompt } = options;
+  // Never truncated and never rewritten (#1754). Studio has no prompt
+  // versions, so a shortening here would be an edit the user never sees —
+  // the sequences rescue is the only place that shortens. Past a ceiling the
+  // via enforces, refuse in our own words; the composer disables Generate so
+  // this is only the backstop.
+  assertPromptWithinHardLimit(
+    prompt,
+    videoPromptHardLimit(model),
+    IMAGE_TO_VIDEO_MODELS[model].name
+  );
+  // Over a mere recommendation is a log line; the prompt still goes out whole.
+  warnLongPrompt(prompt, IMAGE_TO_VIDEO_MODELS[model], {
+    model,
+    surface: 'studio',
+  });
+  const snapped = snapStudioVideoDuration(options.duration, model);
+  const duration = studioBillableSeconds(snapped, model);
+  const modelOptions: Record<string, unknown> = {};
+
+  if (STUDIO_VIDEO_DURATIONS[model].length > 0) {
+    modelOptions.duration = encodeDuration(snapped, model);
+  }
+
+  const allowedAspects: readonly AspectRatio[] = STUDIO_VIDEO_ASPECTS[model];
+  if (options.aspectRatio && allowedAspects.includes(options.aspectRatio)) {
+    modelOptions.aspect_ratio = options.aspectRatio;
+  }
+
+  if (STUDIO_VIDEO_HAS_AUDIO[model] && options.generateAudio !== undefined) {
+    modelOptions.generate_audio = options.generateAudio;
+  }
+
+  const resolution = studioVideoResolution(model, options.resolution);
+  if (resolution) modelOptions.resolution = resolution;
+
+  if (model === 'minimax_h3_max') {
+    modelOptions.prompt_expansion_mode = 'balanced';
+  }
+
+  return { prompt, duration, auto: snapped === 'auto', modelOptions };
+}

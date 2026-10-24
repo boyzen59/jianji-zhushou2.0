@@ -1,0 +1,1188 @@
+import { playHoverPreview } from '@/ui/play-hover-preview';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/ui/shadcn/alert-dialog';
+import { Button } from '@/ui/shadcn/button';
+import { draftBadgeLabel, draftTaskUsable } from '@/motion/draft-mode';
+import { seedanceUserFacingError } from '@/motion/seedance-edit';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/ui/shadcn/dialog';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/ui/shadcn/tooltip';
+import { SignInButton } from '@/platform/ui/auth/sign-in-button';
+import { EmptyState } from '@/ui/shadcn/empty-state';
+import { Skeleton } from '@/ui/shadcn/skeleton';
+import { AppImage } from '@/ui/shadcn/app-image';
+import { ElementThumbnail } from '@/cast/ui/element/element-thumbnail';
+import { HighlightedPrompt } from '@/ui/text-editor/mention/highlighted-prompt';
+import type { MentionItem } from '@/shots/ui/prompt-mention/mention-items';
+import { Textarea } from '@/ui/shadcn/textarea';
+import { Switch } from '@/ui/shadcn/switch';
+import { isOfferedVideoModel } from '@/models/models';
+import { useViaAvailability } from '@/models/ui/use-via-availability';
+import {
+  STUDIO_EDIT_MODEL,
+  studioCanEditSource,
+  studioUsedUploadedReferenceVideo,
+} from '@/studio/text-to-video';
+import {
+  useDeleteStudioAsset,
+  useEditStudioAsset,
+  useRenderStudioAssetAtQuality,
+  useStudioEditHistory,
+  useStudioPendingCreates,
+  useToggleStudioFavorite,
+} from './use-studio-assets';
+import type { GeneratedAsset } from '@/platform/server/db/schema';
+import {
+  studioAspectRatio,
+  studioDownloadFilename,
+  studioDownloadHref,
+  studioPosterOutput,
+  studioPrimaryOutput,
+  studioPrompt,
+  studioShareUrl,
+} from './outputs';
+import {
+  readableStudioPrompt,
+  studioGenerationFacts,
+  studioReuse,
+  studioShownReferences,
+  type StudioReuse,
+  type StudioShownReference,
+} from './prompt-display';
+import {
+  CONTENT_REJECTION_USER_TITLE,
+  isContentRejectionError,
+} from '@/models/content-rejection';
+import { estimateStudioProgress } from './progress';
+import { copyTextToClipboard } from '@/ui/clipboard';
+import { VideoPlayer } from '@/motion/ui/video-player';
+import type { AspectRatio } from '@/models/aspect-ratios';
+import { cn } from '@/ui/utils';
+import { usePostHog } from '@posthog/react';
+import {
+  AudioLines,
+  ChevronLeft,
+  ChevronRight,
+  Copy,
+  Download,
+  Images,
+  Link,
+  RotateCcw,
+  Star,
+  Trash2,
+  Sparkles,
+} from 'lucide-react';
+import {
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from 'react';
+import { toast } from 'sonner';
+
+/** Wall clock ticking once a second while `active`; null otherwise. */
+function useNow(active: boolean) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [active]);
+  return active ? now : null;
+}
+
+export type StudioGalleryAsset = GeneratedAsset & {
+  creatorName?: string | null;
+  creatorEmail?: string | null;
+};
+
+/**
+ * What a failed card and the detail pane show. Seedance sentences this app
+ * wrote pass through. Any other stored sentence stays, so a fal failure is
+ * not replaced with "Generation failed".
+ */
+export function studioShownFailure(error: string | null | undefined): string {
+  if (isContentRejectionError(error)) return CONTENT_REJECTION_USER_TITLE;
+  const plain = seedanceUserFacingError(error);
+  if (plain) return plain;
+  const stored = error?.trim();
+  return stored ? stored : 'Generation failed';
+}
+
+function StudioCard({
+  asset,
+  onOpen,
+  supportMode,
+}: {
+  asset: StudioGalleryAsset;
+  onOpen: () => void;
+  supportMode: boolean;
+}) {
+  const favorite = useToggleStudioFavorite();
+  const renderAtQuality = useRenderStudioAssetAtQuality();
+  const primary = studioPrimaryOutput(asset);
+  const poster = studioPosterOutput(asset);
+  // A finished Ark draft inside its seven-day window (#1756).
+  const renderable =
+    !supportMode &&
+    Boolean(asset.draftTaskId) &&
+    asset.status === 'completed' &&
+    draftTaskUsable(asset.createdAt);
+  const prompt = studioPrompt(asset);
+  const inFlight = asset.status === 'queued' || asset.status === 'running';
+  const isVideo = primary?.contentType.startsWith('video/');
+  const now = useNow(inFlight);
+  const progress =
+    now === null
+      ? null
+      : estimateStudioProgress(
+          asset.activity === 'video' ? 'video' : 'image',
+          asset.createdAt,
+          now
+        );
+
+  return (
+    <article className="group relative overflow-hidden rounded-lg border bg-muted">
+      <button
+        type="button"
+        onClick={onOpen}
+        className="block w-full overflow-hidden text-left"
+        style={{ aspectRatio: studioAspectRatio(asset).replace(':', ' / ') }}
+        aria-label={prompt || 'Generated asset'}
+      >
+        {inFlight ? (
+          <Skeleton className="h-full w-full rounded-none" />
+        ) : asset.status === 'failed' ? (
+          <div className="flex h-full items-center justify-center p-4 text-center text-sm text-destructive">
+            <span className="line-clamp-6">
+              {studioShownFailure(asset.error)}
+            </span>
+          </div>
+        ) : isVideo && primary ? (
+          <video
+            src={primary.url}
+            poster={poster?.url}
+            muted
+            playsInline
+            loop
+            className="h-full w-full object-cover"
+            onMouseEnter={(event) => {
+              if (window.matchMedia('(prefers-reduced-motion: reduce)').matches)
+                return;
+              playHoverPreview(event.currentTarget);
+            }}
+            onMouseLeave={(event) => {
+              event.currentTarget.pause();
+              event.currentTarget.currentTime = 0;
+            }}
+          >
+            <track kind="captions" />
+          </video>
+        ) : primary ? (
+          <AppImage
+            src={primary.url}
+            alt={prompt || 'Generated image'}
+            width={768}
+            height={768}
+            className="h-full w-full object-cover"
+          />
+        ) : (
+          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+            No output
+          </div>
+        )}
+      </button>
+      {/* A draft tile says so, with the days left to render its final (#1756). */}
+      {asset.draftTaskId && asset.status === 'completed' && (
+        <span className="pointer-events-none absolute top-2 left-2 z-10 rounded bg-background/80 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground backdrop-blur-sm">
+          {draftBadgeLabel(asset.createdAt)}
+        </span>
+      )}
+      <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex justify-end gap-1 p-2 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 group-has-[[data-state=open]]:opacity-100">
+        {!supportMode && (
+          <Button
+            type="button"
+            size="icon"
+            variant="secondary"
+            className="pointer-events-auto"
+            aria-label={asset.isFavorite ? 'Remove from favorites' : 'Favorite'}
+            aria-pressed={asset.isFavorite}
+            onClick={() =>
+              favorite.mutate({
+                id: asset.id,
+                isFavorite: !asset.isFavorite,
+              })
+            }
+          >
+            <Star
+              className={cn(asset.isFavorite && 'fill-current')}
+              aria-hidden="true"
+            />
+          </Button>
+        )}
+        {renderable && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                size="icon"
+                variant="secondary"
+                className="pointer-events-auto"
+                aria-label="Render final"
+                disabled={renderAtQuality.isPending}
+                onClick={() => renderAtQuality.mutate(asset.id)}
+              >
+                <Sparkles aria-hidden="true" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Render final</TooltipContent>
+          </Tooltip>
+        )}
+        <StudioShareMenu asset={asset} className="pointer-events-auto" />
+      </div>
+      {supportMode && (asset.creatorName || asset.creatorEmail) && (
+        <p className="pointer-events-none absolute inset-x-0 top-0 truncate bg-background/80 px-2 py-1 text-xs text-muted-foreground">
+          <span>
+            {asset.creatorName && asset.creatorEmail
+              ? `${asset.creatorName} · ${asset.creatorEmail}`
+              : (asset.creatorName ?? asset.creatorEmail)}
+          </span>
+        </p>
+      )}
+      {inFlight && (
+        <p
+          aria-live="polite"
+          className="absolute inset-x-0 bottom-0 bg-background/80 px-2 py-1 text-xs text-muted-foreground tabular-nums"
+        >
+          {asset.status === 'queued' ? 'Queued…' : 'Generating…'}
+          <span>{` ${progress ?? 0}%`}</span>
+        </p>
+      )}
+    </article>
+  );
+}
+
+/** Stand-in for a generation whose rows have not landed in the list yet (#1455). */
+function PendingCard({ aspectRatio }: { aspectRatio: string }) {
+  return (
+    <article className="relative overflow-hidden rounded-lg border bg-muted">
+      <Skeleton
+        className="w-full rounded-none"
+        style={{ aspectRatio: aspectRatio.replace(':', ' / ') }}
+      />
+      <p
+        aria-live="polite"
+        className="absolute inset-x-0 bottom-0 bg-background/80 px-2 py-1 text-xs text-muted-foreground"
+      >
+        Starting…
+      </p>
+    </article>
+  );
+}
+
+/**
+ * Share and download pinned to the media. Share link copies the URL on click.
+ */
+function StudioShareMenu({
+  asset,
+  className,
+}: {
+  asset: GeneratedAsset;
+  className?: string;
+}) {
+  const posthog = usePostHog();
+  const primary = studioPrimaryOutput(asset);
+  if (!primary || asset.status !== 'completed') return null;
+
+  const video = primary.contentType.startsWith('video/');
+  const surface = video ? 'studio_video' : 'studio_image';
+
+  const copyLink = async () => {
+    posthog.capture('share_clicked', {
+      surface,
+      asset_id: asset.id,
+    });
+    const shareable = studioShareUrl(primary.url, window.location.origin);
+    if (!(await copyTextToClipboard(shareable))) {
+      toast.error('Failed to copy URL');
+      return;
+    }
+    toast.success('Copied');
+  };
+
+  const download = () => {
+    posthog.capture('export_clicked', {
+      surface,
+      asset_id: asset.id,
+    });
+    const a = document.createElement('a');
+    a.href = studioDownloadHref(primary.url);
+    a.download = studioDownloadFilename(asset.id, primary.contentType);
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  return (
+    <div className={cn('flex gap-1', className)}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            type="button"
+            variant="secondary"
+            size="icon"
+            aria-label="Download"
+            onClick={download}
+          >
+            <Download aria-hidden="true" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Download</TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            type="button"
+            variant="secondary"
+            size="icon"
+            aria-label="Share link"
+            onClick={() => void copyLink()}
+          >
+            <Link aria-hidden="true" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Share link</TooltipContent>
+      </Tooltip>
+    </div>
+  );
+}
+
+/**
+ * VideoPlayer derives its height from its width, and its own width is
+ * `w-full`. The frame around it has to be a real width — a shrink-to-fit
+ * parent collapses, and the share buttons then float in the empty pane.
+ * Cap that width so the derived height stays inside the dialog.
+ */
+function studioPlayerWidth(aspect: AspectRatio): string {
+  if (aspect === '9:16')
+    return 'max-w-[min(100%,28vh)] md:max-w-[min(100%,42vh)]';
+  if (aspect === '1:1')
+    return 'max-w-[min(100%,46vh)] md:max-w-[min(100%,72vh)]';
+  return 'max-w-[min(100%,82vh)] md:max-w-[min(100%,128vh)]';
+}
+
+/** The opened asset at viewer size: the media fills the dialog, letterboxed. */
+function StudioViewer({ asset }: { asset: GeneratedAsset }) {
+  const primary = studioPrimaryOutput(asset);
+  const poster = studioPosterOutput(asset);
+  const prompt = studioPrompt(asset);
+  const aspect = studioAspectRatio(asset);
+  const video = primary?.contentType.startsWith('video/') ?? false;
+  if (asset.status === 'failed') {
+    return (
+      <p className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto p-4 text-center text-sm break-words text-destructive select-text">
+        {studioShownFailure(asset.error)}
+      </p>
+    );
+  }
+  if (!primary) {
+    return <Skeleton className="min-h-0 flex-1 rounded-lg" />;
+  }
+  return (
+    <div className="flex min-h-0 w-full min-w-0 flex-1 items-center justify-center overflow-hidden rounded-lg bg-muted">
+      <div
+        className={cn(
+          'relative max-w-full',
+          video ? cn('w-full', studioPlayerWidth(aspect)) : 'w-fit'
+        )}
+      >
+        {video ? (
+          <VideoPlayer
+            src={primary.url}
+            posterSrc={poster?.url}
+            aspectRatio={aspect}
+            autoPlay
+            playSource="modal"
+            className="overflow-hidden rounded-lg"
+          />
+        ) : (
+          <img
+            src={primary.url}
+            alt={prompt || 'Generated image'}
+            className="block max-h-full max-w-full object-contain"
+          />
+        )}
+        <StudioShareMenu
+          asset={asset}
+          className="absolute top-2 right-14 z-30 md:right-2"
+        />
+      </div>
+    </div>
+  );
+}
+
+function mentionItems(references: StudioShownReference[]): MentionItem[] {
+  return references.flatMap((reference) =>
+    reference.tag
+      ? [
+          {
+            id: reference.tag,
+            section: 'references' as const,
+            label: reference.label,
+            tag: reference.tag,
+            haystack: reference.tag.toLowerCase(),
+          },
+        ]
+      : []
+  );
+}
+
+/** Step through opened reference stills. Wraps at either end. */
+export function stepReferenceIndex(
+  current: number,
+  delta: number,
+  count: number
+): number {
+  if (count <= 0) return 0;
+  return (current + delta + count) % count;
+}
+
+function referenceContentType(reference: StudioShownReference): string {
+  const path = reference.url.split(/[?#]/)[0] ?? reference.url;
+  const ext = path.split('.').pop()?.toLowerCase();
+  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+  if (ext === 'webp') return 'image/webp';
+  if (ext === 'gif') return 'image/gif';
+  if (ext === 'mp4') return 'video/mp4';
+  if (ext === 'webm') return 'video/webm';
+  if (ext === 'mov') return 'video/quicktime';
+  if (ext === 'mp3') return 'audio/mpeg';
+  if (ext === 'wav') return 'audio/wav';
+  if (reference.kind === 'video') return 'video/mp4';
+  if (reference.kind === 'audio') return 'audio/mpeg';
+  return 'image/png';
+}
+
+function ReferenceDownload({ reference }: { reference: StudioShownReference }) {
+  const id = reference.label.replace(/^@/, '');
+  return (
+    <Button asChild variant="secondary" size="icon">
+      <a
+        href={studioDownloadHref(reference.url)}
+        download={studioDownloadFilename(id, referenceContentType(reference))}
+        aria-label={`Download ${reference.label}`}
+      >
+        <Download aria-hidden="true" />
+      </a>
+    </Button>
+  );
+}
+
+function ReferencePreview({ reference }: { reference: StudioShownReference }) {
+  if (reference.kind === 'audio') {
+    return (
+      <div className="flex size-16 items-center justify-center">
+        <AudioLines
+          className="size-5 text-muted-foreground"
+          aria-hidden="true"
+        />
+      </div>
+    );
+  }
+  if (reference.kind === 'video') {
+    return (
+      <ElementThumbnail
+        kind="video"
+        url={reference.url}
+        label={reference.label}
+        fit="cover"
+      />
+    );
+  }
+  return (
+    <AppImage
+      src={reference.url}
+      alt=""
+      width={64}
+      height={64}
+      className="size-16 object-cover"
+    />
+  );
+}
+
+function ReferenceTile({
+  reference,
+  onOpen,
+  triggerRef,
+}: {
+  reference: StudioShownReference;
+  onOpen?: () => void;
+  triggerRef?: (node: HTMLButtonElement | null) => void;
+}) {
+  return (
+    <li className="w-16 shrink-0">
+      <figure className="flex flex-col items-center gap-1">
+        <div className="relative size-16 overflow-hidden rounded-md border bg-muted">
+          {onOpen ? (
+            <button
+              ref={triggerRef}
+              type="button"
+              className="block size-16 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+              aria-label={`Open ${reference.label}`}
+              onClick={onOpen}
+            >
+              <ReferencePreview reference={reference} />
+            </button>
+          ) : (
+            <ReferencePreview reference={reference} />
+          )}
+        </div>
+        <figcaption className="w-full truncate text-center font-mono text-xs text-muted-foreground">
+          {reference.label}
+        </figcaption>
+      </figure>
+    </li>
+  );
+}
+
+function ReferenceList({ references }: { references: StudioShownReference[] }) {
+  const visual = references.filter((reference) => reference.kind !== 'audio');
+  const [openAt, setOpenAt] = useState<number | null>(null);
+  const triggers = useRef<(HTMLButtonElement | null)[]>([]);
+  const open = openAt === null ? undefined : visual[openAt];
+
+  return (
+    <>
+      <ul
+        className="flex shrink-0 gap-2 overflow-x-auto"
+        aria-label="References"
+      >
+        {references.map((reference) => {
+          const visualIndex = visual.indexOf(reference);
+          return (
+            <ReferenceTile
+              key={`${reference.label}-${reference.url}`}
+              reference={reference}
+              triggerRef={
+                visualIndex >= 0
+                  ? (node) => {
+                      triggers.current[visualIndex] = node;
+                    }
+                  : undefined
+              }
+              onOpen={
+                visualIndex >= 0 ? () => setOpenAt(visualIndex) : undefined
+              }
+            />
+          );
+        })}
+      </ul>
+      <Dialog
+        open={open !== undefined}
+        onOpenChange={(next) => {
+          if (!next && openAt !== null) triggers.current[openAt]?.focus();
+          if (!next) setOpenAt(null);
+        }}
+      >
+        <DialogContent
+          className="flex max-h-[90vh] max-w-4xl flex-col gap-3"
+          onKeyDown={(event) => {
+            if (openAt === null || visual.length < 2) return;
+            if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
+            event.preventDefault();
+            setOpenAt(
+              stepReferenceIndex(
+                openAt,
+                event.key === 'ArrowRight' ? 1 : -1,
+                visual.length
+              )
+            );
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>{open?.label ?? 'Reference'}</DialogTitle>
+            <DialogDescription>
+              Reference used for this generation
+            </DialogDescription>
+          </DialogHeader>
+          {open && (
+            <div className="relative">
+              {open.kind === 'video' ? (
+                <video
+                  src={open.url}
+                  controls
+                  className="max-h-[70vh] w-full rounded-md bg-muted"
+                >
+                  <track kind="captions" />
+                </video>
+              ) : (
+                <img
+                  src={open.url}
+                  alt={open.label}
+                  className="max-h-[70vh] w-full object-contain"
+                />
+              )}
+              <div className="absolute top-2 right-2">
+                <ReferenceDownload reference={open} />
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+/**
+ * The prompts this clip was made from (#1925), oldest first, when it is an
+ * edit of another clip. An ancestor still in the gallery opens on click.
+ */
+function EditHistory({
+  assetId,
+  onOpen,
+}: {
+  assetId: string;
+  /** An opener for a step still in the gallery; undefined otherwise. */
+  onOpen?: (id: string) => (() => void) | undefined;
+}) {
+  const { data: history } = useStudioEditHistory(assetId);
+  const earlier = history.slice(0, -1);
+  if (earlier.length === 0) return null;
+  return (
+    <section className="flex shrink-0 flex-col gap-2" aria-label="History">
+      <h3 className="text-sm font-medium">History</h3>
+      <ol className="flex max-h-48 flex-col gap-2 overflow-y-auto">
+        {earlier.map((step, index) => {
+          const text = readableStudioPrompt(step.prompt) || 'No prompt';
+          const label = index === 0 ? 'Original' : `Edit ${index}`;
+          const open = onOpen?.(step.id);
+          return (
+            <li key={step.id} className="flex flex-col gap-0.5 text-sm">
+              <span className="text-xs text-muted-foreground">{label}</span>
+              {open ? (
+                <button
+                  type="button"
+                  className="line-clamp-3 rounded-sm text-left break-words hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                  onClick={open}
+                >
+                  {text}
+                </button>
+              ) : (
+                <p className="line-clamp-3 break-words">{text}</p>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </section>
+  );
+}
+
+/**
+ * Edit this clip with a prompt (#1925): Seedance 2.5 rewrites it, keeping
+ * its length and shape. Cmd/Ctrl+Enter submits.
+ */
+function EditVideoForm({
+  sourceIsDraft,
+  pending,
+  onEdit,
+}: {
+  /** A draft's edit stays a draft; only a final offers the choice. */
+  sourceIsDraft: boolean;
+  pending: boolean;
+  onEdit: (prompt: string, draft: boolean) => void;
+}) {
+  return (
+    <form
+      className="flex shrink-0 flex-col gap-2"
+      onSubmit={(event) => {
+        event.preventDefault();
+        const form = new FormData(event.currentTarget);
+        const prompt = form.get('prompt');
+        if (typeof prompt !== 'string' || !prompt.trim()) return;
+        onEdit(prompt.trim(), sourceIsDraft || form.get('draft') === 'on');
+        event.currentTarget.reset();
+      }}
+    >
+      <label htmlFor="studio-edit-prompt" className="text-sm font-medium">
+        Edit video
+      </label>
+      <Textarea
+        id="studio-edit-prompt"
+        name="prompt"
+        required
+        rows={3}
+        placeholder="Make it night, keep everything else"
+        className="text-base md:text-sm"
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+            event.preventDefault();
+            event.currentTarget.form?.requestSubmit();
+          }
+        }}
+      />
+      {!sourceIsDraft && (
+        <div className="flex items-center justify-between gap-4">
+          <label htmlFor="studio-edit-draft" className="text-sm">
+            Draft first
+            <span className="block text-xs text-muted-foreground">
+              480p now; render the final later
+            </span>
+          </label>
+          <Switch id="studio-edit-draft" name="draft" defaultChecked />
+        </div>
+      )}
+      <Button
+        type="submit"
+        className="self-start pointer-coarse:h-11"
+        disabled={pending}
+      >
+        {pending ? 'Starting…' : 'Edit'}
+      </Button>
+      <p className="text-xs text-muted-foreground">
+        {sourceIsDraft
+          ? 'Seedance 2.5 · keeps the length · stays a draft'
+          : 'Seedance 2.5 · keeps the length'}
+      </p>
+    </form>
+  );
+}
+
+/**
+ * The clip fills the dialog. The recipe sits against it and only grows with
+ * its content: model, settings, the references, the prompt, then the actions.
+ * The prompt is the one flexible row: a short one leaves the card compact, a
+ * long one grows the card to the dialog's height and then scrolls inside it,
+ * so the header and the actions never move.
+ */
+export function GenerationDetail({
+  asset,
+  supportMode,
+  copied,
+  onCopy,
+  onReuse,
+  deletePending,
+  onDelete,
+  onRenderAtQuality,
+  renderAtQualityPending = false,
+  onPrev,
+  onNext,
+  onEdit,
+  editPending = false,
+  onOpenHistory,
+}: {
+  asset: StudioGalleryAsset;
+  supportMode: boolean;
+  copied: boolean;
+  onCopy: (prompt: string) => void;
+  onReuse?: (reuse: StudioReuse) => void;
+  deletePending: boolean;
+  onDelete: () => void;
+  /** Render this Ark draft's 1080p final (#1756); absent in support mode. */
+  onRenderAtQuality?: () => void;
+  renderAtQualityPending?: boolean;
+  /** Step to the neighbouring generation in the gallery; absent at the ends. */
+  onPrev?: () => void;
+  onNext?: () => void;
+  /** Rewrite this clip from a prompt (#1925); absent where it cannot. */
+  onEdit?: (prompt: string, draft: boolean) => void;
+  editPending?: boolean;
+  /** An opener for an earlier step of the edit history, if it is loaded. */
+  onOpenHistory?: (id: string) => (() => void) | undefined;
+}) {
+  const prompt = readableStudioPrompt(studioPrompt(asset));
+  const references = studioShownReferences(asset);
+  const reuse = studioReuse(asset);
+  const creator = [asset.creatorName, asset.creatorEmail]
+    .filter(Boolean)
+    .join(' · ');
+  const facts = [
+    ...studioGenerationFacts(asset),
+    supportMode ? creator : '',
+  ].filter(Boolean);
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col bg-muted md:flex-row">
+      <div className="relative flex min-h-48 min-w-0 flex-1 p-3 md:p-4">
+        <StudioViewer asset={asset} />
+        {onPrev && (
+          <Button
+            type="button"
+            variant="secondary"
+            size="icon"
+            aria-label="Previous generation"
+            className="absolute top-1/2 left-4 -translate-y-1/2 rounded-full pointer-coarse:size-11"
+            onClick={onPrev}
+          >
+            <ChevronLeft aria-hidden="true" />
+          </Button>
+        )}
+        {onNext && (
+          <Button
+            type="button"
+            variant="secondary"
+            size="icon"
+            aria-label="Next generation"
+            className="absolute top-1/2 right-4 -translate-y-1/2 rounded-full pointer-coarse:size-11"
+            onClick={onNext}
+          >
+            <ChevronRight aria-hidden="true" />
+          </Button>
+        )}
+      </div>
+      <aside className="flex max-h-[40%] w-full shrink-0 flex-col gap-3 overflow-y-auto border-t bg-popover p-4 md:max-h-full md:w-96 md:self-start md:overflow-hidden md:border-t-0 md:border-l md:pr-12">
+        <DialogHeader className="shrink-0">
+          <DialogTitle>{asset.modelName || 'Generation'}</DialogTitle>
+          <DialogDescription>{facts.join(' · ')}</DialogDescription>
+        </DialogHeader>
+        {references.length > 0 && <ReferenceList references={references} />}
+        <div className="max-h-64 overflow-y-auto md:max-h-none md:min-h-0 md:flex-1">
+          {prompt ? (
+            <HighlightedPrompt
+              text={prompt}
+              items={mentionItems(references)}
+              className="text-sm leading-relaxed break-words select-text"
+            />
+          ) : (
+            <p className="text-sm text-muted-foreground">No prompt</p>
+          )}
+        </div>
+        {asset.activity === 'video' && !supportMode && (
+          <Suspense fallback={<Skeleton className="h-16 w-full shrink-0" />}>
+            <EditHistory assetId={asset.id} onOpen={onOpenHistory} />
+          </Suspense>
+        )}
+        {onEdit &&
+          asset.activity === 'video' &&
+          asset.status === 'completed' && (
+            <EditVideoForm
+              key={asset.id}
+              sourceIsDraft={asset.input.draft === true}
+              pending={editPending}
+              onEdit={onEdit}
+            />
+          )}
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            className="pointer-coarse:h-11"
+            disabled={!prompt}
+            aria-label={copied ? 'Copied prompt' : 'Copy prompt'}
+            onClick={() => onCopy(prompt)}
+          >
+            <Copy aria-hidden="true" />
+            {copied ? 'Copied' : 'Copy prompt'}
+          </Button>
+          {onReuse && reuse && (
+            <Button
+              type="button"
+              className="pointer-coarse:h-11"
+              onClick={() => onReuse(reuse)}
+            >
+              <RotateCcw aria-hidden="true" />
+              Use again
+            </Button>
+          )}
+          {onRenderAtQuality &&
+            asset.draftTaskId &&
+            asset.status === 'completed' &&
+            draftTaskUsable(asset.createdAt) && (
+              <Button
+                type="button"
+                variant="outline"
+                className="pointer-coarse:h-11"
+                disabled={renderAtQualityPending}
+                onClick={onRenderAtQuality}
+              >
+                {renderAtQualityPending ? 'Starting…' : 'Render final'}
+              </Button>
+            )}
+          {!supportMode &&
+            asset.status !== 'queued' &&
+            asset.status !== 'running' && (
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="destructive"
+                    className="ml-auto pointer-coarse:size-11"
+                    disabled={deletePending}
+                    aria-label="Delete"
+                  >
+                    <Trash2 aria-hidden="true" />
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Delete this generation?</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      It is removed from your library for good.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Keep</AlertDialogCancel>
+                    <AlertDialogAction onClick={onDelete}>
+                      Delete
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            )}
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+/**
+ * Justified rows, newest first along the top (#2130). CSS columns filled
+ * top-to-bottom, so a burst of prompts stacked down the first column and
+ * pushed earlier tiles below the fold. Each tile grows by its width/height,
+ * so every tile in a row ends at the same height.
+ */
+const ROW_HEIGHT_REM = 15;
+
+function tileStyle(aspectRatio: string): CSSProperties {
+  const [w = 16, h = 9] = aspectRatio.split(':').map(Number);
+  const ratio = w / h;
+  return { flex: `${ratio} 1 ${ratio * ROW_HEIGHT_REM}rem`, minWidth: 0 };
+}
+
+/** Soaks up the last row's spare width so its tiles keep the row height. */
+function RowFiller() {
+  return <div aria-hidden className="grow-[1000000] basis-0" />;
+}
+
+export function StudioGallery({
+  assets,
+  isLoading,
+  isAuthenticated,
+  activity,
+  hasNextPage,
+  isFetchingNextPage,
+  onLoadMore,
+  supportMode = false,
+  onReuse,
+}: {
+  assets: StudioGalleryAsset[];
+  isLoading: boolean;
+  isAuthenticated: boolean;
+  activity: 'image' | 'video';
+  hasNextPage: boolean;
+  isFetchingNextPage: boolean;
+  onLoadMore: () => void;
+  supportMode?: boolean;
+  /** Load this generation's prompt and references into the composer. */
+  onReuse?: (reuse: StudioReuse) => void;
+}) {
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const remove = useDeleteStudioAsset();
+  const renderAtQuality = useRenderStudioAssetAtQuality();
+  const edit = useEditStudioAsset();
+  const vias = useViaAvailability();
+  const canEdit = !supportMode && isOfferedVideoModel(STUDIO_EDIT_MODEL, vias);
+  useEffect(() => {
+    if (!copied) return;
+    const id = window.setTimeout(() => setCopied(false), 2000);
+    return () => window.clearTimeout(id);
+  }, [copied]);
+  const openIndex = assets.findIndex((asset) => asset.id === openId);
+  const openAsset = openIndex === -1 ? undefined : assets[openIndex];
+  const prevAsset = openIndex > 0 ? assets[openIndex - 1] : undefined;
+  const nextAsset = openAsset ? assets[openIndex + 1] : undefined;
+  const step = (target: StudioGalleryAsset | undefined) => {
+    if (!target) return;
+    setOpenId(target.id);
+    setCopied(false);
+  };
+  useEffect(() => {
+    if (!openAsset) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey) return;
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.isContentEditable || target.closest('input, textarea'))
+      )
+        return;
+      if (event.key === 'ArrowLeft') step(prevAsset);
+      else if (event.key === 'ArrowRight') step(nextAsset);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+  const pendingCreates = useStudioPendingCreates(activity);
+  const pending = supportMode
+    ? []
+    : pendingCreates.flatMap((input, index) =>
+        Array.from({ length: input.count }, (_, i) => ({
+          key: `pending-${index}-${i}`,
+          aspectRatio: input.aspectRatio,
+        }))
+      );
+
+  if (isLoading) {
+    return (
+      <div className="flex flex-wrap gap-4">
+        {Array.from({ length: 8 }).map((_, index) => (
+          <Skeleton
+            key={index}
+            className="aspect-video rounded-lg"
+            style={tileStyle('16:9')}
+          />
+        ))}
+        <RowFiller />
+      </div>
+    );
+  }
+
+  if (assets.length === 0 && pending.length === 0) {
+    return (
+      <EmptyState
+        icon={<Images className="h-12 w-12" />}
+        title={
+          supportMode
+            ? activity === 'video'
+              ? 'No matching videos'
+              : 'No matching images'
+            : isAuthenticated
+              ? 'Nothing here yet'
+              : 'Sign in to generate'
+        }
+        description={
+          supportMode
+            ? activity === 'video'
+              ? 'No clips match this search across any users.'
+              : 'No stills match this search across any users.'
+            : isAuthenticated
+              ? activity === 'video'
+                ? 'Your clips land here. Start with a prompt below.'
+                : 'Your stills land here. Start with a prompt below.'
+              : 'Browse the composer, then sign in to generate and keep a library.'
+        }
+        action={!supportMode && !isAuthenticated ? <SignInButton /> : undefined}
+      />
+    );
+  }
+
+  return (
+    <>
+      <div className="flex flex-wrap gap-4">
+        {pending.map((tile) => (
+          <div key={tile.key} style={tileStyle(tile.aspectRatio)}>
+            <PendingCard aspectRatio={tile.aspectRatio} />
+          </div>
+        ))}
+        {assets.map((asset) => (
+          <div key={asset.id} style={tileStyle(studioAspectRatio(asset))}>
+            <StudioCard
+              asset={asset}
+              onOpen={() => setOpenId(asset.id)}
+              supportMode={supportMode}
+            />
+          </div>
+        ))}
+        <RowFiller />
+      </div>
+      {hasNextPage && (
+        <div className="flex justify-center">
+          <Button
+            type="button"
+            variant="outline"
+            disabled={isFetchingNextPage}
+            onClick={onLoadMore}
+          >
+            {isFetchingNextPage ? 'Loading…' : 'Load more'}
+          </Button>
+        </div>
+      )}
+
+      <Dialog
+        open={openAsset != null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setOpenId(null);
+            setCopied(false);
+          }
+        }}
+      >
+        <DialogContent className="flex h-[94vh] w-[96vw] max-w-none flex-col gap-0 overflow-hidden p-0 sm:max-w-none">
+          {openAsset && (
+            <GenerationDetail
+              asset={openAsset}
+              supportMode={supportMode}
+              copied={copied}
+              onCopy={(prompt) => {
+                void copyTextToClipboard(prompt).then((ok) => {
+                  if (ok) setCopied(true);
+                });
+              }}
+              onReuse={
+                onReuse
+                  ? (reuse) => {
+                      setOpenId(null);
+                      setCopied(false);
+                      onReuse(reuse);
+                    }
+                  : undefined
+              }
+              deletePending={remove.isPending}
+              onDelete={() => {
+                remove.mutate(openAsset.id, {
+                  onSuccess: () => setOpenId(null),
+                });
+              }}
+              onRenderAtQuality={
+                supportMode
+                  ? undefined
+                  : () => {
+                      renderAtQuality.mutate(openAsset.id, {
+                        onSuccess: () => setOpenId(null),
+                      });
+                    }
+              }
+              renderAtQualityPending={renderAtQuality.isPending}
+              onPrev={prevAsset ? () => step(prevAsset) : undefined}
+              onNext={nextAsset ? () => step(nextAsset) : undefined}
+              onEdit={
+                canEdit &&
+                studioCanEditSource(openAsset.input.videoModel) &&
+                !studioUsedUploadedReferenceVideo(openAsset.input)
+                  ? (prompt, draft) => {
+                      edit.mutate(
+                        { id: openAsset.id, prompt, draft },
+                        { onSuccess: () => setOpenId(null) }
+                      );
+                    }
+                  : undefined
+              }
+              editPending={edit.isPending}
+              onOpenHistory={(id) => {
+                const target = assets.find((asset) => asset.id === id);
+                return target ? () => step(target) : undefined;
+              }}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}

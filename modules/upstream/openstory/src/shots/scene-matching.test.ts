@@ -1,0 +1,536 @@
+import { describe, expect, it } from 'vitest';
+import type {
+  CharacterMinimal,
+  SequenceElementMinimal,
+} from '@/platform/server/db/schema';
+import {
+  characterMentionedInPrompt,
+  matchCharacterToShotTags,
+  matchCharactersToScene,
+  matchCharactersToShotImage,
+  matchElementsToMotion,
+  matchElementsToScene,
+  matchElementsToShot,
+  matchElementsToShotImage,
+  resolveShotReferences,
+  matchLocationsToScene,
+} from './scene-matching';
+
+describe('participant-owned remote locations', () => {
+  const locations = [
+    {
+      name: "Nora's study",
+      locationId: 'noras_study',
+      consistencyTag: 'noras_study_warm',
+    },
+    {
+      name: 'Finn’s kitchen',
+      locationId: 'finns_kitchen',
+      consistencyTag: 'finns_kitchen_blue',
+    },
+    {
+      name: "Ravi's office",
+      locationId: 'ravis_office',
+      consistencyTag: 'ravis_office_green',
+    },
+  ];
+
+  it('assigns separate inferred rooms even when dialogue never names them', () => {
+    expect(
+      matchLocationsToScene(
+        locations,
+        '',
+        '',
+        'NORA speaks on the call. FINN replies.'
+      )
+    ).toEqual(locations.slice(0, 2));
+  });
+
+  it('does not match a participant name inside another word', () => {
+    expect(
+      matchLocationsToScene(locations, '', '', 'A panoramic view.')
+    ).toEqual([]);
+  });
+
+  it('narrows a shared scene to the room of the participant framed in each shot', () => {
+    for (const [index, name] of ['NORA', 'FINN', 'RAVI'].entries()) {
+      expect(
+        matchLocationsToScene(
+          locations,
+          locations.map((l) => l.consistencyTag).join(', '),
+          '',
+          'NORA speaks to FINN. RAVI joins later.',
+          `Close-up of ${name} at their webcam.`
+        )
+      ).toEqual([locations[index]]);
+    }
+  });
+
+  it('keeps an explicitly named physical location ahead of ownership inference', () => {
+    expect(
+      matchLocationsToScene(locations, '', '', 'NORA visits Finn’s kitchen.')
+    ).toEqual([locations[1]]);
+  });
+});
+
+const elements: SequenceElementMinimal[] = [
+  {
+    id: '1',
+    token: 'LOGO',
+    description: 'A red hex logo',
+    imageUrl: 'https://example.com/logo.png',
+    consistencyTag: 'red-hex-logo',
+    kind: 'image',
+    durationSeconds: null,
+  },
+  {
+    id: '2',
+    token: 'BOTTLE',
+    description: 'Silver water bottle',
+    imageUrl: 'https://example.com/bottle.png',
+    consistencyTag: 'silver-bottle',
+    kind: 'image',
+    durationSeconds: null,
+  },
+];
+
+// Helper: build a CharacterMinimal with sane defaults so tests can override
+// just the fields they care about.
+function makeCharacter(
+  overrides: Partial<CharacterMinimal> & {
+    name: string;
+    characterId: string;
+  }
+): CharacterMinimal {
+  return {
+    id: 'id_' + overrides.characterId,
+    sheetImageUrl: null,
+    sheetStatus: 'completed',
+    sheetInputHash: null,
+    selectedSheetVersionId: null,
+    // Wearing its default look (#2015).
+    lookId: 'default-look',
+    lookName: 'Default',
+    looks: [],
+    physicalDescription: null,
+    voiceOnly: false,
+    isPerson: true,
+    consistencyTag: null,
+    ...overrides,
+  };
+}
+
+describe('matchCharacterToShotTags', () => {
+  // Regression for sequence 01KQE5DTXJ93PB463JNW85TJV5: name "GIRL ONE" must
+  // match snake_case tag emitted by the LLM.
+  it('matches a spaced uppercase name against a snake_case tag', () => {
+    const girlOne = makeCharacter({
+      name: 'GIRL ONE',
+      characterId: 'char_girl_one',
+      consistencyTag: 'char_girl_one_scarlett_johansson',
+    });
+    expect(
+      matchCharacterToShotTags(girlOne, [
+        'girl_one_late_teens_bathroom_morning',
+      ])
+    ).toBe(true);
+  });
+
+  it('matches when the tag is exactly the name slug', () => {
+    const girlOne = makeCharacter({
+      name: 'GIRL ONE',
+      characterId: 'char_girl_one',
+    });
+    expect(matchCharacterToShotTags(girlOne, ['girl_one'])).toBe(true);
+  });
+
+  it('is invariant to hyphens and other punctuation in the name', () => {
+    const girlOne = makeCharacter({
+      name: 'GIRL-ONE',
+      characterId: 'char_girl_one',
+    });
+    expect(matchCharacterToShotTags(girlOne, ['girl_one'])).toBe(true);
+  });
+
+  it('does not match unrelated sibling characters', () => {
+    const girlOne = makeCharacter({
+      name: 'GIRL ONE',
+      characterId: 'char_girl_one',
+    });
+    expect(matchCharacterToShotTags(girlOne, ['boy_two_running'])).toBe(false);
+  });
+
+  it('returns false for an empty tags array', () => {
+    const girlOne = makeCharacter({
+      name: 'GIRL ONE',
+      characterId: 'char_girl_one',
+    });
+    expect(matchCharacterToShotTags(girlOne, [])).toBe(false);
+  });
+
+  it('rejects very short tags on the reverse direction', () => {
+    const girlOne = makeCharacter({
+      name: 'GIRL ONE',
+      characterId: 'char_girl_one',
+    });
+    // Slugifies to "a" — would match "girl_one" reverse-direction without the floor
+    expect(matchCharacterToShotTags(girlOne, ['a'])).toBe(false);
+  });
+
+  it('matches via characterId fallback when name slug differs', () => {
+    const c = makeCharacter({
+      name: 'Unnamed Stranger',
+      characterId: 'char_001',
+    });
+    expect(matchCharacterToShotTags(c, ['char_001_in_doorway'])).toBe(true);
+  });
+
+  // Regression for sequence 01KQDZ5AY370HAPX736RHRWN0E — the LLM emitted
+  // tokens in reversed order from the character's `name`.
+  it('matches when the LLM reorders the name tokens in the tag', () => {
+    const subject = makeCharacter({
+      name: 'Subject (Anonymous)',
+      characterId: 'char_001',
+      consistencyTag: 'char_001_ben_affleck',
+    });
+    expect(
+      matchCharacterToShotTags(subject, [
+        'anonymous_subject_tattooed_gold_nosering_vintage_tee',
+      ])
+    ).toBe(true);
+  });
+
+  it('does not false-match when the name is a substring of a different word', () => {
+    const jack = makeCharacter({ name: 'JACK', characterId: 'char_jack' });
+    // Substring matcher would match "jack" inside "jacket"; token matcher must not.
+    expect(matchCharacterToShotTags(jack, ['jacket_of_doom'])).toBe(false);
+  });
+});
+
+describe('matchCharactersToScene', () => {
+  it('agrees with the singular matcher for the same input', () => {
+    const cast = [
+      makeCharacter({ name: 'GIRL ONE', characterId: 'char_girl_one' }),
+      makeCharacter({ name: 'GIRL TWO', characterId: 'char_girl_two' }),
+      makeCharacter({ name: 'BOY ONE', characterId: 'char_boy_one' }),
+    ];
+    const tags = ['girl_one_bathroom', 'girl_two_lip_gloss'];
+    const matched = matchCharactersToScene(cast, tags);
+    expect(matched.map((c) => c.name).sort()).toEqual(['GIRL ONE', 'GIRL TWO']);
+    for (const c of cast) {
+      expect(matched.includes(c)).toBe(matchCharacterToShotTags(c, tags));
+    }
+  });
+
+  it('returns an empty array when there are no tags', () => {
+    const cast = [
+      makeCharacter({ name: 'GIRL ONE', characterId: 'char_girl_one' }),
+    ];
+    expect(matchCharactersToScene(cast, [])).toEqual([]);
+  });
+});
+
+describe('matchCharactersToShotImage', () => {
+  const scarlett = makeCharacter({
+    name: 'Scarlett',
+    characterId: 'char_001',
+    consistencyTag: 'char_001: scarlett-red-coat',
+  });
+  const jack = makeCharacter({ name: 'Jack', characterId: 'char_002' });
+
+  it('attaches a character named in ALL-CAPS in the visual prompt even with empty tags (#1432)', () => {
+    const result = matchCharactersToShotImage([scarlett, jack], {
+      characterTags: [],
+      characterLooks: undefined,
+      visualPrompt: 'SCARLETT stands in the doorway, coat dripping.',
+    });
+    expect(result.map((c) => c.name)).toEqual(['Scarlett']);
+  });
+
+  it('does not treat a lowercase prose mention as a cast reference', () => {
+    expect(
+      matchCharactersToShotImage([scarlett], {
+        characterTags: [],
+        characterLooks: undefined,
+        visualPrompt: 'scarlett stands in the doorway.',
+      })
+    ).toEqual([]);
+  });
+
+  it('uses the shot subject instead of adding the rest of the scene cast', () => {
+    const result = matchCharactersToShotImage([scarlett, jack], {
+      characterTags: ['Jack', 'Scarlett'],
+      characterLooks: undefined,
+      visualPrompt: 'SCARLETT enters. The room is empty.',
+    });
+    expect(result.map((c) => c.name)).toEqual(['Scarlett']);
+  });
+
+  it('keeps both characters when the shot explicitly frames both', () => {
+    expect(
+      matchCharactersToShotImage([scarlett, jack], {
+        characterTags: ['Jack', 'Scarlett'],
+        characterLooks: undefined,
+        visualPrompt: 'SCARLETT and JACK share a two-shot.',
+      }).map((c) => c.name)
+    ).toEqual(['Scarlett', 'Jack']);
+  });
+
+  it('retains tagged references for legacy prompts with unnamed subjects', () => {
+    expect(
+      matchCharactersToShotImage([scarlett, jack], {
+        characterTags: ['Jack'],
+        characterLooks: undefined,
+        visualPrompt: 'A man sits at his desk.',
+      }).map((c) => c.name)
+    ).toEqual(['Jack']);
+  });
+
+  it('falls back to tags when the visual prompt is empty', () => {
+    expect(
+      matchCharactersToShotImage([jack], {
+        characterTags: ['Jack'],
+        characterLooks: undefined,
+        visualPrompt: '   ',
+      }).map((c) => c.name)
+    ).toEqual(['Jack']);
+  });
+
+  it('does not inherit the scene cast when the prompt names nobody (#2012)', () => {
+    const all = {
+      characters: [scarlett, jack],
+      locations: [
+        { locationId: 'living', name: 'Living room', consistencyTag: 'living' },
+        { locationId: 'bath', name: 'Bathroom', consistencyTag: 'bath' },
+      ],
+      elements: [],
+    };
+    const scene = {
+      characterTags: ['Scarlett', 'Jack'],
+      characterLooks: undefined,
+      environmentTag: '',
+      sceneLocation: '',
+      sceneExtract: 'They start in the bathroom, then the living room.',
+    };
+    const vase = resolveShotReferences(all, scene, {
+      channel: 'visual',
+      prompt: 'Close on the vase in the LIVING ROOM.',
+    });
+    expect(vase.characters).toEqual([]);
+    expect(vase.locations.map((l) => l.locationId)).toEqual(['living']);
+    // The motion prompt is its own channel: it names Jack, so the clip does.
+    const clip = resolveShotReferences(all, scene, {
+      channel: 'motion',
+      prompt: 'JACK turns from the window.',
+      referenceOnly: false,
+    });
+    expect(clip.characters).toEqual([jack]);
+    // No prompt yet: the continuity tags are the only word on the cast.
+    const unwritten = resolveShotReferences(all, scene, {
+      channel: 'visual',
+      prompt: null,
+    });
+    expect(unwritten.characters).toEqual([scarlett, jack]);
+    // The extract names both rooms; the most specific name wins.
+    expect(unwritten.locations.map((l) => l.locationId)).toEqual(['living']);
+  });
+
+  it('matches characterId and consistencyTag slug in the prompt', () => {
+    expect(
+      matchCharactersToShotImage([scarlett], {
+        characterTags: [],
+        characterLooks: undefined,
+        visualPrompt: 'char_001 waits by the window.',
+      }).map((c) => c.name)
+    ).toEqual(['Scarlett']);
+    expect(
+      matchCharactersToShotImage([scarlett], {
+        characterTags: [],
+        characterLooks: undefined,
+        visualPrompt: 'scarlett-red-coat in silhouette.',
+      }).map((c) => c.name)
+    ).toEqual(['Scarlett']);
+  });
+});
+
+describe('characterMentionedInPrompt', () => {
+  it('requires the ALL-CAPS name, not title case', () => {
+    const scarlett = makeCharacter({
+      name: 'Scarlett',
+      characterId: 'char_001',
+    });
+    expect(characterMentionedInPrompt(scarlett, 'SCARLETT walks in.')).toBe(
+      true
+    );
+    expect(characterMentionedInPrompt(scarlett, 'Scarlett walks in.')).toBe(
+      false
+    );
+  });
+});
+
+describe('matchElementsToScene', () => {
+  it('matches by elementTags primary path', () => {
+    const result = matchElementsToScene(elements, ['LOGO']);
+    expect(result.map((e) => e.token)).toEqual(['LOGO']);
+  });
+
+  it('matches case-insensitively via elementTags', () => {
+    const result = matchElementsToScene(elements, ['logo']);
+    expect(result.map((e) => e.token)).toEqual(['LOGO']);
+  });
+
+  it('falls back to script text when elementTags is empty', () => {
+    const result = matchElementsToScene(
+      elements,
+      [],
+      'She picks up the BOTTLE from the counter.'
+    );
+    expect(result.map((e) => e.token)).toEqual(['BOTTLE']);
+  });
+
+  it('returns empty list when elements list is empty', () => {
+    const result = matchElementsToScene([], ['LOGO']);
+    expect(result).toEqual([]);
+  });
+
+  it('does not match a token that appears inside another word', () => {
+    const result = matchElementsToScene(
+      elements,
+      [],
+      'The LOGOISTICS truck arrives.'
+    );
+    expect(result).toEqual([]);
+  });
+
+  it('matches multiple tokens in a single scene', () => {
+    const result = matchElementsToScene(elements, ['LOGO', 'BOTTLE']);
+    expect(result.map((e) => e.token).sort()).toEqual(['BOTTLE', 'LOGO']);
+  });
+
+  it('matches the UPPERCASE token verbatim in prompt text', () => {
+    const result = matchElementsToScene(
+      [{ token: 'BIG_CORP' }],
+      [],
+      'displaying the BIG_CORP banner on the wall'
+    );
+    expect(result.map((e) => e.token)).toEqual(['BIG_CORP']);
+  });
+});
+
+describe('matchElementsToShotImage', () => {
+  it('matches the token in the visual prompt even when tags/extract do not', () => {
+    const result = matchElementsToShotImage(elements, {
+      visualPrompt: 'displaying the UI from (LOGO)',
+      elementTags: [],
+      sceneExtract: 'She talks about the product.',
+    });
+    expect(result.map((e) => e.token)).toEqual(['LOGO']);
+  });
+
+  it('ignores scene tags and extract when a visual prompt is present', () => {
+    const result = matchElementsToShotImage(elements, {
+      visualPrompt: 'Close-up of her face. No product in frame.',
+      elementTags: ['LOGO', 'BOTTLE'],
+      sceneExtract: 'She picks up the BOTTLE and the LOGO glows.',
+    });
+    expect(result).toEqual([]);
+  });
+
+  it('falls back to tags + extract when the visual prompt is empty', () => {
+    const result = matchElementsToShotImage(elements, {
+      visualPrompt: '   ',
+      elementTags: ['LOGO'],
+      sceneExtract: 'The BOTTLE sits on the counter.',
+    });
+    expect(result.map((e) => e.token).sort()).toEqual(['BOTTLE', 'LOGO']);
+  });
+});
+
+// #1559 — a voice line bound to dialogue is named nowhere in the image prompt,
+// so the still's matcher alone left it off the shot's Elements tab.
+describe('matchElementsToShot', () => {
+  const voice: SequenceElementMinimal = {
+    id: '3',
+    token: 'MATEO_SHOT_1',
+    description: null,
+    imageUrl: 'https://example.com/mateo.m4a',
+    consistencyTag: null,
+    kind: 'audio',
+    durationSeconds: 3.75,
+  };
+  const all = [...elements, voice];
+
+  it('includes the voice a dialogue line is bound to', () => {
+    const result = matchElementsToShot(all, {
+      visualPrompt: 'Close-up of the LOGO on the wall.',
+      motionPrompt: 'Slow push in.',
+      voiceTokens: ['MATEO_SHOT_1'],
+      referenceOnly: false,
+    });
+    expect(result.map((e) => e.token).sort()).toEqual(['LOGO', 'MATEO_SHOT_1']);
+  });
+
+  it('includes what only the motion prompt mentions', () => {
+    const result = matchElementsToShot(all, {
+      visualPrompt: 'Close-up of her face.',
+      motionPrompt: 'She lifts the BOTTLE to drink.',
+      referenceOnly: false,
+    });
+    expect(result.map((e) => e.token)).toEqual(['BOTTLE']);
+  });
+
+  it('lists an element both renders use once', () => {
+    const result = matchElementsToShot(all, {
+      visualPrompt: 'The LOGO glows.',
+      motionPrompt: 'The LOGO pulses.',
+      referenceOnly: false,
+    });
+    expect(result.map((e) => e.token)).toEqual(['LOGO']);
+  });
+
+  it('drops a reference-only element the prompt no longer mentions', () => {
+    const result = matchElementsToShot(all, {
+      visualPrompt: '',
+      elementTags: ['LOGO'],
+      sceneExtract: 'A tee printed with the LOGO.',
+      motionPrompt: 'He halts mid-stride and grins.',
+      voiceTokens: ['MATEO_SHOT_1'],
+      referenceOnly: true,
+    });
+    expect(result.map((e) => e.token)).toEqual(['MATEO_SHOT_1']);
+  });
+});
+
+describe('matchElementsToMotion', () => {
+  const scene = {
+    elementTags: ['LOGO'],
+    sceneExtract: 'A tee printed with the LOGO.',
+  };
+
+  it('reference-only: the prompt decides, over tags and script', () => {
+    const result = matchElementsToMotion(elements, {
+      ...scene,
+      motionPrompt: 'She lifts the BOTTLE to drink.',
+      referenceOnly: true,
+    });
+    expect(result.map((e) => e.token)).toEqual(['BOTTLE']);
+  });
+
+  it('reference-only with no prompt yet falls back to tags and script', () => {
+    const result = matchElementsToMotion(elements, {
+      ...scene,
+      motionPrompt: null,
+      referenceOnly: true,
+    });
+    expect(result.map((e) => e.token)).toEqual(['LOGO']);
+  });
+
+  it('with a start frame, keeps what the prompt omits', () => {
+    const result = matchElementsToMotion(elements, {
+      ...scene,
+      motionPrompt: 'She lifts the BOTTLE to drink.',
+      referenceOnly: false,
+    });
+    expect(result.map((e) => e.token).sort()).toEqual(['BOTTLE', 'LOGO']);
+  });
+});

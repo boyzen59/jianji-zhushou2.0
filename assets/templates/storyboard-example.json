@@ -1,0 +1,197 @@
+{
+  "schema_version": 7,
+  "engine": "remotion",
+  "fps": 60,
+  "duration_frames": 360,
+  "note": "原创6秒片中片段示例，不代表完整影片开头。完整影片前15秒真人全屏，随后右下小窗。",
+  "production_policy": {
+    "subtitles": {
+      "mode": "off",
+      "reserve_space": false
+    },
+    "presenter": {
+      "opening_fullscreen_seconds": 15,
+      "later_mode": "bottom_right_pip"
+    }
+  },
+  "source_sentences": [
+    {
+      "id": "DEMO-01",
+      "text": "港口聚集了货物，也把税收带回都城。"
+    },
+    {
+      "id": "DEMO-02",
+      "text": "随后，资金又流向前线。"
+    }
+  ],
+  "reference_sources": [
+    {
+      "id": "ref-continuity",
+      "origin": "supplementary",
+      "location": "https://www.remotion.dev/docs/sequence",
+      "source_path": "frame-driven composition and continuous global frame"
+    },
+    {
+      "id": "ref-explainer",
+      "origin": "user_supplied",
+      "location": "https://github.com/alchaincyf/huashu-art-motion",
+      "source_path": "references/镜头表模板.md"
+    }
+  ],
+  "scenes": [
+    {
+      "id": "DEMO-A",
+      "start_frame": 0,
+      "end_frame_exclusive": 180,
+      "settled_frame": 150,
+      "source_ids": [
+        "DEMO-01"
+      ],
+      "narrative_intent": "把聚集和回流的因果关系具象化，无数值的流动不暗示具体数量。",
+      "start_state": "港口符号及待汇合的定性货物符号",
+      "end_state": "都城节点接住流动符号",
+      "component": "planned: src/scenes/PortToRevenue.tsx",
+      "cue": {
+        "precision": "estimated",
+        "anchor": "聚集、都城；本例无原声，仅结构示范"
+      },
+      "reference_uses": [
+        {
+          "source_id": "ref-explainer",
+          "status": "adopted",
+          "mechanism": "主语—动作—结果的解释图形",
+          "reason": "让观众看到货物和税收之间的关系",
+          "adaptation": "Remotion帧驱动定性路径；有真实素材后用遮罩从港口画面接入"
+        },
+        {
+          "source_id": "ref-continuity",
+          "status": "adopted",
+          "mechanism": "同一主体跨镜保持身份",
+          "reason": "都城既是本镜落点也是下镜出发点",
+          "adaptation": "节点用全局帧控制；不因换句重建"
+        }
+      ],
+      "motion_beats": [
+        {
+          "subject": "货物符号",
+          "action": "汇合并流向都城",
+          "parameters": "定性符号，逐个错峰；SVG路径控制，位置按实际构图确定",
+          "start_frame": 0,
+          "peak_frame": 95,
+          "settled_frame": 150
+        }
+      ],
+      "transition_in": {
+        "type": "cut",
+        "description": "开始示例，不代表实际影片开头"
+      },
+      "transition_out": {
+        "type": "shared",
+        "description": "都城节点持续存在，镜头揭出前线分支",
+        "object_id": "capital-node",
+        "boundary_state": {
+          "x": 960,
+          "y": 540,
+          "scale": 1,
+          "velocity": [
+            0,
+            0
+          ]
+        },
+        "window_frames": [
+          160,
+          200
+        ]
+      },
+      "texts": [
+        {
+          "id": "DEMO-T01",
+          "role": "chart_label",
+          "zh": "都城",
+          "en": ""
+        }
+      ],
+      "media_layers": [],
+      "verification": "planned"
+    },
+    {
+      "id": "DEMO-B",
+      "start_frame": 180,
+      "end_frame_exclusive": 360,
+      "settled_frame": 330,
+      "source_ids": [
+        "DEMO-02"
+      ],
+      "narrative_intent": "说明资金的去向，与上句税收形成完整关系。",
+      "start_state": "都城节点延续前镜",
+      "end_state": "流向前线的路径落定；真实战场画面留作后续素材接点",
+      "component": "planned: src/scenes/RevenueToFront.tsx",
+      "cue": {
+        "precision": "estimated",
+        "anchor": "资金、前线；需原录音核对"
+      },
+      "reference_uses": [
+        {
+          "source_id": "ref-continuity",
+          "status": "adopted",
+          "mechanism": "对象接力与方向延续",
+          "reason": "不把因果链打断成互不相关的图片",
+          "adaptation": "保留global资本节点，分支使用TracePath；地理未核实时仅作示意"
+        }
+      ],
+      "motion_beats": [
+        {
+          "subject": "资金符号与路线",
+          "action": "从都城分流到前线",
+          "parameters": "相机拉出分支；节点保持位置连续；与源视频方向做match cut",
+          "start_frame": 180,
+          "peak_frame": 260,
+          "settled_frame": 330
+        }
+      ],
+      "transition_in": {
+        "type": "shared",
+        "description": "从都城节点继续展开",
+        "object_id": "capital-node",
+        "boundary_state": {
+          "x": 960,
+          "y": 540,
+          "scale": 1,
+          "velocity": [
+            0,
+            0
+          ]
+        },
+        "window_frames": [
+          160,
+          200
+        ]
+      },
+      "transition_out": {
+        "type": "cut",
+        "description": "示例结束；真实片继续接战场素材"
+      },
+      "texts": [
+        {
+          "id": "DEMO-T01",
+          "role": "chart_label",
+          "zh": "都城",
+          "en": ""
+        },
+        {
+          "id": "DEMO-T02",
+          "role": "chart_label",
+          "zh": "前线",
+          "en": ""
+        }
+      ],
+      "media_layers": [],
+      "verification": "planned"
+    }
+  ],
+  "style_system": {
+    "id": "demo-unified",
+    "tokens_reference": "planned: art-direction.md#shared-tokens"
+  },
+  "scope": "excerpt"
+}

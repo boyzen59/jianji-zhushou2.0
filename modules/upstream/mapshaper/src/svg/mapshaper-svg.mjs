@@ -1,0 +1,732 @@
+import { exportDatasetAsGeoJSON } from '../geojson/geojson-export';
+import { getFurnitureLayerData, getFurnitureLayerType, layerHasFurniture, renderFurnitureLayer } from '../furniture/mapshaper-furniture';
+import { getOverlayBox } from '../furniture/mapshaper-overlays';
+import { getFrameData, fitDatasetToFrame, isFrameLayer } from '../furniture/mapshaper-frame-utils';
+import { setCoordinatePrecision } from '../geom/mapshaper-rounding';
+import { getScalebarLayer } from '../commands/mapshaper-scalebar';
+import { copyDataset } from '../dataset/mapshaper-dataset-utils';
+import utils from '../utils/mapshaper-utils';
+import { message, warn, error, stop } from '../utils/mapshaper-logging';
+import { stringify, stringifyProperties } from '../svg/svg-stringify';
+import { convertPropertiesToDefinitions } from '../svg/svg-definitions';
+import { getOutputFileBase } from '../utils/mapshaper-filename-utils';
+import { importGeoJSONFeatures } from '../svg/geojson-to-svg';
+import { initPathLabelReport, reportPathLabels } from '../svg/svg-label-paths';
+import { DEFAULT_LABEL_FONT_SIZE } from '../svg/svg-labels';
+import { layerIsRectangle, getLayerDataTable, copyLayer, layerHasRaster } from '../dataset/mapshaper-layer-utils';
+import { Bounds } from '../geom/mapshaper-bounds';
+import { getDatasetCRS, getDatasetCrsInfo, crsToProj4, parseAuthorityCodeString, parseAuthorityCodeFromWkt } from '../crs/mapshaper-projections';
+import { runningInBrowser } from '../mapshaper-env';
+import require from '../mapshaper-require';
+import { getRasterBBox, intersectBboxes, renderRasterExportPreview } from '../rasters/mapshaper-raster-utils';
+import { findStylePropertiesBySymbolGeom } from './svg-properties';
+import { applyPolygonGlows } from './svg-glow';
+import { renderLineCasings } from './svg-line-casing';
+
+var ILLUSTRATOR_PATH_VERTEX_LIMIT = 32000;
+
+//
+export function exportSVG(dataset, opts) {
+  var o = prepareDatasetForSVG(dataset, opts);
+  var svgFile = {
+    content: renderSVGDocument(o.dataset, o.frame, o.dataset.layers, o.opts),
+    filename: o.opts.file || getOutputFileBase(o.dataset) + '.svg'
+  };
+  return [svgFile].concat(o.opts.svg_image_files);
+}
+
+// Returns a copy of @dataset (unless opts.final is set) with coordinates
+// transformed to the pixel space of the output frame, along with the frame and
+// the export options, which are given SVG defaults.
+export function prepareDatasetForSVG(dataset, opts) {
+  var frame;
+  // TODO: consider moving this logic to mapshaper-export.js
+  if (opts.final) {
+    if (dataset.arcs) dataset.arcs.flatten();
+  } else {
+    dataset = copyDataset(dataset); // Modify a copy of the dataset
+  }
+
+  // use invert_y: 0 setting for screen coordinates and geojson polygon generation
+  // use 1px default margin so typical strokes don't get cut off on the sides
+  opts = Object.assign({invert_y: true, margin: "1"}, opts);
+  opts.svg_image_files = [];
+  opts.svg_file_base = getSvgFileBase(dataset, opts);
+  frame = getFrameData(dataset, opts);
+  fitDatasetToFrame(dataset, frame);
+  setCoordinatePrecision(dataset, opts.precision || 0.01);
+
+  // error if one or more svg_data fields are not present in any layers
+  if (opts.svg_data) validateSvgDataFields(dataset.layers, opts.svg_data);
+  return {dataset: dataset, frame: frame, opts: opts};
+}
+
+// Renders @layers, a subset of the layers of a dataset prepared by
+// prepareDatasetForSVG(), as an SVG document.
+export function renderSVGDocument(dataset, frame, layers, opts) {
+  var namespace = 'xmlns="http://www.w3.org/2000/svg"';
+  var svg = renderSVGContent(dataset, frame, layers, opts);
+  var style = '';
+
+  // kludge for map keys
+  if (opts.crisp_paths) {
+    style = `
+<style>
+  path {shape-rendering: crispEdges;}
+</style>`;
+  }
+
+  if (opts.metadata) {
+    svg = getMetadataBlock(JSON.stringify(getGeospatialMetadata(dataset, frame)),
+      [0, 0, frame.width, frame.height]) + svg;
+  }
+
+  if (svg.includes('xlink:')) {
+    namespace += ' xmlns:xlink="http://www.w3.org/1999/xlink"';
+  }
+
+  // default line style properties
+  var capStyle = opts.default_linecap || 'round';
+  var lineProps = `stroke-linecap="${capStyle}" stroke-linejoin="round"`;
+  if (svg.includes('stroke-linejoin="miter"')) {
+    // the default limit in Illustrator seems to be 10 -- too large for mapping
+    // (Mapbox uses 2 as the default in their styles)
+    lineProps += ' stroke-miterlimit="2"';
+  }
+  var template = `<?xml version="1.0"?>
+<svg ${namespace} version="1.2" baseProfile="tiny" width="%d" height="%d" viewBox="%s %s %s %s" ${lineProps}>${style}
+${svg}
+</svg>`;
+  return utils.format(template, frame.width, frame.height, 0, 0, frame.width, frame.height);
+}
+
+// The contents of a map's <svg> element: its definitions, the frame's
+// background, the layers and the frame's neatline. An overlay frame's map is
+// rendered this way and placed in a nested <svg> element (see
+// opts.svg_overlays).
+export function renderSVGContent(dataset, frame, layers, opts) {
+  var defs = [];
+  var frameLyr, frameBackground, frameNeatline;
+  var svg;
+
+  if (opts.scalebar) {
+    layers = layers.concat(getScalebarLayer({})); // default options
+  }
+  frameLyr = layers.find(function(lyr) {
+    return isFrameLayer(lyr, dataset.arcs);
+  });
+  if (frameLyr) {
+    frameBackground = exportFrameStylePhase(frameLyr, dataset, opts, 'background');
+    frameNeatline = exportFrameStylePhase(frameLyr, dataset, opts, 'neatline');
+    layers = layers.filter(function(lyr) { return lyr != frameLyr; });
+  } else if (opts.gui_frame?.style) {
+    frameBackground = exportExplicitFrameStyle(
+      frame, opts.gui_frame, 'background'
+    );
+    frameNeatline = exportExplicitFrameStyle(
+      frame, opts.gui_frame, 'neatline'
+    );
+  }
+  svg = layers.map(function(lyr) {
+    var obj;
+    if (getFurnitureLayerType(lyr) == 'overlay' && !lyr.geometry_type) {
+      return renderOverlayForSVG(lyr, frame, opts);
+    }
+    if (layerHasFurniture(lyr)) {
+      obj = exportFurnitureLayerForSVG(lyr, frame, opts);
+    } else if (layerHasRaster(lyr)) {
+      obj = exportRasterLayerForSVG(lyr, frame, opts);
+    } else {
+      obj = exportLayerForSVG(lyr, dataset, opts);
+    }
+    convertPropertiesToDefinitions(obj, defs);
+    return stringify(obj);
+  }).filter(Boolean).join('\n');
+  if (frameBackground) svg = frameBackground + '\n' + svg;
+  if (frameNeatline) svg += '\n' + frameNeatline;
+
+  if (defs.length > 0) {
+    svg = '<defs>\n' + utils.pluck(defs, 'svg').join('') + '</defs>\n' + svg;
+  }
+  return svg;
+}
+
+// An overlay frame's map, placed on the host page in a nested <svg> element,
+// which clips it to the overlay's page
+// opts.svg_overlays: rendered overlay maps, by frame ID
+//   {name, width, height, content}
+function renderOverlayForSVG(lyr, frame, opts) {
+  var rec = getFurnitureLayerData(lyr);
+  var o = opts.svg_overlays && opts.svg_overlays[rec.frame];
+  var box;
+  if (!o) return '';
+  box = getOverlayBox(rec, frame, o);
+  return '<svg' + stringifyProperties({
+    id: (opts.id_prefix || '') + o.name,
+    x: box.x,
+    y: box.y,
+    width: box.width,
+    height: box.height,
+    viewBox: [0, 0, o.width, o.height].join(' '),
+    overflow: 'hidden'
+  }) + '>\n' + o.content + '\n</svg>';
+}
+
+function exportFrameStylePhase(lyr, dataset, opts, phase) {
+  var copy = copyLayer(lyr);
+  var rec = copy.data && copy.data.getRecords()[0];
+  var obj;
+  if (!rec) return '';
+  if (phase == 'background') {
+    if (!rec.fill || rec.fill == 'none') return '';
+    removeStylePrefix(rec, 'stroke');
+    copy.name = (lyr.name || 'frame') + '-background';
+  } else {
+    if (!rec.stroke || rec.stroke == 'none' ||
+        Number(rec['stroke-width']) <= 0) return '';
+    removeStylePrefix(rec, 'fill');
+    rec.fill = 'none';
+    copy.name = (lyr.name || 'frame') + '-neatline';
+  }
+  obj = exportLayerForSVG(copy, dataset, opts);
+  return stringify(obj);
+}
+
+function removeStylePrefix(rec, prefix) {
+  Object.keys(rec).forEach(function(key) {
+    if (key == prefix || key.indexOf(prefix + '-') === 0) {
+      delete rec[key];
+    }
+  });
+}
+
+function exportExplicitFrameStyle(frame, context, phase) {
+  var style = context.style || {};
+  var properties = {
+    id: (context.name || 'frame') + '-' + phase,
+    x: 0,
+    y: 0,
+    width: frame.width,
+    height: frame.height
+  };
+  if (phase == 'background') {
+    if (!style.fill || style.fill == 'none') return '';
+    copyProperties(properties, style,
+      ['fill', 'fill-opacity', 'fill-rule', 'opacity']);
+  } else {
+    if (!style.stroke || style.stroke == 'none' ||
+        Number(style['stroke-width']) <= 0) return '';
+    properties.fill = 'none';
+    copyProperties(properties, style, [
+      'stroke', 'stroke-width', 'stroke-opacity', 'stroke-linecap',
+      'stroke-linejoin', 'stroke-dasharray', 'opacity'
+    ]);
+  }
+  return stringify({tag: 'rect', properties: properties});
+}
+
+function copyProperties(dest, src, names) {
+  names.forEach(function(name) {
+    if (src[name] !== undefined) dest[name] = src[name];
+  });
+}
+
+function getSvgFileBase(dataset, opts) {
+  var file = opts.file || getOutputFileBase(dataset) + '.svg';
+  return file.replace(/\.(svg|html?)$/i, '');
+}
+
+function getMetadataBlock(metadataJSON, viewBox) {
+  var x = viewBox && viewBox[0] || 0;
+  var y = viewBox && viewBox[1] || 0;
+  var width = viewBox && viewBox[2] || 0;
+  var height = viewBox && viewBox[3] || 0;
+  return '<metadata>' + metadataJSON + '</metadata>\n' +
+    '<g id="mapshaper-metadata">\n' +
+    '<rect x="' + x + '" y="' + y + '" width="' + width + '" height="' + height + '" opacity="0"/>\n' +
+    '<text opacity="0" font-size="0.1">' + metadataJSON + '</text>\n' +
+    '</g>\n';
+}
+
+function getGeospatialMetadata(dataset, frame) {
+  return {
+    crs: getSVGMetadataCRS(dataset),
+    bbox: frame.bbox || null
+  };
+}
+
+function getSVGMetadataCRS(dataset) {
+  var crs = getDatasetCRS(dataset);
+  var info = getDatasetCrsInfo(dataset);
+  var proj4 = null;
+  if (crs) {
+    proj4 = crsToProj4(crs);
+  }
+  if (proj4) return proj4;
+  return getAuthorityCodeString(info) || null;
+}
+
+function getAuthorityCodeString(info) {
+  var authority = null;
+  if (info && info.crs_string) {
+    authority = parseAuthorityCodeString(info.crs_string);
+  }
+  if (!authority && info && info.wkt1) {
+    authority = parseAuthorityCodeFromWkt(info.wkt1);
+  }
+  if (!authority && info && info.geopackage_crs) {
+    authority = parseGeoPackageAuthority(info.geopackage_crs);
+  }
+  return authority ? authority.authority + ':' + authority.code : null;
+}
+
+function parseGeoPackageAuthority(o) {
+  if (!o) return null;
+  var authority = o.organization || o.authority || null;
+  var code = o.organization_coordsys_id || o.code || null;
+  return authority && code != null ? {authority: String(authority).toUpperCase(), code: String(code)} : null;
+}
+
+export function exportFurnitureLayerForSVG(lyr, frame, opts) {
+  var layerObj = getEmptyLayerForSVG(lyr, opts);
+  layerObj.children = renderFurnitureLayer(lyr, frame);
+  return layerObj;
+}
+
+// Prevent unstyled rectangle layers from displaying with the SVG default
+// solid black fill.
+// lyr: a layer, assumed to contain a single rectangular polygon
+function adjustRectangleStyle(lyr) {
+  var data = getLayerDataTable(lyr);
+  var d = data.getRecords()[0];
+  if (!d.fill && !d.stroke) {
+    d.fill = "none";
+  }
+}
+
+export function exportLayerForSVG(lyr, dataset, opts) {
+  var layerObj = getEmptyLayerForSVG(lyr, opts);
+  if (isFrameLayer(lyr, dataset.arcs) && !frameHasExportStyle(lyr)) {
+    layerObj.children = [];
+    return layerObj;
+  }
+  if (layerIsRectangle(lyr, dataset.arcs)) {
+    lyr = copyLayer(lyr);
+    adjustRectangleStyle(lyr);
+  }
+  layerObj.children = exportSymbolsForSVG(lyr, dataset, opts, layerObj);
+  return layerObj;
+}
+
+function frameHasExportStyle(lyr) {
+  var rec = lyr.data && lyr.data.getReadOnlyRecordAt(0);
+  var fields = findStylePropertiesBySymbolGeom(Object.keys(rec || {}), 'polygon');
+  return fields.some(function(name) {
+    return rec[name] !== null && rec[name] !== undefined && rec[name] !== '';
+  });
+}
+
+export function exportRasterLayerForSVG(lyr, frame, opts) {
+  var raster = lyr.raster;
+  var rendered = renderRasterForSVG(raster, frame, opts);
+  var bbox = transformRasterBboxForSVG(rendered.bbox, frame);
+  var href;
+  var layerObj = getEmptyLayerForSVG(lyr, opts);
+  if (!rendered.preview.width || !rendered.preview.height) {
+    layerObj.children = [];
+    return layerObj;
+  }
+  href = opts.linked_images ?
+    exportLinkedRasterPreview(rendered.preview, opts) :
+    encodeRasterPreview(rendered.preview, opts);
+  layerObj.children = [{
+    tag: 'image',
+    properties: {
+      x: bbox[0],
+      y: bbox[1],
+      width: bbox[2] - bbox[0],
+      height: bbox[3] - bbox[1],
+      href: href,
+      preserveAspectRatio: 'none'
+    }
+  }];
+  return layerObj;
+}
+
+function renderRasterForSVG(raster, frame, opts) {
+  var rasterBbox = getRasterBBox(raster);
+  var rasterBounds = new Bounds(rasterBbox);
+  var clipBounds = new Bounds(frame.bbox);
+  var bbox = intersectBboxes(rasterBounds.toArray(), clipBounds.toArray()) || [0, 0, 0, 0];
+  var svgBbox = transformRasterBboxForSVG(bbox, frame);
+  var size = getSvgRasterOutputSize(raster, bbox, svgBbox, opts);
+  return {
+    bbox: bbox,
+    preview: size.width > 0 && size.height > 0 ?
+      renderRasterExportPreview(raster, bbox, size.width, size.height, opts) :
+      {width: 0, height: 0, pixels: new Uint8ClampedArray(0)}
+  };
+}
+
+function getSvgRasterOutputSize(raster, bbox, svgBbox, opts) {
+  var res = getSvgRasterResolution(opts);
+  var sourceSize = getRasterSourceSize(raster, bbox);
+  var svgWidth = Math.abs(svgBbox[2] - svgBbox[0]);
+  var svgHeight = Math.abs(svgBbox[3] - svgBbox[1]);
+  var width = svgWidth > 0 ? Math.max(1, Math.round(svgWidth * res)) : 0;
+  var height = svgHeight > 0 ? Math.max(1, Math.round(svgHeight * res)) : 0;
+  return {
+    width: Math.max(0, Math.min(Math.max(1, Math.ceil(sourceSize.width)), width)),
+    height: Math.max(0, Math.min(Math.max(1, Math.ceil(sourceSize.height)), height))
+  };
+}
+
+function getSvgRasterResolution(opts) {
+  var res = opts.raster_res || opts.rasterRes || 1;
+  if (res > 0 === false) stop('Expected raster-res= to be a positive number');
+  return res;
+}
+
+function getRasterSourceSize(raster, bbox) {
+  var grid = raster.grid;
+  var rb = getRasterBBox(raster);
+  return {
+    width: Math.abs((bbox[2] - bbox[0]) / (rb[2] - rb[0]) * grid.width),
+    height: Math.abs((bbox[3] - bbox[1]) / (rb[3] - rb[1]) * grid.height)
+  };
+}
+
+function transformRasterBboxForSVG(bbox, frame) {
+  var srcBounds = new Bounds(frame.bbox);
+  var destBounds = frame.bbox2 ? new Bounds(frame.bbox2) : new Bounds(0, 0, frame.width, frame.height);
+  srcBounds.fillOut(destBounds.width() / destBounds.height());
+  var fwd = srcBounds.getTransform(destBounds, frame.invert_y);
+  var p1 = fwd.transform(bbox[0], bbox[3]);
+  var p2 = fwd.transform(bbox[2], bbox[1]);
+  return [p1[0], p1[1], p2[0], p2[1]];
+}
+
+function encodeRasterPreview(preview, opts) {
+  var format = getSvgRasterFormat(preview, opts);
+  var data = format == 'png' ? encodePng(preview) : encodeJpeg(preview, opts);
+  return 'data:image/' + format + ';base64,' + data;
+}
+
+function exportLinkedRasterPreview(preview, opts) {
+  var format = getSvgRasterFormat(preview, opts);
+  var data = format == 'png' ? encodePng(preview) : encodeJpeg(preview, opts);
+  var ext = format == 'jpeg' ? 'jpg' : format;
+  var filename = opts.svg_file_base + '-image-' + (opts.svg_image_files.length + 1) + '.' + ext;
+  opts.svg_image_files.push({
+    filename: filename,
+    content: base64ToBytes(data)
+  });
+  return filename;
+}
+
+function base64ToBytes(str) {
+  if (typeof Buffer != 'undefined') {
+    return Buffer.from(str, 'base64');
+  }
+  var bin = atob(str);
+  var bytes = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) {
+    bytes[i] = bin.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function getSvgRasterFormat(preview, opts) {
+  var fmt = opts.svg_raster_format || opts.raster_format || null;
+  if (fmt) return fmt == 'jpg' ? 'jpeg' : fmt;
+  return previewHasTransparency(preview) ? 'png' : 'jpeg';
+}
+
+function previewHasTransparency(preview) {
+  var pixels = preview.pixels;
+  for (var i = 3; i < pixels.length; i += 4) {
+    if (pixels[i] < 255) return true;
+  }
+  return false;
+}
+
+function encodeJpeg(preview, opts) {
+  var quality = getJpegQuality(opts);
+  if (runningInBrowser() && typeof document != 'undefined') {
+    return encodeWithCanvas(preview, 'image/jpeg', quality / 100);
+  }
+  var jpeg = require('jpeg-js');
+  return Buffer.from(jpeg.encode({
+    data: Buffer.from(preview.pixels),
+    width: preview.width,
+    height: preview.height
+  }, quality).data).toString('base64');
+}
+
+export function getJpegQuality(opts) {
+  var quality = opts.jpeg_quality == null ? 85 : opts.jpeg_quality;
+  if ((quality >= 1 && quality <= 100) === false) {
+    stop('jpeg-quality= option should be a number from 1 to 100');
+  }
+  return Math.round(quality);
+}
+
+function encodePng(preview) {
+  if (runningInBrowser() && typeof document != 'undefined') {
+    return encodeWithCanvas(preview, 'image/png');
+  }
+  var PNG = require('pngjs').PNG;
+  var png = new PNG({width: preview.width, height: preview.height});
+  png.data = Buffer.from(preview.pixels);
+  return Buffer.from(PNG.sync.write(png)).toString('base64');
+}
+
+function encodeWithCanvas(preview, type, quality) {
+  var canvas = document.createElement('canvas');
+  var ctx = canvas.getContext('2d');
+  var dataUrl;
+  canvas.width = preview.width;
+  canvas.height = preview.height;
+  ctx.putImageData(new ImageData(preview.pixels, preview.width, preview.height), 0, 0);
+  dataUrl = canvas.toDataURL(type, quality);
+  return dataUrl.split(',')[1];
+}
+
+function exportSymbolsForSVG(lyr, dataset, opts, layerObj) {
+  // TODO: convert geojson features one at a time
+  var d = utils.defaults({layers: [lyr]}, dataset);
+  var geojson = exportDatasetAsGeoJSON(d, opts);
+  var features = geojson.features || geojson.geometries || (geojson.type ? [geojson] : []);
+  var casings;
+  warnIfIllustratorPathLimitExceeded(lyr, features);
+  // path labels that don't fit their path render as nothing, and are reported
+  // rather than dropped silently
+  var pathLabelReport = initPathLabelReport();
+  var children = importGeoJSONFeatures(features,
+    utils.defaults({path_label_report: pathLabelReport}, opts));
+  reportPathLabels(pathLabelReport, lyr);
+  if (lyr.geometry_type == 'polygon') {
+    applyPolygonGlows(layerObj, children, features, lyr);
+  }
+  // Drop empty placeholder <g/> elements (features whose geometry was null in the
+  // source data, collapsed during simplification, or otherwise produced no
+  // visible output). Keep the layer's records in lockstep so that data-*
+  // attributes added via -o svg-data= remain correctly aligned.
+  var records = lyr.data ? lyr.data.getRecords() : null;
+  var keptRecords = records ? [] : null;
+  children = children.filter(function(child, i) {
+    if (isEmptyPlaceholder(child)) return false;
+    if (keptRecords) keptRecords.push(records[i]);
+    return true;
+  });
+  if (opts.svg_data && lyr.data) {
+    addDataAttributesToSVG(children, keptRecords, lyr.data.getFields(), opts.svg_data);
+  }
+  if (lyr.geometry_type == 'polyline') {
+    casings = renderLineCasings(features, layerObj.properties.id);
+    if (casings) children.unshift(casings);
+  }
+  return children;
+}
+
+function warnIfIllustratorPathLimitExceeded(lyr, features) {
+  var count = 0;
+  var max = 0;
+  if (lyr.geometry_type != 'polygon' && lyr.geometry_type != 'polyline') return;
+  features.forEach(function(feature) {
+    var geom = feature.geometry || feature;
+    var n = countSvgPathVertices(geom);
+    if (n > ILLUSTRATOR_PATH_VERTEX_LIMIT) {
+      count++;
+      max = Math.max(max, n);
+    }
+  });
+  if (count > 0) {
+    warn(utils.format(
+      '%,d SVG path%s in layer "%s" contain%s more than %,d vertices; Adobe Illustrator may not import %s. The largest path has %,d vertices.',
+      count,
+      utils.pluralSuffix(count),
+      lyr.name || '[unnamed]',
+      count == 1 ? 's' : '',
+      ILLUSTRATOR_PATH_VERTEX_LIMIT,
+      count == 1 ? 'it' : 'them',
+      max
+    ));
+  }
+}
+
+function countSvgPathVertices(geom) {
+  var coords = geom && geom.coordinates;
+  if (!coords) return 0;
+  if (geom.type == 'LineString') return coords.length;
+  if (geom.type == 'MultiLineString' || geom.type == 'Polygon') {
+    return sumPathLengths(coords);
+  }
+  if (geom.type == 'MultiPolygon') {
+    return coords.reduce(function(sum, polygon) {
+      return sum + sumPathLengths(polygon);
+    }, 0);
+  }
+  return 0;
+}
+
+function sumPathLengths(paths) {
+  return paths.reduce(function(sum, path) {
+    return sum + path.length;
+  }, 0);
+}
+
+function isEmptyPlaceholder(o) {
+  return o.tag == 'g' && (!o.children || o.children.length === 0);
+}
+
+export function validateSvgDataFields(layers, fieldsArg) {
+  var missingFields = fieldsArg.reduce(function(memo, field) {
+    if (!fieldExists(layers, field)) {
+      memo.push(field);
+    }
+    return memo;
+  }, []);
+
+  if (missingFields.length && missingFields.indexOf('*') == -1) {
+    stop("Missing data field(s):", missingFields.join(', '));
+  }
+
+  function fieldExists(layers, field) {
+    return utils.some(layers, function(lyr) {
+      return lyr.data && lyr.data.fieldExists(field) || false;
+    });
+  }
+}
+
+function addDataAttributesToSVG(children, records, allFields, fieldsArg) {
+  var dataFields = fieldsArg.indexOf('*') > -1 ? allFields.concat() : fieldsArg;
+  var missingFields = utils.difference(dataFields, allFields);
+  if (missingFields.length > 0) {
+    dataFields = utils.difference(dataFields, missingFields);
+    // stop("Missing data field(s):", missingFields.join(', '));
+  }
+  var data = exportDataAttributesForSVG(records, dataFields);
+  if (children.length != data.length) {
+    error("Mismatch between number of SVG symbols and data attributes");
+  }
+  children.forEach(function(child, i) {
+    utils.extend(child.properties || {}, data[i]);
+  });
+}
+
+export function exportDataAttributesForSVG(records, fields) {
+  var validRxp = /^[a-z_][a-z0-9_-]*$/i;
+  var invalidRxp = /^xml/;
+  var validFields = fields.filter(function(name) {
+    return validRxp.test(name) && !invalidRxp.test(name);
+  });
+  var invalidFields = utils.difference(fields, validFields);
+  if (invalidFields.length > 0) {
+    message("Unable to add data-* attributes for field(s):", invalidFields.join(', '));
+    message("data-* names should match pattern [a-z_][a-z0-9_-]*");
+  }
+  return records.map(function(rec) {
+    var obj = {};
+    for (var i=0; i<validFields.length; i++) {
+      obj['data-' + validFields[i].toLowerCase()] =
+        validDataAttributeValue(rec[validFields[i]]);
+    }
+    return obj;
+  });
+}
+
+function validDataAttributeValue(val) {
+  // TODO: consider converting some falsy values to empty strings
+  // (e.g. null, undefined, NaN)
+  return String(val);
+}
+
+// internal.validDataAttributeNames = function(names) {
+//   return utils.uniqifyNames(names.map(internal.validDataAttributeName));
+// };
+
+// There are restrictions on data-* attribute names
+// This function modifies names so they can be used
+// See: https://developer.mozilla.org/en-US/docs/Web/SVG/Attribute/data-*
+// Mapshaper's rules are a bit more restrictive than the spec -- e.g.
+//   the first character after "data-" is restricted to "_" | [a-z]
+//
+// internal.validDataAttributeName = function(name) {
+//   name = name.toLowerCase();
+//   name = name.replace(/[^a-z0-9_-]/g, ''); // accept only these letters
+//   if (/^([0-9-]|xml)/.test(name) || name === '') {
+//     name = '_' + name; // prepend underscore if needed
+//   }
+//   return name;
+// };
+
+export function getEmptyLayerForSVG(lyr, opts) {
+  var id = (opts.id_prefix || '') + (lyr.name || utils.getUniqueName('layer'));
+  var layerObj = {
+    tag: 'g',
+    properties: {id: id},
+    children: []
+  };
+
+  // override default black fill for layers that might have open paths
+  // TODO: set fill="none" in SVG symbols, not on the container
+  //   (setting fill=none on the container overrides the default black fill
+  //   on paths, which may alter the appearance of SVG icons loaded from external URLs).
+  if (lyr.geometry_type == 'polyline' || layerHasSvgSymbolField(lyr)) {
+    layerObj.properties.fill = 'none';
+  }
+
+  // add default display properties to line layers
+  // (these are overridden by feature-level styles set via -style)
+  if (lyr.geometry_type == 'polyline') {
+    layerObj.properties.stroke = 'black';
+    layerObj.properties['stroke-width'] = 1;
+  }
+
+
+  // add default text properties to layers with labels
+  if (layerHasLabels(lyr) || layerHasSvgSymbols(lyr) || layerHasFurniture(lyr)) {
+    utils.extend(layerObj.properties, getLabelTextDefaults());
+  }
+
+  return layerObj;
+}
+
+// The text properties a label layer's container carries, which its labels
+// inherit instead of each holding a copy. Exported because a label rendered
+// outside any container -- the one the GUI draws while it is being typed, which
+// belongs to no layer until it is created -- has to be given the same ones, or
+// it changes size and alignment at the moment it becomes a feature.
+export function getLabelTextDefaults() {
+  return {
+    'font-family': 'sans-serif',
+    'font-size': String(DEFAULT_LABEL_FONT_SIZE),
+    'text-anchor': 'middle'
+  };
+}
+
+// Re-exported from svg-feature-utils.mjs for back-compat.
+export { featureHasSvgSymbol, featureHasLabel } from '../svg/svg-feature-utils';
+
+export function layerHasSvgSymbols(lyr) {
+  return lyr.geometry_type == 'point' && lyr.data && (
+    lyr.data.fieldExists('svg-symbol') ||
+    lyr.data.fieldExists('icon') ||
+    lyr.data.fieldExists('icon-size') ||
+    (lyr.data.fieldExists('r') && (lyr.data.fieldExists('icon-color') ||
+      lyr.data.fieldExists('icon-fill') || lyr.data.fieldExists('icon-stroke')))
+  );
+}
+
+function layerHasSvgSymbolField(lyr) {
+  return lyr.geometry_type == 'point' && lyr.data && lyr.data.fieldExists('svg-symbol');
+}
+
+export function layerHasLabels(lyr) {
+  var hasLabels = lyr.geometry_type == 'point' && lyr.data && lyr.data.fieldExists('label-text');
+  //if (hasLabels && internal.findMaxPartCount(lyr.shapes) > 1) {
+  //  console.error('Multi-point labels are not fully supported');
+  //}
+  return hasLabels;
+}

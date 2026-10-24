@@ -1,0 +1,634 @@
+import { describe, expect, it } from 'vitest';
+import { getMotionReferenceEndpoint } from '@/models/models';
+import type { ReferenceImageDescription } from '@/stills/reference-image-prompt';
+import {
+  buildReferenceVideoPrompt,
+  type ReferencePromptBinding,
+} from './build-reference-video-prompt';
+import { buildMotionShotPrompt } from './build-motion-prompts';
+import { buildMotionReferenceImages } from './build-motion-references';
+
+const STILL = 'https://example.com/still.png';
+
+const seedanceV2Config = getMotionReferenceEndpoint('seedance_v2');
+if (!seedanceV2Config) {
+  throw new Error('seedance_v2 must have a 2.0 reference endpoint config');
+}
+const seedanceV25Config = getMotionReferenceEndpoint('seedance_v2_5');
+if (!seedanceV25Config) {
+  throw new Error('seedance_v2_5 must have a 2.5 reference endpoint config');
+}
+
+const ref = (
+  url: string,
+  description: string,
+  token?: string
+): ReferenceImageDescription => ({
+  referenceImageUrl: url,
+  description,
+  role: 'character',
+  token,
+});
+
+describe.each([
+  ['seedance_v2', seedanceV2Config] as const,
+  ['seedance_v2_5', seedanceV25Config] as const,
+])(
+  'buildReferenceVideoPrompt (%s)',
+  (_model, seedanceConfig: ReferencePromptBinding) => {
+    it('declares the still as the starting frame on the first line', () => {
+      const result = buildReferenceVideoPrompt(
+        seedanceConfig,
+        'A slow dolly in',
+        STILL,
+        []
+      );
+      expect(
+        result.prompt.startsWith('Use @Image1 as the starting frame.\n')
+      ).toBe(true);
+      expect(result.imageUrls).toEqual([STILL]);
+    });
+
+    it('binds mentioned tokens inline as @ImageN instead of a legend', () => {
+      const result = buildReferenceVideoPrompt(
+        seedanceConfig,
+        'ALICE turns toward the window as the CORAL_LIPSTICK glints',
+        STILL,
+        [
+          ref('https://example.com/a.png', 'Alice - tall woman', 'Alice'),
+          ref(
+            'https://example.com/b.png',
+            'CORAL_LIPSTICK - a coral tube',
+            'CORAL_LIPSTICK'
+          ),
+        ]
+      );
+      expect(result.imageUrls).toEqual([
+        STILL,
+        'https://example.com/a.png',
+        'https://example.com/b.png',
+      ]);
+      expect(result.prompt).toContain(
+        '@Image2 turns toward the window as the @Image3 glints'
+      );
+      expect(result.prompt).not.toContain('Reference images:');
+    });
+
+    it('matches tokens case-insensitively and word-bounded', () => {
+      const result = buildReferenceVideoPrompt(
+        seedanceConfig,
+        'Scarlett adjusts her jacket',
+        STILL,
+        [
+          ref('https://example.com/a.png', 'Scarlett - athletic', 'Scarlett'),
+          ref('https://example.com/b.png', 'Jack - tall man', 'Jack'),
+        ]
+      );
+      // "Scarlett" bound inline; "jacket" must NOT match token "Jack".
+      expect(result.prompt).toContain('@Image2 adjusts her jacket');
+      expect(result.prompt).toContain('@Image3: Jack - tall man');
+    });
+
+    it('omits the legend when skipLegend is set', () => {
+      const result = buildReferenceVideoPrompt(
+        seedanceConfig,
+        'A slow dolly in',
+        STILL,
+        [ref('https://example.com/a.png', 'Alice - tall woman', 'Alice')],
+        { skipLegend: true }
+      );
+      expect(result.prompt).not.toContain('Reference images:');
+      expect(result.prompt).not.toContain('@Image2:');
+      expect(result.imageUrls).toEqual([STILL, 'https://example.com/a.png']);
+    });
+
+    it('falls back to a legend line for refs never mentioned in the prompt', () => {
+      const result = buildReferenceVideoPrompt(
+        seedanceConfig,
+        'A slow dolly in',
+        STILL,
+        [ref('https://example.com/a.png', 'Alice - tall woman', 'Alice')]
+      );
+      expect(result.prompt).toContain('Reference images:');
+      expect(result.prompt).toContain(
+        '@Image2: Alice - tall woman — keep visually consistent throughout the shot.'
+      );
+    });
+
+    it('drops references with no URL', () => {
+      const result = buildReferenceVideoPrompt(
+        seedanceConfig,
+        'A slow dolly in',
+        STILL,
+        [
+          ref('', 'No image', 'GHOST'),
+          ref('https://example.com/b.png', 'Bob - short man', 'Bob'),
+        ]
+      );
+      expect(result.imageUrls).toEqual([STILL, 'https://example.com/b.png']);
+      expect(result.prompt).toContain('@Image2: Bob - short man');
+      expect(result.prompt).not.toContain('No image');
+    });
+
+    it('caps attached images at maxImages and substitutes overflow tokens with descriptions', () => {
+      // Two more refs than the endpoint's budget, whatever that budget is —
+      // 2.0 and 2.5 differ (9 vs 30), and pinning a literal here would just
+      // re-break the day a provider raises one.
+      const budget = seedanceConfig.maxImages;
+      const overflowing = budget + 1;
+      const refs = Array.from({ length: overflowing }, (_, i) =>
+        ref(
+          `https://example.com/${i}.png`,
+          `Ref ${i} - person ${i}`,
+          `REF_${i}`
+        )
+      );
+      const last = overflowing - 1;
+      const result = buildReferenceVideoPrompt(
+        seedanceConfig,
+        `REF_0 waves while REF_${last} walks away`,
+        STILL,
+        refs
+      );
+      // The still takes one slot, so `budget - 1` refs attach and the rest
+      // overflow into prose.
+      expect(result.imageUrls).toHaveLength(budget);
+      expect(result.imageUrls[0]).toBe(STILL);
+      // Attached + mentioned → inline tag; overflow + mentioned → description.
+      expect(result.prompt).toContain('@Image2 waves');
+      expect(result.prompt).toContain(
+        `Ref ${last} (person ${last}) walks away`
+      );
+      expect(result.prompt).not.toContain(`@Image${budget + 1}`);
+    });
+
+    it('keeps a long base prompt whole alongside the legend (#1754)', () => {
+      const longBase = 'x'.repeat(5000);
+      const result = buildReferenceVideoPrompt(
+        seedanceConfig,
+        longBase,
+        STILL,
+        [ref('https://example.com/a.png', 'Alice - tall woman', 'Alice')]
+      );
+      expect(result.prompt).toContain(longBase);
+      expect(
+        result.prompt.startsWith('Use @Image1 as the starting frame.')
+      ).toBe(true);
+      expect(result.prompt).toContain('@Image2: Alice - tall woman');
+      expect(result.prompt).not.toContain('...');
+    });
+  }
+);
+
+describe('buildReferenceVideoPrompt (minimax_h3_max)', () => {
+  const h3Config = getMotionReferenceEndpoint('minimax_h3_max');
+  if (!h3Config) {
+    throw new Error('minimax_h3_max must have a reference endpoint config');
+  }
+
+  it('uses spaced Image N tokens, not @ImageN', () => {
+    const result = buildReferenceVideoPrompt(
+      h3Config,
+      'ALICE turns toward the window',
+      STILL,
+      [ref('https://example.com/a.png', 'Alice - tall woman', 'Alice')]
+    );
+    expect(
+      result.prompt.startsWith('Use Image 1 as the starting frame.\n')
+    ).toBe(true);
+    expect(result.prompt).toContain('Image 2 turns toward the window');
+    expect(result.prompt).not.toContain('@Image');
+  });
+});
+
+describe('buildReferenceVideoPrompt (per-model config knobs)', () => {
+  // Gemini Omni Flash-style config: 0-indexed angle-bracket tags, tighter cap.
+  const omniStyleConfig: ReferencePromptBinding = {
+    tag: (position) => `<IMAGE_REF_${position - 1}>`,
+    maxImages: 4,
+  };
+
+  it('renders the model-specific tag syntax inline and in the start line', () => {
+    const result = buildReferenceVideoPrompt(
+      omniStyleConfig,
+      'ALICE waves at the camera',
+      STILL,
+      [ref('https://example.com/a.png', 'Alice - tall woman', 'Alice')]
+    );
+    expect(
+      result.prompt.startsWith('Use <IMAGE_REF_0> as the starting frame.')
+    ).toBe(true);
+    expect(result.prompt).toContain('<IMAGE_REF_1> waves at the camera');
+    expect(result.prompt).not.toContain('@Image');
+  });
+
+  it('caps total images at the config maxImages', () => {
+    const refs = Array.from({ length: 6 }, (_, i) =>
+      ref(`https://example.com/${i}.png`, `Ref ${i} - person ${i}`, `REF_${i}`)
+    );
+    const result = buildReferenceVideoPrompt(
+      omniStyleConfig,
+      'A slow dolly in',
+      STILL,
+      refs
+    );
+    expect(result.imageUrls).toHaveLength(4);
+    expect(result.prompt).toContain('<IMAGE_REF_3>: Ref 2 - person 2');
+    expect(result.prompt).not.toContain('<IMAGE_REF_4>');
+  });
+
+  it('tags Grok Imagine 1.5 refs as <IMAGE_0>… in request order', () => {
+    const grokConfig: ReferencePromptBinding = {
+      tag: (position) => `<IMAGE_${position - 1}>`,
+      maxImages: 7,
+    };
+    const result = buildReferenceVideoPrompt(
+      grokConfig,
+      'SCARLETT lifts the CORAL_LIPSTICK',
+      STILL,
+      [
+        ref('https://example.com/a.png', 'Scarlett - athletic', 'SCARLETT'),
+        {
+          referenceImageUrl: 'https://example.com/b.png',
+          description: 'CORAL_LIPSTICK - a coral tube',
+          role: 'element',
+          token: 'CORAL_LIPSTICK',
+        },
+      ]
+    );
+    expect(
+      result.prompt.startsWith('Use <IMAGE_0> as the starting frame.')
+    ).toBe(true);
+    expect(result.prompt).toContain('<IMAGE_1> lifts the <IMAGE_2>');
+    expect(result.imageUrls).toEqual([
+      STILL,
+      'https://example.com/a.png',
+      'https://example.com/b.png',
+    ]);
+  });
+});
+
+describe('reference-only (no start frame)', () => {
+  it('binds the first reference to tag 1 and omits the starting-frame line', () => {
+    const result = buildReferenceVideoPrompt(
+      seedanceV25Config,
+      'SCARLETT lifts the CORAL_LIPSTICK',
+      null,
+      [
+        ref('https://example.com/a.png', 'Scarlett - athletic', 'SCARLETT'),
+        {
+          referenceImageUrl: 'https://example.com/b.png',
+          description: 'CORAL_LIPSTICK - a coral tube',
+          role: 'element',
+          token: 'CORAL_LIPSTICK',
+        },
+      ]
+    );
+
+    expect(result.prompt).not.toContain('starting frame');
+    expect(result.prompt).toBe('@Image1 lifts the @Image2');
+    expect(result.imageUrls).toEqual([
+      'https://example.com/a.png',
+      'https://example.com/b.png',
+    ]);
+  });
+
+  it('spends the whole image budget on references', () => {
+    const refs = Array.from(
+      { length: seedanceV25Config.maxImages + 1 },
+      (_, i) => ref(`https://example.com/${i}.png`, `Ref ${i}`, `TOKEN_${i}`)
+    );
+
+    const withStill = buildReferenceVideoPrompt(
+      seedanceV25Config,
+      'a shot',
+      STILL,
+      refs
+    );
+    const withoutStill = buildReferenceVideoPrompt(
+      seedanceV25Config,
+      'a shot',
+      null,
+      refs
+    );
+
+    // Both fill every slot the endpoint allows; the still costs one of them.
+    expect(withStill.imageUrls).toHaveLength(seedanceV25Config.maxImages);
+    expect(withoutStill.imageUrls).toHaveLength(seedanceV25Config.maxImages);
+    expect(withoutStill.imageUrls).not.toContain(STILL);
+  });
+
+  it('numbers legend lines from 1 for unmentioned references', () => {
+    const result = buildReferenceVideoPrompt(
+      seedanceV25Config,
+      'A slow dolly across an empty room',
+      null,
+      [ref('https://example.com/a.png', 'Scarlett - athletic', 'SCARLETT')]
+    );
+
+    expect(result.prompt).toContain('@Image1: Scarlett - athletic');
+    expect(result.prompt).not.toContain('@Image2');
+  });
+
+  it('degenerates to the bare prompt when nothing matched', () => {
+    const result = buildReferenceVideoPrompt(
+      seedanceV25Config,
+      'A slow dolly across an empty room',
+      null,
+      []
+    );
+
+    expect(result.prompt).toBe('A slow dolly across an empty room');
+    expect(result.imageUrls).toEqual([]);
+  });
+});
+
+// #1559 — clips and audio ride their own lists and their own tag namespaces.
+describe('buildReferenceVideoPrompt with clip and audio references', () => {
+  const media = (
+    kind: 'video' | 'audio',
+    token: string
+  ): ReferenceImageDescription => ({
+    referenceImageUrl: `https://example.com/${token.toLowerCase()}.${kind === 'audio' ? 'mp3' : 'mp4'}`,
+    description: `${token} [${kind}, 4s]`,
+    role: 'element',
+    kind,
+    token,
+  });
+
+  it('numbers each kind from 1 and binds it inline', () => {
+    const result = buildReferenceVideoPrompt(
+      seedanceV25Config,
+      'SCARLETT says STEVE_LINE_3 while moving like PUPPET_WALK',
+      STILL,
+      [
+        ref('https://example.com/a.png', 'Scarlett - athletic', 'SCARLETT'),
+        media('audio', 'STEVE_LINE_3'),
+        media('video', 'PUPPET_WALK'),
+      ]
+    );
+
+    // The still holds @Image1, so the sheet is @Image2 — but the clip and the
+    // audio each start their own numbering at 1.
+    expect(result.prompt).toContain(
+      '@Image2 says @Audio1 while moving like @Video1'
+    );
+    expect(result.imageUrls).toEqual([STILL, 'https://example.com/a.png']);
+    expect(result.videoUrls).toEqual(['https://example.com/puppet_walk.mp4']);
+    expect(result.audioUrls).toEqual(['https://example.com/steve_line_3.mp3']);
+  });
+
+  it('inlines the description when the endpoint takes no clips or audio', () => {
+    const noMedia: ReferencePromptBinding = {
+      tag: (n) => `@Image${n}`,
+      maxImages: 7,
+    };
+    const result = buildReferenceVideoPrompt(
+      noMedia,
+      'Play THEME_MUSIC under the shot',
+      STILL,
+      [media('audio', 'THEME_MUSIC')]
+    );
+
+    expect(result.audioUrls).toEqual([]);
+    expect(result.prompt).toContain('THEME_MUSIC [audio, 4s]');
+  });
+
+  it('refuses to send audio as the only reference', () => {
+    // Every reference endpoint requires at least one image or video; a
+    // reference-only shot whose sole attachment is a voice line describes it
+    // instead, and routes to the prompt-only sibling.
+    const result = buildReferenceVideoPrompt(
+      seedanceV25Config,
+      'Under THEME_MUSIC, the room empties',
+      null,
+      [media('audio', 'THEME_MUSIC')]
+    );
+
+    expect(result.audioUrls).toEqual([]);
+    expect(result.imageUrls).toEqual([]);
+    expect(result.prompt).toContain('THEME_MUSIC [audio, 4s]');
+  });
+
+  it('honours the endpoint combined file cap across kinds', () => {
+    // H3 Max: 9 images / 3 clips / 3 audio per list, but 12 files total.
+    const h3 = getMotionReferenceEndpoint('minimax_h3_max');
+    if (!h3) throw new Error('minimax_h3_max must have a reference endpoint');
+    const images = Array.from({ length: 9 }, (_, i) =>
+      ref(`https://example.com/${i}.png`, `Ref ${i}`, `REF_${i}`)
+    );
+    const result = buildReferenceVideoPrompt(h3, 'A shot', STILL, [
+      ...images,
+      media('video', 'CLIP_A'),
+      media('video', 'CLIP_B'),
+      media('audio', 'LINE_A'),
+    ]);
+
+    expect(
+      result.imageUrls.length +
+        result.videoUrls.length +
+        result.audioUrls.length
+    ).toBe(12);
+    // The still plus 8 sheets fills the image list; the clips take the rest.
+    expect(result.imageUrls).toHaveLength(9);
+    expect(result.videoUrls).toHaveLength(2);
+    expect(result.audioUrls).toHaveLength(1);
+  });
+});
+
+// #1559 — a reference the provider would reject for length never goes on the
+// request; it becomes prose, like any other overflow.
+describe('buildReferenceVideoPrompt duration limits', () => {
+  const clip = (
+    token: string,
+    durationSeconds: number | null
+  ): ReferenceImageDescription => ({
+    referenceImageUrl: `https://example.com/${token.toLowerCase()}.mp4`,
+    description: `${token} - a clip`,
+    role: 'element',
+    kind: 'video',
+    durationSeconds,
+    token,
+  });
+
+  it('drops a clip longer than the per-file ceiling', () => {
+    // Omni Flash: "up to 3 seconds each".
+    const omni = getMotionReferenceEndpoint('gemini_omni_flash');
+    if (!omni) throw new Error('gemini_omni_flash must have a config');
+    const result = buildReferenceVideoPrompt(
+      omni,
+      'Move like LONG_TAKE then like SHORT_TAKE',
+      STILL,
+      [clip('LONG_TAKE', 10), clip('SHORT_TAKE', 2)]
+    );
+
+    expect(result.videoUrls).toEqual(['https://example.com/short_take.mp4']);
+    expect(result.prompt).toContain('LONG_TAKE (a clip)');
+    expect(result.prompt).not.toContain('LONG_TAKE (a clip) (a clip)');
+  });
+
+  it('stops taking clips once the combined ceiling is reached', () => {
+    // H3 Max: 15s each, 15s combined.
+    const h3 = getMotionReferenceEndpoint('minimax_h3_max');
+    if (!h3) throw new Error('minimax_h3_max must have a config');
+    const result = buildReferenceVideoPrompt(
+      h3,
+      'Move like FIRST, then SECOND, then THIRD',
+      STILL,
+      [clip('FIRST', 10), clip('SECOND', 4), clip('THIRD', 4)]
+    );
+
+    // 10 + 4 fits; the third would reach 18s, past the 15s combined ceiling.
+    expect(result.videoUrls).toHaveLength(2);
+    expect(result.prompt).toContain('THIRD (a clip)');
+  });
+
+  it('drops audio shorter than H3 Max’s 2s floor', () => {
+    const h3 = getMotionReferenceEndpoint('minimax_h3_max');
+    if (!h3) throw new Error('minimax_h3_max must have a config');
+    const short: ReferenceImageDescription = {
+      referenceImageUrl: 'https://example.com/erica_l2.wav',
+      description: 'Erica’s line',
+      role: 'character',
+      kind: 'audio',
+      durationSeconds: 1.306122,
+      token: 'ERICA_L2',
+    };
+    const result = buildReferenceVideoPrompt(
+      h3,
+      'ERICA_L2 lands dryly',
+      STILL,
+      [short]
+    );
+    expect(result.audioUrls).toEqual([]);
+    expect(result.prompt).toContain('Erica’s line');
+  });
+
+  it('attaches a clip whose length we never learned', () => {
+    // Guessing would drop a reference the provider might have accepted.
+    const omni = getMotionReferenceEndpoint('gemini_omni_flash');
+    if (!omni) throw new Error('gemini_omni_flash must have a config');
+    const result = buildReferenceVideoPrompt(omni, 'A shot', STILL, [
+      clip('UNKNOWN', null),
+    ]);
+
+    expect(result.videoUrls).toEqual(['https://example.com/unknown.mp4']);
+  });
+});
+
+// #1559 — the dialogue→voice join, end to end. A voice binding is worth
+// nothing unless the token assembly emits survives matching and lands on the
+// audio list, and the three steps live in three modules, so nothing else would
+// catch a break in the middle.
+describe('a dialogue line bound to a voice element', () => {
+  const voiceElement = {
+    id: '01J000000000000000000VOICE',
+    token: 'SARAH_VOICE',
+    description: 'Sarah, dry and clipped',
+    imageUrl: 'https://example.com/sarah_voice.mp3',
+    consistencyTag: 'sarah_voice',
+    kind: 'audio' as const,
+    durationSeconds: 6,
+  };
+
+  const scene = {
+    continuity: { characterTags: [], elementTags: [], environmentTag: null },
+    originalScript: { extract: 'Sarah delivers the bad news.' },
+  };
+
+  it('reaches the request as @Audio1 with the file attached', () => {
+    const prompt = buildMotionShotPrompt({
+      motionPrompt: {
+        fullPrompt: 'Slow push in on Sarah at the window.',
+        dialogue: {
+          presence: true,
+          lines: [
+            {
+              character: 'Sarah',
+              line: 'It is already done.',
+              tone: 'flat',
+              voiceToken: 'SARAH_VOICE',
+            },
+          ],
+        },
+        audio: { ambientSound: '', soundEffects: [] },
+      },
+      model: 'seedance_v2_5',
+    });
+
+    // The matchers scan the ASSEMBLED prompt — the token appears nowhere else.
+    const references = buildMotionReferenceImages({
+      scene,
+      characters: [],
+      elements: [voiceElement],
+      motionPrompt: prompt,
+    });
+    expect(references.map((r) => r.token)).toEqual(['SARAH_VOICE']);
+
+    const result = buildReferenceVideoPrompt(
+      seedanceV25Config,
+      prompt,
+      STILL,
+      references
+    );
+
+    expect(result.audioUrls).toEqual(['https://example.com/sarah_voice.mp3']);
+    expect(result.prompt).toContain(
+      'Sarah speaks this line exactly as recorded in @Audio1: {It is already done.}'
+    );
+    expect(result.prompt).not.toContain('SARAH_VOICE');
+  });
+});
+
+describe('recorded dialogue token versus ordinary prose (#1720)', () => {
+  it.each([false, true])(
+    'preserves the dialogue instruction with an explicit recording binding=%s',
+    (bindRecording) => {
+      const config = getMotionReferenceEndpoint('minimax_h3_max');
+      if (!config) throw new Error('MiniMax reference endpoint missing');
+      const base = buildMotionShotPrompt({
+        model: 'minimax_h3_max',
+        motionPrompt: {
+          fullPrompt: 'STEVE looks up.',
+          dialogue: {
+            presence: true,
+            lines: [
+              {
+                character: 'STEVE',
+                line: 'Hello Elara.',
+                tone: 'calm',
+                ...(bindRecording ? { voiceToken: 'DIALOGUE' } : {}),
+              },
+            ],
+          },
+          audio: null,
+        },
+      });
+      const result = buildReferenceVideoPrompt(config, base, null, [
+        {
+          token: 'STEVE',
+          description: 'Steve',
+          role: 'character',
+          referenceImageUrl: '/steve.png',
+        },
+        {
+          token: 'DIALOGUE',
+          description: 'Recorded conversation',
+          role: 'element',
+          kind: 'audio',
+          durationSeconds: 3,
+          referenceImageUrl: '/dialogue.wav',
+        },
+      ]);
+      expect(result.prompt).toContain(
+        'Generate only dialogue, environmental sounds, and action sounds.'
+      );
+      expect(result.prompt).toContain('<d>[English] Hello Elara.</d>');
+      expect(result.prompt).toContain(
+        bindRecording
+          ? 'Image 1 speaks this line exactly as recorded in Audio 1:'
+          : 'Audio 1: Recorded conversation'
+      );
+    }
+  );
+});

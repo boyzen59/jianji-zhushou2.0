@@ -1,0 +1,134 @@
+# Seed voices (#1765)
+
+ElevenLabs Voice Design could not reliably make an Australian voice. Blind
+listening tests (issue #1765) picked **Seed Audio 1.0**, called on BytePlus
+Seed Speech directly, with a locked reference voice per character and a
+transcription check on every take.
+
+## Provider
+
+- `POST {SEED_SPEECH_BASE_URL}/api/v3/tts/create`, header `X-Api-Key`
+  (`seed-audio.ts`). **Platform key only** (`SEED_SPEECH_API_KEY`), spent
+  through `scopedDb.credentials.resolveKey('seed-speech')`. Under `E2E_TEST`
+  it stays off unless `SEED_SPEECH_BASE_URL` is set, so e2e and replay stay on
+  ElevenLabs.
+- Output is WAV at 44.1 kHz, so everything after the call is the same PCM
+  byte arithmetic the ElevenLabs path uses (`cutAudioSection`,
+  `trimmedEndSeconds`).
+- Limits: 3 reference clips (each ≤ 30 s, ≤ 10 MB) — so 3 speakers, one clip each (three held apart in a listening test), 120 s of
+  audio, a 3,000-character prompt. The QPS cap is per **account**: calls are
+  paced on the BytePlus governor DO (`acquireSeedSpeechToken`,
+  `SEED_SPEECH_QPM`, default 30/min, burst 2) and a 429 is retried.
+- Pricing (`seed-speech-pricing.ts`): $0.0025 per second of
+  `original_duration` (BytePlus pay-as-you-go $0.15/min, read off the docs
+  2026-09-23, not yet bill-verified). Trailing silence is billed. Scribe
+  ($0.22/h) and isolation ($0.12/min) are on the ElevenLabs card and are
+  charged as their own ledger lines (`elevenlabs-scribe`,
+  `elevenlabs-isolation`), never folded into the Seed charge. Unaudited
+  like every native via. Pre-flight (`estimateTtsCost`) prices the dearer of
+  ElevenLabs and Seed at 8 characters per billed second, because a pre-flight
+  cannot tell which provider speaks a line.
+
+## What a Seed voice is
+
+A `voiceId` of `seed:<ulid>` (`@/cast/seed-voice`). It rides in the same
+column as an ElevenLabs id, so matching, hashing, staleness and history do
+not change. The prefix is how the id carries its provider: code asks
+`voiceProviderOf(voiceId)` (a `VoiceProvider`, `'seed' | 'elevenlabs'`) and never
+reads the prefix itself. It is **not** an account slot: `releaseVoiceIfUnreferenced`
+returns at once for it, and its history rows are never stamped released.
+
+It is three reference clips cut from one range read, in R2 under
+`AUDIO/seed-voices/<ulid>/`: `normal.mp3`, `quiet.mp3`, `loud.mp3` (isolated),
+`read.wav` (the whole read, for audition) and `voice.json`
+(`{ description, clips }`, written once). The recorder reads the bundle from
+R2 — immutable, so no mid-run D1 read.
+
+**A voice keeps its provider for life.** Existing ElevenLabs voices keep
+recording on ElevenLabs; there is no hop between the two.
+
+## Making one (`CharacterVoiceWorkflow`, `voiceProvider: 'seed'`)
+
+`voiceProvider` is chosen when the run is triggered (`newVoiceProvider()`, `isSeedVoiceConfigured()`: Seed AND
+ElevenLabs configured) and snapshotted on the payload.
+
+1. The voice description (drafted by `phase/voice-design-chat` when empty).
+2. `phase/voice-range-script-chat` writes three 20–30-word sections from the
+   bible: normal / quiet (whispered) / loud (raised, annoyed). **Normal
+   spelling only** — "nah-oo" and "to-die" were read literally and set off
+   invented words.
+3. `takes` takes (1–3, default 2), run side by side, each its own step (`seed-range-read-N`); the three clips of a take are isolated side by side too. One Seed call reads
+   all three sections (one voice throughout, booth wording, "natural
+   conversational pace" — pace cues like "slow" get over-applied), Scribe
+   transcribes it, `recordCheckedTake` finds each section (`checkParts`), the WAV is
+   cut by the word timings, each section is isolated, and the bundle is
+   written. A take where a section cannot be found throws and the step
+   retry re-records it; a take that still fails is dropped.
+   Each take is a different person reading the same description, paid for
+   separately, so the user picks the count: the character card's Generate
+   has a 1 / 2 / 3 picker (`SEED_VOICE_DEFAULT_TAKES` = 2), priced at
+   `seedVoiceEstimate(takes)`. Story generation uses the default.
+4. The first surviving take is the voice. "Use this take" on another costs
+   nothing — a Seed take is its voice, there is nothing to save.
+
+## Speech (`generateSeedDialogueSpeech`)
+
+Same claim → record → cut → promote lifecycle as ElevenLabs; only the call
+differs. `generateDialogueSpeech` sends a call to Seed when its lines are Seed
+voices; `chunkTakeLines` never mixes providers in one call, breaks a Seed
+call before a fourth speaker joins (a fourth would have no reference clip)
+and keeps it under 1,000 line characters. With three speakers every slot is
+a normal clip, so moods go in words only.
+
+- **Mood-matched references.** Seed copies the reference's delivery as well
+  as its voice. Each speaker's normal clip is always sent; a whispered line
+  (`moodForTone`) adds that speaker's quiet clip and a shouted/annoyed/excited
+  line the loud clip, while a slot is free. Sad, tender and tired stay on the
+  normal clip with the mood in words — mapping sad to quiet made sad lines
+  whisper.
+- **The prompt**: booth, each speaker as "the exact voice and accent of
+  @AudioN" (plus the mood clips) and their description, then `Name (tone):
+line` in order.
+- **Finding the lines** (`take-check.ts`, #1803). Every take is
+  transcribed with Scribe and each line is found in what was heard. Lines
+  are compared as letters, not words, so however a transcript spells a line
+  ("before you rent" for "BeforeYouRent", "all right" for "alright", "B.Y.R."
+  for "BYR") it is the same string; the script is aligned against the
+  transcript in order, and a line is found when half its letters are.
+  Speech before the script is cut off (the first shot's range starts at the
+  script); speech between lines belongs to neither. Invented words are not
+  checked for — the user regenerates a reading they do not like. A take
+  where a line cannot be found is retaken, up to 3 per call. When none is
+  clean the best (highest worst-line share) is **kept**, not failed (#1802):
+  a doubtful line is placed in the gap between the lines that were found,
+  its turn carries `heardShare`, and the shot's clip lists it in
+  `unclearLines`, so the line list flags it ("May not be said clearly") for
+  the user to record or regenerate. A best take with a line under a quarter
+  heard (`SEED_KEEP_MIN_SHARE`) is a miss, not a doubt: the speech fails.
+  Character voice samples stay strict. Seed's own subtitles are not used: they run adjacent
+  lines together into one timed word, so a line break is lost (up to 2.3 s
+  off in testing).
+- Takes thrown away are not billed to the team; a kept one is.
+- **A failed scene does not fail the run.** `DialogueAudioWorkflow` keeps the
+  scenes that recorded and logs the rest; the failed scene's shots record at
+  motion and fail there, one by one, with the reason (e.g. which character
+  still has an ElevenLabs voice sharing a shot with a Seed voice). Fix it and
+  retry those shots — nothing else is regenerated.
+
+## A line at the mic (#1802)
+
+A user's take of one line goes to Seed Audio as a second reference
+(`@Audio2`) next to the speaker's normal clip (`@Audio1`). The prompt
+(`seedGuidedPrompt`) is experimental and not yet reliable, which is why
+Record is hidden behind `MIC_TAKES_ENABLED`. The take is checked by Scribe against the line like
+every take (3 takes, then the line fails) and trimmed to Scribe's span.
+Spliced into the shot's reading like an ElevenLabs Voice Changer take — see
+`elevenlabs.md`.
+
+## Open
+
+- Seed Speech ASR is not granted on the account (`45000030`); Scribe does
+  the check.
+- Whether a cloned `speaker` id holds delivery better than clips, and whether
+  it counts toward the three references.
+- Whether the quiet clip whispers convincingly inside a scene.

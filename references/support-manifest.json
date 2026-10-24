@@ -1,0 +1,305 @@
+{
+  "schema_version": 1,
+  "skill": "jianji-zhushou",
+  "display_name": "jianji-zhushou 3.2 Remotion",
+  "runtime": {
+    "python": {
+      "minimum": "3.10",
+      "recommended": "3.11 or 3.12",
+      "note": "Use a project virtual environment or the Codex bundled interpreter; report the interpreter being checked."
+    },
+    "node": {
+      "minimum": "18.0",
+      "recommended": "22 or 24 LTS"
+    },
+    "commands": [
+      "node",
+      "npm",
+      "npx",
+      "ffmpeg",
+      "ffprobe"
+    ],
+    "reference_tools": [
+      "git"
+    ],
+    "remotion_kit": "assets/remotion-kit/package.json",
+    "note": "Read exact core npm versions from the kit; preserve existing project locks and keep all @remotion packages on the same version.",
+    "master_engine": "remotion"
+  },
+  "features": {
+    "core": {
+      "label": "基础渲染与媒体",
+      "python": [],
+      "npm": [],
+      "skills": [],
+      "sources": [
+        "remotion-official"
+      ]
+    },
+    "documents": {
+      "label": "按需审阅PDF与Word",
+      "python": [
+        {
+          "distribution": "python-docx",
+          "requirement": "python-docx>=1.1"
+        },
+        {
+          "distribution": "reportlab",
+          "requirement": "reportlab>=4"
+        },
+        {
+          "distribution": "pypdf",
+          "requirement": "pypdf>=5"
+        },
+        {
+          "distribution": "pdfplumber",
+          "requirement": "pdfplumber>=0.11"
+        },
+        {
+          "distribution": "Pillow",
+          "requirement": "Pillow>=10"
+        }
+      ],
+      "npm": [],
+      "skills": [
+        "pdf",
+        "documents"
+      ],
+      "sources": []
+    },
+    "images": {
+      "label": "GPT生图与素材扩展",
+      "python": [],
+      "npm": [],
+      "skills": [
+        "imagegen"
+      ],
+      "sources": [
+        "lemo-opuscar",
+        "huashu-art-motion"
+      ]
+    },
+    "maps": {
+      "label": "地理与路线",
+      "python": [],
+      "npm": [
+        {
+          "name": "d3",
+          "spec": "d3@7.9.0"
+        },
+        {
+          "name": "@types/d3",
+          "spec": "@types/d3",
+          "dev": true
+        }
+      ],
+      "skills": [],
+      "sources": [
+        "iart-map-animation"
+      ]
+    },
+    "charts": {
+      "label": "数据图表",
+      "python": [],
+      "npm": [
+        {
+          "name": "d3",
+          "spec": "d3@7.9.0"
+        },
+        {
+          "name": "@types/d3",
+          "spec": "@types/d3",
+          "dev": true
+        }
+      ],
+      "skills": [],
+      "sources": [
+        "iart-data-animation",
+        "prompt-motion-charts"
+      ]
+    },
+    "diagrams": {
+      "label": "关系图、白板与拆层",
+      "python": [],
+      "npm": [
+        {
+          "name": "mermaid",
+          "spec": "mermaid@12.2.0"
+        },
+        {
+          "name": "roughjs",
+          "spec": "roughjs@4.6.6"
+        }
+      ],
+      "skills": [],
+      "sources": [
+        "iart-explainer-video"
+      ]
+    },
+    "doodle": {
+      "label": "手绘角色与程序动画",
+      "python": [],
+      "npm": [
+        {
+          "name": "roughjs",
+          "spec": "roughjs@4.6.6"
+        }
+      ],
+      "skills": [],
+      "sources": [
+        "doodle-anim",
+        "iart-javascript-animation"
+      ]
+    },
+    "collage": {
+      "label": "拼贴镜头",
+      "python": [],
+      "npm": [],
+      "skills": [
+        "imagegen"
+      ],
+      "sources": [
+        "vox-director",
+        "huashu-art-motion",
+        "dashi-animationstyle"
+      ]
+    },
+    "logo": {
+      "label": "原生SVG标志与路径动效",
+      "python": [],
+      "npm": [],
+      "skills": [],
+      "sources": []
+    },
+    "asr": {
+      "label": "已有录音重新对齐（无合适时码时）",
+      "python": [
+        {
+          "distribution": "faster-whisper",
+          "requirement": "faster-whisper"
+        },
+        {
+          "distribution": "numpy",
+          "requirement": "numpy"
+        },
+        {
+          "distribution": "soundfile",
+          "requirement": "soundfile"
+        }
+      ],
+      "npm": [],
+      "skills": [],
+      "sources": [
+        "video-talkcraft"
+      ]
+    },
+    "review": {
+      "label": "按实际问题处理运动与性能",
+      "python": [],
+      "npm": [],
+      "skills": [],
+      "sources": []
+    }
+  },
+  "skill_catalog": {
+    "imagegen": {
+      "purpose": "原创位图生成／编辑",
+      "paths": [
+        "skills/.system/imagegen/SKILL.md"
+      ],
+      "availability": "Check the live image tool as well as the skill file; no API key is required for the built-in tool."
+    },
+    "pdf": {
+      "purpose": "需要时制作风格审阅或画面PDF",
+      "paths": [
+        "plugins/cache/openai-primary-runtime/pdf/*/skills/pdf/SKILL.md",
+        "skills/pdf/SKILL.md"
+      ],
+      "availability": "A missing plugin skill can be added with its PDF plugin; do not claim a file proves the rendering tool is available."
+    },
+    "documents": {
+      "purpose": "中文文字Word与录制文稿",
+      "paths": [
+        "plugins/cache/openai-primary-runtime/documents/*/skills/documents/SKILL.md",
+        "skills/documents/SKILL.md"
+      ],
+      "availability": "Use the Documents plugin skill and its bundled runtime when available."
+    }
+  },
+  "conditional_skills": [
+    {
+      "id": "spreadsheets",
+      "when": "需要编辑、核算或回写复杂XLSX；普通CSV读取不需要",
+      "path": "plugins/cache/openai-primary-runtime/spreadsheets/*/skills/spreadsheets/SKILL.md"
+    }
+  ],
+  "external_services": {
+    "required": [],
+    "note": "外部工具仅产出可导入素材或提示词；最终时间轴、字幕、合成和母版渲染统一使用Remotion。无外部服务是安装前提。"
+  },
+  "knowledge_lookup": {
+    "requirements": [
+      "Python standard library"
+    ],
+    "network_required": false,
+    "upstream_skills_required": [],
+    "note": "Knowledge and recipes are bundled; installed upstream services cannot be inferred from reference metadata."
+  },
+  "optional_adapters": [
+    {
+      "id": "lottie",
+      "when": "需要已有小型矢量动效资产，在Remotion中按帧播放",
+      "support": [
+        "@remotion/lottie matching project Remotion version",
+        "local fonts/images and asset license"
+      ]
+    },
+    {
+      "id": "comfyui-mcp",
+      "when": "需要本地超分、修复、调色或生成",
+      "support": [
+        "ComfyUI service",
+        "chosen models and custom nodes",
+        "GPU/VRAM assessment",
+        "available MCP connection"
+      ]
+    },
+    {
+      "id": "external-production-services",
+      "when": "确需Narrator API、云GPU或完整上游运行系统",
+      "support": [
+        "actual account/service capability",
+        "explicit selected workflow and cost/transfer scope"
+      ],
+      "automatic_install": false
+    },
+    {
+      "id": "gsap",
+      "when": "按文案选择的辅助绘制／动效",
+      "support": [
+        "Remotion frame clock; local dependencies only when selected"
+      ]
+    },
+    {
+      "id": "motion",
+      "when": "按文案选择的辅助绘制／动效",
+      "support": [
+        "Remotion frame clock; local dependencies only when selected"
+      ]
+    },
+    {
+      "id": "canvas",
+      "when": "按文案选择的辅助绘制／动效",
+      "support": [
+        "Remotion frame clock; local dependencies only when selected"
+      ]
+    },
+    {
+      "id": "svg",
+      "when": "按文案选择的辅助绘制／动效",
+      "support": [
+        "Remotion frame clock; local dependencies only when selected"
+      ]
+    }
+  ]
+}

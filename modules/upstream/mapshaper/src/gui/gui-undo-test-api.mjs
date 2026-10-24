@@ -1,0 +1,492 @@
+import { snipPath } from './gui-snipping-utils';
+import { getNewLabelStyle } from './gui-label-style-state';
+import { appUndoIsEnabled } from './gui-app-undo';
+import { internal } from './gui-core';
+import { runGuiEditCommand } from './gui-edit-command';
+import { getAddShapeCommand } from './gui-draw-commands';
+
+export function createUndoTestApi(gui) {
+  return {
+    getState: function() {
+      return getUndoTestState(gui);
+    },
+    getModelChecksum: function() {
+      return getModelChecksum(gui.model);
+    },
+    getSessionHistory: function() {
+      return gui.session ? gui.session.getHistorySnapshot() : null;
+    },
+    getMessages: function() {
+      return gui.getMessages ? gui.getMessages() : [];
+    },
+    runCommand: function(str) {
+      return runConsoleCommand(gui, str);
+    },
+    saveSnapshot: function() {
+      return gui.sessionSnapshots ? gui.sessionSnapshots.saveSnapshot() : null;
+    },
+    restoreLatestSnapshot: function() {
+      return gui.sessionSnapshots ? gui.sessionSnapshots.restoreLatestSnapshot() : null;
+    },
+    clearUndoHistory: function() {
+      if (gui.undo) gui.undo.clear();
+    },
+    // Whether app-level undo is on, which a test asserting that something works
+    // without it needs to be able to confirm rather than assume.
+    appUndoIsEnabled: function() {
+      return appUndoIsEnabled(gui);
+    },
+    setPanelMode: function(mode) {
+      if (mode) {
+        gui.enterMode(mode);
+      } else {
+        gui.clearMode();
+      }
+    },
+    undo: function() {
+      return gui.undo ? gui.undo.undo() : null;
+    },
+    redo: function() {
+      return gui.undo ? gui.undo.redo() : null;
+    },
+    setInteractionMode: function(mode) {
+      if (gui.interaction) gui.interaction.setMode(mode);
+    },
+    // Which tool has the map, for a test asking what an action did rather than
+    // what it drew: a panel coming up is how a mode change shows, not what it
+    // is.
+    // what the pointer does: 'edit_lines' for 'line_style' with drawing armed
+    getToolMode: function() {
+      return gui.interaction ? gui.interaction.getToolMode() : null;
+    },
+    setDrawingArmed: function(on) {
+      gui.interaction.setDrawingArmed(on);
+    },
+    // 'draw', 'reshape' or null
+    getArmedTool: function() {
+      return gui.interaction ? gui.interaction.getArmedTool() : null;
+    },
+    setArmedTool: function(tool) {
+      gui.interaction.setArmedTool(tool);
+    },
+    getNewShapeStyle: function(geometryType) {
+      return Object.assign({}, (gui.state.new_shape_styles || {})[geometryType] || {});
+    },
+    getInteractionMode: function() {
+      return gui.interaction ? gui.interaction.getMode() : null;
+    },
+    // Shape-level detail about a layer by name, or null if there is no such
+    // layer. getModelChecksum() reports counts but not geometry types, which is
+    // what distinguishes an anchored label from a path-aligned one.
+    getLayerInfo: function(name) {
+      var lyr = gui.model.getLayers().map(function(o) { return o.layer; })
+        .filter(function(lyr) { return getLayerName(lyr) === name; })[0];
+      if (!lyr) return null;
+      return {
+        name: getLayerName(lyr),
+        geometry_type: lyr.geometry_type || null,
+        shapeCount: lyr.shapes ? lyr.shapes.length : 0,
+        fields: lyr.data ? lyr.data.getFields() : [],
+        records: lyr.data ? lyr.data.getRecords() : [],
+        geometryTypes: (lyr.shapes || []).map(function(shp) {
+          if (!shp) return null;
+          return shp.length > 1 ? 'MultiPoint' : 'Point';
+        }),
+        pointCounts: (lyr.shapes || []).map(function(shp) {
+          return shp ? shp.length : 0;
+        }),
+        // Copied rather than handed over, so that a test holding onto the
+        // result still sees the geometry as it was when it asked.
+        shapes: (lyr.shapes || []).map(function(shp) {
+          return shp ? shp.map(function(p) { return [p[0], p[1]]; }) : null;
+        })
+      };
+    },
+    // The vertices of each part of each feature in a path layer, in pixels
+    // from the top left of the map, for a test comparing a drawn path with the
+    // pointer positions that drew it.
+    getLayerPathPixels: function(name) {
+      var o = gui.model.getLayers().filter(function(o) {
+        return getLayerName(o.layer) === name;
+      })[0];
+      var ext = gui.map.getExtent();
+      var arcs;
+      if (!o) return null;
+      arcs = o.layer.gui ? o.layer.gui.displayArcs : o.dataset.arcs;
+      return (o.layer.shapes || []).map(function(shp) {
+        return shp ? shp.map(function(ids) {
+          var iter = arcs.getShapeIter(ids), pts = [];
+          while (iter.hasNext()) pts.push(ext.translateCoords(iter.x, iter.y));
+          return pts;
+        }) : null;
+      });
+    },
+    // A point layer's points, in pixels from the top left of the map
+    getLayerPointPixels: function(name) {
+      var o = gui.model.getLayers().filter(function(o) {
+        return getLayerName(o.layer) === name;
+      })[0];
+      var ext = gui.map.getExtent();
+      var shapes;
+      if (!o) return null;
+      shapes = o.layer.gui ? o.layer.gui.displayLayer.shapes : o.layer.shapes;
+      return (shapes || []).map(function(shp) {
+        return shp ? ext.translateCoords(shp[0][0], shp[0][1]) : null;
+      });
+    },
+    // The vertices of the path being drawn by the line tool, which is not part
+    // of its layer until it is finished, in pixels as above; null if no path
+    // is being drawn. The last vertex follows the pointer.
+    getPendingPathPixels: function() {
+      var hit = gui.map && gui.map.getHitControl ? gui.map.getHitControl() : null;
+      var coords = hit ? hit.getHitState().pending_path : null;
+      var ext = gui.map.getExtent();
+      return coords ? coords.map(function(p) {
+        return ext.translateCoords(p[0], p[1]);
+      }) : null;
+    },
+    // The knot handles shown by the curve tool, in pixels as above; null if
+    // there are none
+    getPendingKnotPixels: function() {
+      var hit = gui.map && gui.map.getHitControl ? gui.map.getHitControl() : null;
+      var knots = hit ? hit.getHitState().pending_knots : null;
+      var ext = gui.map.getExtent();
+      return knots ? knots.map(function(p) {
+        return ext.translateCoords(p[0], p[1]);
+      }) : null;
+    },
+    // which of the knots above are corners (see gui-curve-line-knots.mjs)
+    getPendingKnotCorners: function() {
+      var hit = gui.map && gui.map.getHitControl ? gui.map.getHitControl() : null;
+      var knots = hit ? hit.getHitState().pending_knots : null;
+      return knots ? knots.map(function(p) { return p[2] === true; }) : null;
+    },
+    // The features the layer is drawn without while a tool redraws them
+    getHiddenShapeIds: function() {
+      var hit = gui.map && gui.map.getHitControl ? gui.map.getHitControl() : null;
+      return hit ? hit.getHiddenShapeIds() : [];
+    },
+    // the vertex marked under the pointer (display coords), or null
+    getHoverVertex: function() {
+      var hit = gui.map && gui.map.getHitControl ? gui.map.getHitControl() : null;
+      return hit && hit.getHitState().hit_coordinates || null;
+    },
+    getPendingPathStyle: function() {
+      var hit = gui.map && gui.map.getHitControl ? gui.map.getHitControl() : null;
+      var style = hit ? hit.getHitState().pending_path_style : null;
+      return style ? Object.assign({}, style) : null;
+    },
+    selectLayer: function(name) {
+      var target = gui.model.getLayers().filter(function(o) {
+        return getLayerName(o.layer) === name;
+      })[0];
+      if (!target) throw new Error('Missing layer: ' + name);
+      gui.model.selectLayer(target.layer, target.dataset);
+    },
+    // What the label path guide drew, as last rendered.
+    getLabelPathGuideInfo: function() {
+      return getLabelPathGuideLayers(gui).map(function(lyr) {
+        return {
+          name: getLayerName(lyr),
+          geometryType: lyr.geometry_type,
+          shapeCount: lyr.shapes ? lyr.shapes.length : 0
+        };
+      });
+    },
+    // What each overlay layer last drew: the ids of its features, and whether
+    // it marked their vertices. The overlay is drawn to canvas, so there is no
+    // DOM state to assert on.
+    getOverlayInfo: function() {
+      var layers = gui.map && gui.map.getOverlayLayers ?
+        gui.map.getOverlayLayers() : [];
+      return layers.map(function(lyr) {
+        return {
+          ids: lyr.gui.style.ids || null,
+          vertices: !!lyr.gui.style.vertices
+        };
+      });
+    },
+    // Knot handle positions, in display coordinates.
+    getLabelPathKnotCoords: function() {
+      var lyr = getLabelPathGuideLayers(gui).filter(function(lyr) {
+        return getLayerName(lyr) == 'label-path-knots';
+      })[0];
+      // each handle is a single-point shape
+      return (lyr ? lyr.shapes : []).map(function(shp) { return shp[0]; });
+    },
+    // Which feature the pointer is over, as the hit control resolved it. Hover
+    // highlighting is drawn to canvas, so there is no DOM state to assert on.
+    getHitId: function() {
+      var hit = gui.map.getHitControl && gui.map.getHitControl();
+      return hit ? hit.getHitId() : -1;
+    },
+    getSelectionIds: function() {
+      var hit = gui.map.getHitControl && gui.map.getHitControl();
+      return hit ? hit.getSelectionIds() : [];
+    },
+    // The style the label tool will give its next label, set through the style
+    // panel with nothing selected. Held in GUI state rather than in a layer, so
+    // there is no model to read it back from.
+    getNewLabelStyle: function() {
+      return getNewLabelStyle(gui);
+    },
+    zoomByPct: function(pct) {
+      gui.map.getExtent().zoomByPct(pct);
+    },
+    setPreviewMode: function(on) {
+      if (gui.previewMode) gui.previewMode.setOn(on);
+    },
+    getPreviewMode: function() {
+      return gui.previewMode ? gui.previewMode.isOn() : false;
+    },
+    getPreviewReadout: function() {
+      return gui.previewMode ? gui.previewMode.getReadoutText() : '';
+    },
+    getSymbolScale: function() {
+      return gui.map.getExtent().getSymbolScale();
+    },
+    zoomToFrameMagnification: function(scale) {
+      gui.map.getExtent().zoomToFrameMagnification(scale);
+    },
+    openFrameTool: function() {
+      if (gui.frameTool) gui.frameTool.open();
+    },
+    getFrameInfo: function() {
+      var target = gui.model.getActiveFrame();
+      if (!target) return null;
+      return Object.assign({
+        name: target.layer.name || ''
+      }, internal.getFrameLayerData(target.layer, target.dataset.arcs));
+    },
+    // Names of the layers the map can show in the current view (frame view or
+    // unframed view), in catalog order. Layers are drawn to canvas, so there is
+    // no DOM state to assert on.
+    getVisibleLayerNames: function() {
+      return gui.model.getLayers().filter(function(o) {
+        return gui.map.isVisibleLayer(o.layer, o.dataset) &&
+          !internal.isFrameComponentLayer(o.layer, o.dataset);
+      }).map(function(o) { return getLayerName(o.layer); });
+    },
+    setFrameLockSize: function(on) {
+      if (gui.frameTool) gui.frameTool.setLockSize(on);
+    },
+    // The placement record of an overlay frame on a host frame, or null
+    getOverlayPlacement: function(hostName, overlayName) {
+      var host = internal.getFrameByName(gui.model, hostName);
+      var overlay = internal.getFrameByName(gui.model, overlayName);
+      var lyr = host && overlay ? internal.findOverlayLayer(host.dataset, overlay.dataset.id) : null;
+      return lyr ? Object.assign({}, lyr.data.getReadOnlyRecordAt(0)) : null;
+    },
+    // The map's current view, in display CRS coordinates, for a test that an
+    // edit leaves the view where the user put it.
+    getViewBounds: function() {
+      return gui.map.getExtent().getBounds().toArray();
+    },
+    // e.g. 'webmercator', as a basemap sets it; null to clear
+    setDisplayCRS: function(str) {
+      gui.map.setDisplayCRS(str || null);
+    },
+    // Adds a line with the command the line tool runs
+    addLineToActiveLayer: function(coords) {
+      var target = gui.model.getActiveLayer();
+      if (!target || !target.layer || target.layer.geometry_type != 'polyline') {
+        throw new Error('Active layer is not a polyline layer');
+      }
+      return new Promise(function(resolve, reject) {
+        runGuiEditCommand(gui, getAddShapeCommand(coords, {geometryType: 'polyline'}), {
+          changesEditTarget: true,
+          onDone: function(err) { if (err) reject(err); else resolve(); }
+        });
+      });
+    },
+    // Adds a point with the command the point tool runs
+    addPointToActiveLayer: function(coords) {
+      var target = gui.model.getActiveLayer();
+      var p = coords || [0, 0];
+      if (!target || !target.layer || target.layer.geometry_type != 'point') {
+        throw new Error('Active layer is not a point layer');
+      }
+      return new Promise(function(resolve, reject) {
+        runGuiEditCommand(gui, getAddShapeCommand([p], {geometryType: 'point'}), {
+          onDone: function(err) { if (err) reject(err); else resolve(); }
+        });
+      });
+    },
+    // Perform the same edit as the snip tool, without simulating the pointer
+    // events that choose the cut locations.
+    snipActiveLayerPath: function(fid, partId, cuts) {
+      var target = gui.model.getActiveLayer();
+      var lyr = target && target.layer;
+      var result;
+      if (!lyr || lyr.geometry_type != 'polyline') {
+        throw new Error('Active layer is not a polyline layer');
+      }
+      result = snipPath(lyr, fid, partId, cuts);
+      if (!result) {
+        throw new Error('Snip was rejected');
+      }
+      gui.dispatchEvent('snip', {target: lyr, result: result});
+      gui.model.updated({arc_count: true});
+      return result;
+    }
+  };
+}
+
+export function getUndoTestState(gui) {
+  return {
+    undo: {
+      canUndo: gui.undo ? gui.undo.canUndo() : false,
+      canRedo: gui.undo ? gui.undo.canRedo() : false
+    },
+    payloadStore: getPayloadStoreState(gui.undoPayloadStore),
+    model: getModelChecksum(gui.model)
+  };
+}
+
+export function getModelChecksum(model) {
+  var datasets = model.getDatasets();
+  var active = model.getActiveLayer();
+  return {
+    checksum: hashValue(datasets.map(getDatasetSignature)),
+    activeLayer: active && active.layer ? getLayerName(active.layer) : null,
+    datasetCount: datasets.length,
+    layerCount: model.getLayers().length,
+    datasets: datasets.map(getDatasetSummary)
+  };
+}
+
+export function isUndoTestApiEnabled() {
+  var val = getQueryValue('undo');
+  return val == 'on' || val == 'commands' || val == 'test' ||
+    getQueryValue('undo-test') == 'on';
+}
+
+function getPayloadStoreState(store) {
+  var keys = store ? store.getOwnKeys() : [];
+  var stats = store && store.getStats ? store.getStats() : null;
+  var payloads = store && store.getOwnPayloads ? store.getOwnPayloads() : [];
+  return Object.assign({
+    enabled: !!store,
+    persistent: store ? store.isPersistent() : false,
+    ownPayloadCount: keys.length,
+    ownPayloadKeys: keys,
+    ownPayloads: payloads
+  }, stats || {});
+}
+
+function runConsoleCommand(gui, str) {
+  return new Promise(function(resolve, reject) {
+    if (!gui.console || !gui.console.runMapshaperCommands) {
+      reject(new Error('GUI console is unavailable'));
+      return;
+    }
+    gui.console.runMapshaperCommands(str, function(err, flags) {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(flags || {});
+      }
+    });
+  });
+}
+
+function getDatasetSummary(dataset) {
+  return {
+    layerCount: dataset.layers ? dataset.layers.length : 0,
+    arcCount: dataset.arcs ? dataset.arcs.size() : 0,
+    crs_string: dataset.info && dataset.info.crs_string || null,
+    layers: (dataset.layers || []).map(function(lyr) {
+      return {
+        name: getLayerName(lyr),
+        geometry_type: lyr.geometry_type || null,
+        shapeCount: lyr.shapes ? lyr.shapes.length : 0,
+        recordCount: lyr.data ? lyr.data.size() : 0,
+        fields: lyr.data ? lyr.data.getFields() : [],
+        menu_order: lyr.menu_order || null
+      };
+    })
+  };
+}
+
+function getDatasetSignature(dataset) {
+  return {
+    info: dataset.info || null,
+    arcs: getArcsSignature(dataset.arcs),
+    layers: (dataset.layers || []).map(getLayerSignature)
+  };
+}
+
+function getLayerSignature(lyr) {
+  var sig = {
+    name: getLayerName(lyr),
+    geometry_type: lyr.geometry_type || null,
+    shapes: lyr.shapes || null,
+    fields: lyr.data ? lyr.data.getFields() : [],
+    records: lyr.data ? lyr.data.getRecords() : null
+  };
+  if (lyr.frame_hidden) sig.frame_hidden = true;
+  return sig;
+}
+
+function getArcsSignature(arcs) {
+  var data;
+  if (!arcs) return null;
+  data = arcs.getVertexData();
+  return {
+    size: arcs.size(),
+    zlimit: arcs.getRetainedInterval(),
+    nn: Array.from(data.nn),
+    xx: Array.from(data.xx),
+    yy: Array.from(data.yy),
+    zz: data.zz ? Array.from(data.zz) : null
+  };
+}
+
+function getLayerName(lyr) {
+  return lyr.name || null;
+}
+
+// The label tool's guide layers, out of everything the overlay last drew.
+function getLabelPathGuideLayers(gui) {
+  var layers = gui.map && gui.map.getOverlayLayers ?
+    gui.map.getOverlayLayers() : [];
+  return layers.map(function(lyr) {
+    return lyr.gui.displayLayer;
+  }).filter(function(lyr) {
+    return getLayerName(lyr) == 'label-path-guide' ||
+      getLayerName(lyr) == 'label-path-knots';
+  });
+}
+
+function hashValue(val) {
+  return hashString(stableStringify(val));
+}
+
+function hashString(str) {
+  var hash = 2166136261;
+  for (var i = 0; i < str.length; i++) {
+    hash ^= str.charCodeAt(i);
+    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+  }
+  return (hash >>> 0).toString(16);
+}
+
+function stableStringify(val) {
+  if (val === null || typeof val != 'object') {
+    return JSON.stringify(val);
+  }
+  if (Array.isArray(val)) {
+    return '[' + val.map(stableStringify).join(',') + ']';
+  }
+  return '{' + Object.keys(val).sort().map(function(key) {
+    return JSON.stringify(key) + ':' + stableStringify(val[key]);
+  }).join(',') + '}';
+}
+
+function getQueryValue(key) {
+  var rxp, match;
+  if (typeof window == 'undefined' || !window.location) return null;
+  rxp = new RegExp('[?&]' + key + '=([^&]+)');
+  match = rxp.exec(window.location.search);
+  return match ? decodeURIComponent(match[1]) : null;
+}

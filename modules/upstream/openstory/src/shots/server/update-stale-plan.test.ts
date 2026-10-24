@@ -1,0 +1,908 @@
+import type { StyleConfig } from '@/look/style-config';
+const styleConfig: StyleConfig = {
+  version: 2,
+  look: {
+    mood: 'quiet',
+    artStyle: 'watercolour',
+    lighting: 'soft light',
+    colorPalette: ['silver', 'blue'],
+    colorGrading: 'cool shadows',
+  },
+  motion: { camera: 'locked' },
+  references: [],
+};
+/**
+ * `computePlan` decides what "Update all" (#1077) regenerates — and therefore
+ * what the user is billed for. These cover the gating rules that are cheap to
+ * regress and expensive to get wrong: only-currently-stale targeting, the
+ * never-create-a-first-still guard, the deliberate no-cascade, scope
+ * precedence, and the skip reporting that stops a partial run reading as a
+ * clean one.
+ */
+
+import type { Frame, FrameVariant, Shot } from '@/platform/server/db/schema';
+import type { ScopedDb } from '@/platform/server/db/scoped';
+import type { Scene } from '@/shots/scene-analysis.schema';
+import type { ShotStalenessResult } from './shot-staleness';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { asStub } from '@/test/as-stub';
+
+const FRESH: ShotStalenessResult = {
+  thumbnail: 'fresh',
+  visualPrompt: 'fresh',
+  motionPrompt: 'fresh',
+  spec: 'fresh',
+  causes: [],
+  liveHashes: {
+    thumbnail: 'live-thumb',
+    visualPrompt: 'live-visual',
+    motionPrompt: 'live-motion',
+    spec: 'live-spec',
+  },
+};
+
+// test stub; computePlan only reads sceneId off the scene
+const scene = asStub<Scene>({
+  sceneId: 'scene-1',
+  metadata: { title: 'Scene 1' },
+  originalScript: { extract: '' },
+});
+
+function makeShot(overrides: Partial<Shot> = {}): Shot {
+  // minimal Shot stub exposing only what computePlan reads
+  return asStub<Shot>({
+    id: 'shot-1',
+    sceneId: 'scene-1',
+    ...overrides,
+  });
+}
+
+function makeFrame(overrides: Partial<Frame> = {}): Frame {
+  // minimal Frame stub exposing only what computePlan reads
+  return asStub<Frame>({
+    id: 'frame-1',
+    shotId: 'shot-1',
+    // The still lives on the selected version (#1067); a set pointer is what
+    // "this shot already has an image" means. Null it for a still-less shot.
+    selectedImageVersionId: 'fv-1',
+    ...overrides,
+  });
+}
+
+/** The selected `frame_variants` row `getSelectedByFrameIds` would return. */
+function makeSelectedImage(frame: Frame): FrameVariant {
+  // minimal FrameVariant stub exposing only what computePlan reads
+  return asStub<FrameVariant>({
+    id: frame.selectedImageVersionId,
+    frameId: frame.id,
+    url: `https://example.com/${frame.id}.jpg`,
+    model: 'nano_banana_2',
+    inputHash: 'stored-thumb',
+  });
+}
+
+/** Staleness keyed by shot id; anything unlisted reads fresh. */
+const stalenessByShot = new Map<string, ShotStalenessResult>();
+
+vi.doMock('./shot-staleness', () => ({
+  computeShotStaleness: vi.fn(
+    ({ shot }: { shot: Shot }) => stalenessByShot.get(shot.id) ?? FRESH
+  ),
+}));
+vi.doMock('./scene-script', () => ({
+  loadSceneContextBySequence: vi.fn(() => Promise.resolve(new Map())),
+  resolveSceneForShot: vi.fn((shot: Shot) => ({
+    scene: shot.sceneId ? scene : null,
+    script: null,
+  })),
+}));
+vi.doMock('./prompt-context', () => ({
+  loadShotPromptContext: vi.fn(() =>
+    Promise.resolve({
+      characterBible: [],
+      locationBible: [],
+      elementBible: [],
+      styleConfig,
+      analysisModel: 'x',
+    })
+  ),
+}));
+// Music-plan inputs (#1085 depth 'music'): deterministic summaries + live
+// hash so the stored-vs-live comparison is driven purely by the fixture's
+// stored `musicPromptInputHash`.
+const realMusicSummaries =
+  await import('@/audio/server/workflows/music-scene-summaries');
+vi.doMock('@/audio/server/workflows/music-scene-summaries', () => ({
+  ...realMusicSummaries,
+  musicSceneSummariesFromRows: vi.fn(() => ({
+    sceneSummaries: [
+      {
+        sceneId: 'scene-1',
+        title: 'Scene 1',
+        storyBeat: 'beat',
+        durationSeconds: 10,
+        location: 'here',
+        timeOfDay: 'day',
+      },
+    ],
+    legacyShotSummaries: [],
+  })),
+}));
+const realInputHash = await import('@/shots/input-hash');
+vi.doMock('@/shots/input-hash', () => ({
+  ...realInputHash,
+  computeMusicPromptInputHash: vi.fn(() => Promise.resolve('live-music-hash')),
+  musicPromptInputHashMatches: vi.fn((stored: string | null) =>
+    Promise.resolve(stored === 'live-music-hash')
+  ),
+}));
+
+const {
+  computePlan,
+  claimTargets,
+  findTargetMissingStartFrameMode,
+  siblingPrompts,
+} = await import('./update-stale-plan');
+type PlanTarget = import('./update-stale-plan').PlanTarget;
+type PlanUnitRef = import('@/sequences/generation-plan').PlanUnitRef;
+
+type VideoFixture = {
+  segments?: Array<{
+    id: string;
+    sceneId: string;
+    selectedVideoVersionId: string | null;
+  }>;
+  versions?: Array<{
+    id: string;
+    renderSegmentId: string;
+    model: string;
+    status: string;
+    url: string | null;
+    createdAt: Date;
+    manifest: Array<{
+      shotId: string;
+      motionPromptVersionId: string | null;
+      frameVersionId: string | null;
+    }>;
+  }>;
+  segFrames?: Array<{
+    shotId: string;
+    role: string;
+    selectedImageVersionId: string | null;
+  }>;
+};
+
+function buildScopedDb(
+  shots: Shot[],
+  frames: Frame[],
+  opts: {
+    video?: VideoFixture;
+    visualPrompts?: Map<string, { text: string }>;
+    motionPrompts?: Map<string, { text: string }>;
+    sequence?: Record<string, unknown>;
+    /** The selected `sequence_music_variants` row, if any (#1657, #1115). */
+    musicPrimary?: Record<string, unknown>;
+  } = {}
+): ScopedDb {
+  return asScopedDb({
+    sequences: {
+      getById: () =>
+        Promise.resolve({
+          id: 'seq-1',
+          teamId: 'team-1',
+          title: 'Sequence 1',
+          aspectRatio: '16:9',
+          styleId: 'st-1',
+          styleConfig,
+          imageModel: 'nano_banana_2',
+          videoModel: 'kling_v3_pro',
+          analysisModel: null,
+          musicPromptInputHash: null,
+          musicUrl: null,
+          musicStatus: 'pending',
+          // Frame-based unless a test overrides it: a reference-only shot never
+          // re-renders its still, which would silence the image cascades below.
+          generateStartFrames: true,
+          ...opts.sequence,
+        }),
+    },
+    scenes: { listBySequence: () => Promise.resolve([]) },
+    shots: {
+      listBySequence: () => Promise.resolve(shots),
+      ensureAnchorFrames: () => Promise.resolve(undefined),
+    },
+    // No shot dialogue rows: every target's `dialogue` snapshot is null and
+    // the video stage falls back to the motion row's mirror (#1657).
+    shotDialogue: {
+      getSelectedBySequence: () => Promise.resolve([]),
+    },
+    frames: {
+      listAnchorsBySequence: () => Promise.resolve(frames),
+      listBySequence: () => Promise.resolve(opts.video?.segFrames ?? []),
+    },
+    frameVariants: {
+      getSelectedByFrameIds: () =>
+        Promise.resolve(
+          new Map(
+            frames
+              .filter((f) => f.selectedImageVersionId)
+              .map((f) => [f.id, makeSelectedImage(f)])
+          )
+        ),
+    },
+    framePromptVersions: {
+      getSelectedByFrameIds: () =>
+        Promise.resolve(opts.visualPrompts ?? new Map()),
+    },
+    shotPromptVersions: {
+      getSelectedMotionByShots: () =>
+        Promise.resolve(opts.motionPrompts ?? new Map()),
+    },
+    characters: {
+      list: () => Promise.resolve([]),
+    },
+    locations: {
+      list: () => Promise.resolve([]),
+      listWithReferences: () => Promise.resolve([]),
+    },
+    sequenceElements: { list: () => Promise.resolve([]) },
+    styles: { getById: () => Promise.resolve(null) },
+    renderSegments: {
+      listBySequence: () => Promise.resolve(opts.video?.segments ?? []),
+    },
+    videoVariants: {
+      listBySequence: () => Promise.resolve(opts.video?.versions ?? []),
+    },
+    sequenceMusicPromptVersions: {
+      getSelected: () => Promise.resolve(null),
+    },
+    sequenceVariants: {
+      getMusicById: () => Promise.resolve(opts.musicPrimary ?? null),
+    },
+    shotSpecVersions: {
+      getSelectedByShotIds: () => Promise.resolve(new Map()),
+    },
+  });
+}
+
+/** Minimal ScopedDb stub exposing only the namespaces computePlan touches. */
+function asScopedDb<T>(stub: T): ScopedDb {
+  // test stub
+  return asStub<ScopedDb>(stub);
+}
+
+/** Every shot owes a visual prompt unless a test names its units. */
+const plan = (
+  shots: Shot[],
+  frames: Frame[],
+  opts: {
+    units?: PlanUnitRef[];
+    db?: ScopedDb;
+    renderOptions?: Parameters<typeof computePlan>[0]['renderOptions'];
+  } = {}
+) =>
+  computePlan({
+    scopedDb: opts.db ?? buildScopedDb(shots, frames),
+    sequenceId: 'seq-1',
+    units:
+      opts.units ?? shots.map((s) => ({ kind: 'prompt:visual', id: s.id })),
+    userId: 'u1',
+    renderOptions: opts.renderOptions,
+  });
+
+beforeEach(() => stalenessByShot.clear());
+
+describe('computePlan — a dialogue unit (#1703, #1780 §6)', () => {
+  const staleAudio: Shot['audioClips'] = [
+    {
+      id: 'clip-1',
+      url: 'https://example.com/old.mp3',
+      token: 'DIALOGUE',
+      durationSeconds: 1,
+      sourceKey: 'old-voice\tHello\tcalm\televen_v3',
+    },
+  ];
+  const voicedVersion = {
+    shotId: 'shot-1',
+    id: 'sdv-1',
+    lines: [{ character: 'Woman', line: 'Hello', tone: 'calm' }],
+  };
+  const voiceDb = (audioClips: Shot['audioClips'] = staleAudio) =>
+    buildScopedDb([makeShot({ audioClips })], [makeFrame()]);
+
+  function withVoices(db: ScopedDb): ScopedDb {
+    return asScopedDb({
+      ...db,
+      shotDialogue: {
+        getSelectedBySequence: () => Promise.resolve([voicedVersion]),
+      },
+      characters: {
+        list: () =>
+          Promise.resolve([{ name: 'Woman', voiceId: 'voice-woman' }]),
+      },
+    });
+  }
+
+  it('re-records the reading without re-rendering video', async () => {
+    const result = await plan([makeShot()], [makeFrame()], {
+      units: [{ kind: 'dialogue', id: 'shot-1' }],
+      db: withVoices(voiceDb()),
+    });
+    expect(result.targets).toHaveLength(1);
+    expect(result.targets[0]).toMatchObject({
+      regenDialogue: true,
+      regenVideo: false,
+    });
+    expect(result.dialogueSpeech?.scenes).toHaveLength(1);
+  });
+
+  it('records a FIRST reading when the plan owes one', async () => {
+    const result = await plan([makeShot()], [makeFrame()], {
+      units: [{ kind: 'dialogue', id: 'shot-1' }],
+      db: withVoices(voiceDb([])),
+    });
+    expect(result.targets[0]).toMatchObject({
+      regenDialogue: true,
+      motionRender: {
+        packedScene: {
+          colorPalette: 'silver, blue',
+          look: 'watercolour, cool shadows',
+        },
+      },
+    });
+    expect(result.dialogueSpeech?.scenes).toHaveLength(1);
+  });
+});
+describe('computePlan — what cannot be planned is reported', () => {
+  it('a shot whose staleness could not be computed is skipped, not dropped', async () => {
+    stalenessByShot.set('shot-1', { ...FRESH, visualPrompt: 'unknown' });
+    const result = await plan([makeShot()], [makeFrame()]);
+    expect(result.targets).toEqual([]);
+    expect(result.skipped).toEqual([
+      { shotId: 'shot-1', reason: 'staleness-unknown' },
+    ]);
+  });
+
+  it('a shot with no anchor frame', async () => {
+    const result = await plan([makeShot()], []);
+    expect(result.skipped).toEqual([
+      { shotId: 'shot-1', reason: 'no-anchor-frame' },
+    ]);
+  });
+
+  it('a shot still awaiting script analysis', async () => {
+    const result = await plan([makeShot({ sceneId: null })], [makeFrame()]);
+    expect(result.skipped).toEqual([{ shotId: 'shot-1', reason: 'no-scene' }]);
+  });
+});
+
+describe('computePlan — claim hashes (#1085)', () => {
+  it('carries the live hashes the claim rows will be stamped with', async () => {
+    stalenessByShot.set('shot-1', { ...FRESH, visualPrompt: 'stale' });
+    const result = await plan([makeShot()], [makeFrame()]);
+    expect(result.targets[0]).toMatchObject({
+      visualLiveHash: 'live-visual',
+      motionLiveHash: 'live-motion',
+      imageLiveHash: 'live-thumb',
+    });
+  });
+});
+
+describe('computePlan — per-shot start-frame mode', () => {
+  it('freezes the SHOT override onto the target, not the sequence default', async () => {
+    stalenessByShot.set('shot-1', { ...FRESH, visualPrompt: 'stale' });
+    const shots = [makeShot({ useStartFrame: false })];
+    const frames = [makeFrame()];
+    const result = await plan(shots, frames, {
+      db: buildScopedDb(shots, frames, {
+        sequence: { generateStartFrames: true },
+      }),
+    });
+    expect(result.targets[0]?.usesStartFrame).toBe(false);
+  });
+
+  it('freezes a start-frame override on a reference-only sequence', async () => {
+    stalenessByShot.set('shot-1', { ...FRESH, visualPrompt: 'stale' });
+    const shots = [makeShot({ useStartFrame: true })];
+    const frames = [makeFrame()];
+    const result = await plan(shots, frames, {
+      db: buildScopedDb(shots, frames, {
+        sequence: { generateStartFrames: false },
+      }),
+    });
+    expect(result.targets[0]?.usesStartFrame).toBe(true);
+  });
+});
+
+describe("computePlan — a continue's units (#1818)", () => {
+  const units = (
+    ...list: Array<[PlanUnitRef['kind'], string]>
+  ): PlanUnitRef[] => list.map(([kind, id]) => ({ kind, id }));
+
+  it('takes its flags from the units, not the staleness cascade', async () => {
+    // Everything reads fresh; the plan still owes a prompt and a first clip.
+    const result = await computePlan({
+      scopedDb: buildScopedDb(
+        [makeShot(), makeShot({ id: 'shot-2' })],
+        [makeFrame(), makeFrame({ id: 'frame-2', shotId: 'shot-2' })]
+      ),
+      sequenceId: 'seq-1',
+      userId: 'u1',
+      units: units(['prompt:visual', 'shot-1'], ['clip', 'shot-1']),
+    });
+    expect(result.targets.map((t) => t.shotId)).toEqual(['shot-1']);
+    expect(result.targets[0]).toMatchObject({
+      regenVisual: true,
+      regenImage: false,
+      regenVideo: true,
+      // No video yet: the continue renders the first one.
+      createsVideo: true,
+      // shot-2 shares its scene: the clip renders alone, so it carries the
+      // scene header a packed clip would state once.
+      attachSceneHeader: true,
+    });
+  });
+
+  it('renders a first still at the sequence model, which Update all never does', async () => {
+    const result = await computePlan({
+      scopedDb: buildScopedDb(
+        [makeShot()],
+        [makeFrame({ selectedImageVersionId: null })],
+        { sequence: { imageModel: 'nano_banana_2_lite' } }
+      ),
+      sequenceId: 'seq-1',
+      userId: 'u1',
+      units: units(['prompt:visual', 'shot-1'], ['still', 'shot-1']),
+    });
+    expect(result.targets[0]).toMatchObject({
+      regenVisual: true,
+      regenImage: true,
+      imageModel: 'nano_banana_2_lite',
+      // A one-shot scene keeps the LLM prompt path, byte-identical.
+      attachSceneHeader: false,
+    });
+  });
+
+  it('owes music from the units alone — a first prompt and track included', async () => {
+    const result = await computePlan({
+      scopedDb: buildScopedDb([makeShot()], [makeFrame()]),
+      sequenceId: 'seq-1',
+      userId: 'u1',
+      units: units(['prompt:music', 'seq-1'], ['music', 'seq-1']),
+    });
+    expect(result.targets).toEqual([]);
+    expect(result.music).toMatchObject({
+      regenPrompt: true,
+      regenTrack: true,
+      promptSource: 'ai-generated',
+    });
+    expect(result.music?.sceneSummaries.length).toBeGreaterThan(0);
+  });
+});
+
+describe('claimTargets (#1085)', () => {
+  type PendingRow = { id: string; workflowRunId: string | null };
+
+  function makeTarget(
+    overrides: Partial<Parameters<typeof claimTargets>[0]['targets'][number]>
+  ): Parameters<typeof claimTargets>[0]['targets'][number] {
+    return {
+      shotId: 'shot-1',
+      frameId: 'frame-1',
+      startingFrameImageUrl: null,
+      usesStartFrame: true,
+      durationMs: null,
+      standingImageVariantId: null,
+      standingMotionVersionId: null,
+      visualPromptVersionId: null,
+      regenVisual: false,
+      regenMotion: false,
+      rewriteSpec: false,
+      specVersionId: null,
+      spec: null,
+      specInputHash: null,
+      visualWritten: false,
+      motionWritten: false,
+      regenImage: false,
+      regenDialogue: false,
+      visualLiveHash: 'vh',
+      motionLiveHash: 'mh',
+      imageLiveHash: 'ih',
+      imageModel: 'nano_banana_2',
+      regenVideo: false,
+      createsVideo: false,
+      staleVideoVersionId: null,
+      referenceIds: [],
+      attachSceneHeader: false,
+      motionRender: {
+        packedScene: {},
+        description: '',
+        selectedModel: null,
+        characterLooks: null,
+      },
+      dialogue: { presence: false, lines: [] },
+      dialogueContext: [],
+      ...overrides,
+    };
+  }
+
+  function buildClaimDb(opts: {
+    existingVisual?: PendingRow | null;
+    existingMotion?: PendingRow | null;
+    liveImageClaims?: Array<{
+      id: string;
+      workflowRunId: string | null;
+      pendingInputHash: string | null;
+      dependsOnVersionId: string | null;
+    }>;
+  }) {
+    const created = {
+      visual: [] as unknown[],
+      motion: [] as unknown[],
+      image: [] as unknown[],
+    };
+    let seq = 0;
+    const db = asScopedDb({
+      framePromptVersions: {
+        getLivePending: () => Promise.resolve(opts.existingVisual ?? null),
+        createPending: (input: unknown) => {
+          created.visual.push(input);
+          return Promise.resolve({ id: `fpv-${++seq}` });
+        },
+      },
+      shotPromptVersions: {
+        getLivePending: () => Promise.resolve(opts.existingMotion ?? null),
+        createPending: (input: unknown) => {
+          created.motion.push(input);
+          return Promise.resolve({ id: `spv-${++seq}` });
+        },
+      },
+      frameVariants: {
+        listLiveClaims: () => Promise.resolve(opts.liveImageClaims ?? []),
+        createPendingClaim: (input: unknown) => {
+          created.image.push(input);
+          return Promise.resolve({ id: `fv-${++seq}` });
+        },
+      },
+    });
+    return { db, created };
+  }
+
+  it('creates one pending row per artifact and chains the image onto the visual claim', async () => {
+    const { db, created } = buildClaimDb({});
+    const result = await claimTargets({
+      actorId: 'user_1',
+      scopedDb: db,
+      targets: [
+        makeTarget({ regenVisual: true, regenMotion: true, regenImage: true }),
+      ],
+      sequenceId: 'seq-1',
+      parentInstanceId: 'run-1',
+    });
+
+    expect(created.visual).toHaveLength(1);
+    expect(created.motion).toHaveLength(1);
+    expect(created.image).toHaveLength(1);
+    expect(created.visual[0]).toMatchObject({
+      frameId: 'frame-1',
+      pendingInputHash: 'vh',
+      workflowRunId: 'run-1',
+    });
+    // Chained image: dependency edge, no direct hash claim.
+    expect(created.image[0]).toMatchObject({
+      dependsOnVersionId: result.claimsByShot['shot-1']?.visualVersionId,
+    });
+    expect(created.image[0]).not.toHaveProperty('pendingInputHash', 'ih');
+    expect(result.skipped).toEqual([]);
+  });
+
+  it('direct image regen (prompt fresh) claims with the image live hash', async () => {
+    const { db, created } = buildClaimDb({});
+    await claimTargets({
+      actorId: 'user_1',
+      scopedDb: db,
+      targets: [makeTarget({ regenImage: true })],
+      sequenceId: 'seq-1',
+      parentInstanceId: 'run-1',
+    });
+    expect(created.image[0]).toMatchObject({
+      pendingInputHash: 'ih',
+      workflowRunId: 'run-1',
+    });
+  });
+
+  it('reuses its OWN existing claim on a step retry instead of duplicating', async () => {
+    const { db, created } = buildClaimDb({
+      existingVisual: { id: 'fpv-prior', workflowRunId: 'run-1' },
+    });
+    const result = await claimTargets({
+      actorId: 'user_1',
+      scopedDb: db,
+      targets: [makeTarget({ regenVisual: true })],
+      sequenceId: 'seq-1',
+      parentInstanceId: 'run-1',
+    });
+    expect(created.visual).toHaveLength(0);
+    expect(result.claimsByShot['shot-1']?.visualVersionId).toBe('fpv-prior');
+    expect(result.skipped).toEqual([]);
+  });
+
+  it("skips an artifact claimed by ANOTHER run and reports 'already-in-flight'", async () => {
+    const { db, created } = buildClaimDb({
+      existingVisual: { id: 'fpv-foreign', workflowRunId: 'other-run' },
+    });
+    const result = await claimTargets({
+      actorId: 'user_1',
+      scopedDb: db,
+      targets: [makeTarget({ regenVisual: true, regenImage: true })],
+      sequenceId: 'seq-1',
+      parentInstanceId: 'run-1',
+    });
+    expect(created.visual).toHaveLength(0);
+    // Chained image must not chain onto a foreign claim.
+    expect(created.image).toHaveLength(0);
+    expect(result.claimsByShot['shot-1']).toMatchObject({
+      visualVersionId: null,
+      imageVariantId: null,
+    });
+    expect(result.skipped).toEqual([
+      { shotId: 'shot-1', reason: 'already-in-flight' },
+    ]);
+  });
+
+  it('lost insert race (create throws, live claim exists) → foreign / already-in-flight', async () => {
+    let getLiveCalls = 0;
+    const db = asScopedDb({
+      framePromptVersions: {
+        getLivePending: () => {
+          getLiveCalls += 1;
+          // First call: empty; second (post-throw): foreign winner.
+          if (getLiveCalls === 1) return Promise.resolve(null);
+          return Promise.resolve({
+            id: 'fpv-winner',
+            workflowRunId: 'other-run',
+          });
+        },
+        createPending: () =>
+          Promise.reject(new Error('UNIQUE constraint failed')),
+      },
+      shotPromptVersions: {
+        getLivePending: () => Promise.resolve(null),
+        createPending: () => Promise.resolve({ id: 'unused' }),
+      },
+      frameVariants: {
+        listLiveClaims: () => Promise.resolve([]),
+        createPendingClaim: () => Promise.resolve({ id: 'unused' }),
+      },
+    });
+
+    const result = await claimTargets({
+      actorId: 'user_1',
+      scopedDb: db,
+      targets: [makeTarget({ regenVisual: true })],
+      sequenceId: 'seq-1',
+      parentInstanceId: 'run-1',
+    });
+
+    expect(result.claimsByShot['shot-1']?.visualVersionId).toBeNull();
+    expect(result.skipped).toEqual([
+      { shotId: 'shot-1', reason: 'already-in-flight' },
+    ]);
+  });
+
+  it('create throws without a live claim → rethrows (not silent foreign)', async () => {
+    const db = asScopedDb({
+      framePromptVersions: {
+        getLivePending: () => Promise.resolve(null),
+        createPending: () => Promise.reject(new Error('D1 blip')),
+      },
+      shotPromptVersions: {
+        getLivePending: () => Promise.resolve(null),
+        createPending: () => Promise.resolve({ id: 'unused' }),
+      },
+      frameVariants: {
+        listLiveClaims: () => Promise.resolve([]),
+        createPendingClaim: () => Promise.resolve({ id: 'unused' }),
+      },
+    });
+
+    await expect(
+      claimTargets({
+        actorId: 'user_1',
+        scopedDb: db,
+        targets: [makeTarget({ regenVisual: true })],
+        sequenceId: 'seq-1',
+        parentInstanceId: 'run-1',
+      })
+    ).rejects.toThrow(/D1 blip/);
+  });
+
+  it('partial foreign (visual foreign, motion ours) does NOT list the shot as skipped', async () => {
+    const created = { motion: [] as unknown[] };
+    const db = asScopedDb({
+      framePromptVersions: {
+        getLivePending: () =>
+          Promise.resolve({ id: 'fpv-foreign', workflowRunId: 'other-run' }),
+        createPending: () => Promise.resolve({ id: 'unused' }),
+      },
+      shotPromptVersions: {
+        getLivePending: () => Promise.resolve(null),
+        createPending: (input: unknown) => {
+          created.motion.push(input);
+          return Promise.resolve({ id: 'spv-ours' });
+        },
+      },
+      frameVariants: {
+        listLiveClaims: () => Promise.resolve([]),
+        createPendingClaim: () => Promise.resolve({ id: 'unused' }),
+      },
+    });
+
+    const result = await claimTargets({
+      actorId: 'user_1',
+      scopedDb: db,
+      targets: [makeTarget({ regenVisual: true, regenMotion: true })],
+      sequenceId: 'seq-1',
+      parentInstanceId: 'run-1',
+    });
+
+    expect(result.claimsByShot['shot-1']).toMatchObject({
+      visualVersionId: null,
+      motionVersionId: 'spv-ours',
+    });
+    expect(created.motion).toHaveLength(1);
+    // Owns motion → not reported as already-in-flight (partial work is honest).
+    expect(result.skipped).toEqual([]);
+  });
+});
+
+describe('computePlan — durable step-result size', () => {
+  it('keeps scene bodies out of the plan (1 MiB step-result cap)', async () => {
+    const result = await plan(
+      [makeShot({ id: 'shot-0' }), makeShot(), makeShot({ id: 'shot-2' })],
+      [makeFrame()],
+      { units: [{ kind: 'prompt:motion', id: 'shot-1' }] }
+    );
+    const target = result.targets[0];
+    expect(target).toBeDefined();
+    // Neighbours are carried as ids, resolved to scenes per shot at spawn time.
+    expect(target).toMatchObject({});
+    expect(target).not.toHaveProperty('scene');
+    expect(target?.motionRender).toMatchObject({
+      sceneId: 'scene-1',
+      packedScene: {},
+    });
+  });
+});
+
+describe('findTargetMissingStartFrameMode', () => {
+  // `usesStartFrame` is typed required, but a plan frozen by an older build
+  // replays out of the durable payload without it. `!undefined` is `true`, so
+  // every read site would take those shots for reference-only and the run
+  // would SUCCEED — rewriting prompts with the wrong template and re-rendering
+  // every clip with no start frame, billed, silently.
+  const target = (over: Record<string, unknown>) =>
+    // shape drift is the thing under test
+    asStub<PlanTarget>({ shotId: 'shot-1', ...over });
+
+  it('passes a plan whose targets all carry the flag', () => {
+    expect(
+      findTargetMissingStartFrameMode({
+        targets: [
+          target({ usesStartFrame: true }),
+          target({ usesStartFrame: false }),
+        ],
+      })
+    ).toBeNull();
+  });
+
+  it('names the target a pre-switch payload dropped the flag from', () => {
+    const found = findTargetMissingStartFrameMode({
+      targets: [target({ usesStartFrame: true }), target({ shotId: 'old' })],
+    });
+    expect(found?.shotId).toBe('old');
+  });
+
+  it('rejects rather than coercing a non-boolean', () => {
+    // JSON round trips have no undefined; a null must not read as `false`.
+    expect(
+      findTargetMissingStartFrameMode({
+        targets: [target({ usesStartFrame: null })],
+      })
+    ).not.toBeNull();
+  });
+
+  it('passes an empty plan', () => {
+    expect(findTargetMissingStartFrameMode({ targets: [] })).toBeNull();
+  });
+});
+
+describe('computePlan — persisted clip membership', () => {
+  it('freezes fresh siblings without adding their prompt or still work', async () => {
+    const result = await plan(
+      [
+        makeShot({ id: 'a', renderSegmentId: 'segment' }),
+        makeShot({ id: 'b', renderSegmentId: 'segment' }),
+      ],
+      [
+        makeFrame({ id: 'fa', shotId: 'a' }),
+        makeFrame({ id: 'fb', shotId: 'b' }),
+      ],
+      { units: [{ kind: 'clip', id: 'a' }] }
+    );
+    expect(result.targets.map((target) => target.shotId)).toEqual(['a', 'b']);
+    expect(result.targets[1]).toMatchObject({
+      regenVideo: true,
+      regenVisual: false,
+      regenImage: false,
+      regenMotion: false,
+      motionRender: { renderSegmentId: 'segment', siblingShotIds: ['a', 'b'] },
+    });
+  });
+});
+
+describe('fresh plan model choices', () => {
+  it('freezes model variants and claims the first image at its requested model', async () => {
+    const result = await plan(
+      [makeShot()],
+      [makeFrame({ selectedImageVersionId: null })],
+      {
+        units: [{ kind: 'still', id: 'shot-1' }],
+        renderOptions: {
+          imageModels: ['seedream_v5', 'nano_banana_2'],
+          videoModels: ['seedance_v2', 'kling_v3_pro'],
+          audioModels: ['elevenlabs_music'],
+        },
+      }
+    );
+    expect(result.targets[0]?.imageModel).toBe('seedream_v5');
+    expect(result.renderOptions).toEqual({
+      imageModels: ['seedream_v5', 'nano_banana_2'],
+      videoModels: ['seedance_v2', 'kling_v3_pro'],
+      audioModels: ['elevenlabs_music'],
+    });
+  });
+});
+
+describe('saved sibling direction snapshots', () => {
+  it('carries visual and motion framing from the same scene while excluding the target and other scenes', async () => {
+    const shots = [
+      makeShot(),
+      makeShot({ id: 'sibling' }),
+      makeShot({ id: 'other', sceneId: 'elsewhere' }),
+    ];
+    const frames = [
+      makeFrame(),
+      makeFrame({ id: 'sibling-frame', shotId: 'sibling' }),
+      makeFrame({ id: 'other-frame', shotId: 'other' }),
+    ];
+    const plan = await computePlan({
+      scopedDb: buildScopedDb(shots, frames, {
+        visualPrompts: new Map([
+          ['frame-1', { text: 'Target' }],
+          ['sibling-frame', { text: 'Close-up of the listener' }],
+          ['other-frame', { text: 'Another room' }],
+        ]),
+        motionPrompts: new Map([
+          ['shot-1', { text: 'Target' }],
+          ['sibling', { text: 'Listener turns toward camera' }],
+          ['other', { text: 'Other action' }],
+        ]),
+      }),
+      sequenceId: 'seq-1',
+      userId: 'user',
+      units: [
+        { kind: 'prompt:visual', id: 'shot-1' },
+        { kind: 'prompt:motion', id: 'shot-1' },
+      ],
+    });
+    // One copy per scene, not per target (#1903): the other scene is absent.
+    expect(Object.keys(plan.scenePrompts)).toEqual(['scene-1']);
+    const [target] = plan.targets;
+    if (!target) throw new Error('expected a target');
+    expect(siblingPrompts(plan, target)).toEqual({
+      visual: [{ shotId: 'sibling', text: 'Close-up of the listener' }],
+      motion: [{ shotId: 'sibling', text: 'Listener turns toward camera' }],
+    });
+  });
+});

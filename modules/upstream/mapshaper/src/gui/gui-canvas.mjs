@@ -1,0 +1,1380 @@
+import { internal, utils, Bounds } from './gui-core';
+import { El } from './gui-el';
+import { GUI } from './gui-lib';
+import {
+  getCachedRasterViewportPreview,
+  scheduleRasterViewportPreview
+} from './gui-raster-viewport-preview';
+import {
+  getCachedRasterReprojectedPreview,
+  scheduleRasterReprojectedPreview
+} from './gui-raster-reprojected-preview';
+import { getCanvasFillPattern, getCanvasFillEffect } from './gui-canvas-patterns';
+import { compositeGlows, getGlowMargin, getGlowSourceCanvas, MAX_GLOW_MARGIN } from './gui-canvas-glow';
+import { getHighlightWidth, getHandleRadius } from './gui-highlight-width';
+import {
+  previewHasSourcePixels,
+  rasterPreviewIsSmoothed
+} from './gui-raster-display-utils';
+
+// TODO: consider moving this upstream
+function getArcsForRendering(lyr, ext) {
+  var dataset = lyr.gui.source.dataset;
+  var sourceArcs = dataset.arcs;
+  if (lyr.gui.geographic && dataset.gui?.displayArcs) {
+    return dataset.gui.displayArcs.getScaledArcs(ext);
+  }
+  return lyr.gui.displayArcs;
+}
+
+export function drawOutlineLayerToCanvas(lyr, canv, ext) {
+  var arcs;
+  var style = lyr.gui.style;
+  var arcCounts = lyr.gui.arcCounts;
+  var fgStyle = {strokeWidth: style.strokeWidth, strokeColor: style.strokeColors[1]},
+      bgStyle = {strokeWidth: style.strokeWidth, strokeColor: style.strokeColors[0]};
+  var filter;
+
+  if (internal.layerHasPaths(lyr.gui.displayLayer)) {
+    if (!arcCounts) {
+      arcCounts = lyr.gui.arcCounts = new Uint8Array(lyr.gui.displayArcs.size());
+      internal.countArcsInShapes(lyr.gui.displayLayer.shapes, arcCounts);
+    }
+    arcs = getArcsForRendering(lyr, ext);
+    if (bgStyle.strokeColor) {
+      filter = getArcFilter(arcs, ext, false, arcCounts);
+      canv.drawArcs(arcs, bgStyle, filter);
+    }
+    if (fgStyle.strokeColor && lyr.gui.displayLayer.geometry_type != 'point') {
+      filter = getArcFilter(arcs, ext, true, arcCounts);
+      canv.drawArcs(arcs, fgStyle, filter);
+    }
+  }
+  if (lyr.gui.displayLayer.geometry_type == 'point') {
+    canv.drawSquareDots(lyr.gui.displayLayer.shapes, style);
+  }
+}
+
+export function drawStyledLayerToCanvas(lyr, canv, ext) {
+  var style = lyr.gui.style;
+  var layer = lyr.gui.displayLayer;
+  var arcs, filter;
+  if (layer.geometry_type == 'point') {
+    if (style.type == 'styled' && !style.dotSize) {
+      canv.drawPoints(layer.shapes, style);
+    } else {
+      canv.drawSquareDots(layer.shapes, style);
+    }
+  } else {
+    arcs = getArcsForRendering(lyr, ext);
+    filter = getShapeFilter(arcs, layer.shapes, ext, style.overlay ? 0 : style.glowReach);
+    // Overlays copy the layer's style, hiddenIds included, but their shapes
+    // are a subset of the layer's, so the ids do not apply to them.
+    if (style.hiddenIds && style.hiddenIds.length > 0 && !style.overlay) {
+      filter = getShapeFilterWithout(filter, style.hiddenIds);
+    }
+    // verticesOnly: the vertex markers of an editing overlay, over shapes that
+    // another overlay layer draws
+    if (!style.verticesOnly) {
+      canv.drawStyledPaths(layer.shapes, arcs, style, filter);
+    }
+    if (style.vertices || style.vertex_overlay || style.pending_snip) {
+      canv.drawVertices(layer.shapes, arcs, style, filter);
+    }
+  }
+  canv.clearStyles();
+}
+
+// Return a function for testing if an arc should be drawn in the current view
+function getArcFilter(arcs, ext, usedFlag, arcCounts) {
+  // Arcs whose bbox is smaller than this pixel threshold collapse to a dot
+  // under roundToPix anyway; skipping them saves per-arc iteration.
+  var MIN_PATH_LEN = 0.35;
+  var minPathLen = ext.getPixelSize() * MIN_PATH_LEN,
+      geoBounds = ext.getBounds(),
+      geoBBox = geoBounds.toArray(),
+      allIn = geoBounds.contains(arcs.getBounds()),
+      visible;
+  // don't continue dropping paths if user zooms out farther than full extent
+  if (ext.scale() < 1) minPathLen *= ext.scale();
+  return function(i) {
+      var visible = true;
+      if (usedFlag != arcCounts[i] > 0) { // show either used or unused arcs
+        visible = false;
+      } else if (arcs.arcIsSmaller(i, minPathLen)) {
+        visible = false;
+      } else if (!allIn && !arcs.arcIntersectsBBox(i, geoBBox)) {
+        visible = false;
+      }
+      return visible;
+    };
+  }
+
+// Return a function for testing if a shape should be drawn in the current
+// view. The filter takes a shape index and tests the shape's bbox against
+// the viewport. At nearly full extent the test is a no-op, so we return
+// null to let the caller skip it entirely.
+// reach: how far past its shapes the layer draws, in px (e.g. a glow)
+function getShapeFilter(arcs, shapes, ext, reach) {
+  if (ext.scale() < 1.1) return null;
+  var view = ext.getBounds();
+  var b = new Bounds();
+  var pad;
+  if (reach > 0) {
+    pad = reach * (ext.getSymbolScale() || 1) * ext.getPixelSize();
+    view = new Bounds(view.toArray());
+    view.padBounds(pad, pad, pad, pad);
+  }
+  return function(i) {
+    var shp = shapes[i];
+    if (!shp) return false;
+    b.empty();
+    arcs.getMultiShapeBounds(shp, b);
+    return view.intersects(b);
+  };
+}
+
+// A layer's shape filter that also leaves out shapes @ids, which a tool is
+// drawing in the overlay instead (see setHiddenShapes() in gui-hit-control.mjs)
+function getShapeFilterWithout(filter, ids) {
+  var hidden = {};
+  ids.forEach(function(id) { hidden[id] = true; });
+  return function(i) {
+    return hidden[i] !== true && (!filter || filter(i));
+  };
+}
+
+function getPixelColorFunction() {
+  var canv = El('canvas').node();
+  canv.width = canv.height = 1;
+  var ctx = canv.getContext('2d', {willReadFrequently: true});
+  var memos = {};
+  return function(col) {
+    var pixels;
+    if (!col) col = 'black';
+    if (col in memos) return memos[col];
+    ctx.fillStyle = col;
+    ctx.fillRect(0, 0, 1, 1);
+    pixels = new Uint32Array(ctx.getImageData(0, 0, 1, 1).data.buffer);
+    memos[col] = pixels[0];
+    return pixels[0];
+  };
+}
+
+export function DisplayCanvas() {
+  var _self = El('canvas'),
+      _canvas = _self.node(),
+      // TODO: compare performance of willReadFrequently setting
+      // _ctx = _canvas.getContext('2d', {willReadFrequently: true}),
+      _ctx = _canvas.getContext('2d'),
+      _pixelColor = getPixelColorFunction(),
+      _ext;
+
+  _self.clearStyles = function() {
+    _ctx.fillStyle = null;
+    _ctx.strokeStyle = null;
+  };
+
+  _self.prep = function(extent) {
+    var w = extent.width(),
+        h = extent.height(),
+        pixRatio = GUI.getPixelRatio();
+    _ctx.clearRect(0, 0, _canvas.width, _canvas.height);
+    _canvas.width = w * pixRatio;
+    _canvas.height = h * pixRatio;
+    _self.classed('retina', pixRatio == 2);
+    _self.show();
+    _ext = extent;
+  };
+
+  _self.drawRasterLayer = function(layer, opts) {
+    var raster = layer.raster;
+    var options = opts || {};
+    var preview = null;
+    var bbox, grid, sourcePixels;
+    if (layer.gui && layer.gui.dynamic_crs) {
+      preview = getCachedRasterReprojectedPreview(layer, _ext);
+      if (!preview) {
+        if (options.action != 'nav' && options.onViewportPreviewReady) {
+          scheduleRasterReprojectedPreview(layer, _ext, options.onViewportPreviewReady);
+        }
+        return;
+      }
+      bbox = preview.bbox;
+      if (!preview.pixels || !bbox) return;
+      drawRasterPreview(preview, bbox, preview.sourcePixels);
+      if (options.action != 'nav' && options.onViewportPreviewReady) {
+        scheduleRasterReprojectedPreview(layer, _ext, options.onViewportPreviewReady);
+      }
+      return;
+    }
+    preview = options.action == 'nav' ? null : getCachedRasterViewportPreview(layer, _ext);
+    bbox = preview && preview.bbox;
+    sourcePixels = preview && preview.sourcePixels;
+    if (!preview) {
+      // The whole-raster preview made at import time, which is scaled down if
+      // the raster is large.
+      preview = raster && internal.getRasterPreview(raster);
+      bbox = raster && internal.getRasterBBox(raster);
+      grid = raster && internal.getRasterGrid(raster);
+      sourcePixels = !!(preview && grid) && previewHasSourcePixels(
+        preview.width, preview.height, grid.width, grid.height);
+      if (options.action != 'nav' && options.onViewportPreviewReady) {
+        scheduleRasterViewportPreview(layer, _ext, options.onViewportPreviewReady);
+      }
+    }
+    if (!preview || !preview.pixels || !bbox) return;
+    drawRasterPreview(preview, bbox, sourcePixels);
+  };
+
+  /*
+  // Original function, not optimized
+  _self.drawStyledPaths = function(shapes, arcs, style) {
+    var startPath = getPathStart(_ext),
+        drawPath = getShapePencil(arcs, _ext),
+        styler = style.styler || null;
+    for (var i=0, n=shapes.length; i<n; i++) {
+      if (styler) styler(style, i);
+      startPath(_ctx, style);
+      drawPath(shapes[i], _ctx);
+      endPath(_ctx, style);
+    }
+  };
+  */
+
+  // Draws a dot at each vertex (if style.vertices is set), and the markers of
+  // style.vertex_overlay and style.pending_snip.
+  _self.drawVertices = function(shapes, arcs, style, filter) {
+    var iter = new internal.ShapeIter(arcs);
+    var t = getScaledTransform(_ext);
+    var bounds = _ext.getBounds();
+    var radius = (style.strokeWidth > 2 ? style.strokeWidth * 1 : 2.2) * GUI.getPixelRatio() * getScaledLineScale(_ext, style);
+    var color = style.strokeColor || 'black';
+    var i, j, p;
+    _ctx.beginPath();
+    _ctx.fillStyle = color;
+    for (i=0; style.vertices && i<shapes.length; i++) {
+      var shp = shapes[i];
+      if (!shp || filter && !filter(i)) continue;
+      for (j=0; j<shp.length; j++) {
+        iter.init(shp[j]);
+        while (iter.hasNext()) {
+          if (!bounds.containsPoint(iter.x, iter.y)) continue;
+          drawCircle(iter.x * t.mx + t.bx, iter.y * t.my + t.by, radius, _ctx);
+        }
+      }
+    }
+    _ctx.fill();
+    _ctx.closePath();
+
+    if (style.vertex_overlay) {
+      _ctx.beginPath();
+      _ctx.fillStyle = style.vertex_overlay_color || 'black';
+      p = style.vertex_overlay;
+      drawCircle(p[0] * t.mx + t.bx, p[1] * t.my + t.by, radius *
+          (style.vertex_overlay_scale || 2), _ctx);
+      _ctx.fill();
+      _ctx.closePath();
+    }
+
+    if (style.pending_snip) {
+      _ctx.beginPath();
+      _ctx.fillStyle = style.pending_snip_color || 'black';
+      p = style.pending_snip;
+      drawCircle(p[0] * t.mx + t.bx, p[1] * t.my + t.by, radius * 2.5, _ctx);
+      _ctx.fill();
+      _ctx.closePath();
+    }
+  };
+
+  // Optimized to draw paths in same-style batches (faster Canvas drawing)
+  _self.drawStyledPaths = function(shapes, arcs, style, filter) {
+    var styleIndex = {};
+    var batchSize = 100;
+    var lineScale = getScaledLineScale(_ext, style);
+    var startPath = getPathStart(_ext, lineScale);
+    var draw = getShapePencil(arcs, _ext);
+    var arrowPencil = null;
+    var key, item, shp;
+    var styler = style.styler || null;
+    var drawStyle = styler ? utils.defaults({}, style) : style;
+    // Hover and selection overlays copy the layer's style; they do not glow.
+    var glows = !style.overlay;
+    var glowScale = getCanvasStrokeScale(GUI.getPixelRatio(), lineScale);
+    var layerGlow = glows && style.layerOuterGlow ?
+      startLayerGlow(style.layerOuterGlow, glowScale) : null;
+    try {
+      // Overlays copy the layer's style too, and have no casings either
+      if (style.hasCasings && !style.overlay) drawCasings();
+      drawShapes();
+    } finally {
+      if (layerGlow) endLayerGlow(layerGlow);
+    }
+    if (layerGlow) compositeLayerGlow(layerGlow);
+
+    function drawShapes() {
+      var glowPencil = null;
+      for (var i=0; i<shapes.length; i++) {
+        shp = shapes[i];
+        if (!shp || filter && !filter(i)) continue;
+        if (styler) {
+          styler(drawStyle, i);
+        }
+        if (glows && (drawStyle.outerGlow || drawStyle.innerGlow)) {
+          // Shapes before this one are drawn first, as they are in SVG, where
+          // a shape's outer glow lies over the shapes that precede it.
+          flushBatches();
+          if (!glowPencil) glowPencil = getGlowShapePencil(arcs, startPath, draw, glowScale);
+          glowPencil(shp, drawStyle);
+          continue;
+        }
+        // A line with arrowheads is drawn on its own, trimmed to meet its heads;
+        // see svg-line-arrows.mjs. Only lines styled with line-start, line-end,
+        // line-fade or line-taper get here, so the batch below is untouched
+        // for everything else.
+        if (drawStyle.lineStart || drawStyle.lineEnd || drawStyle.lineFade || drawStyle.lineTaper) {
+          if (!arrowPencil) arrowPencil = getArrowLinePencil(arcs, _ext, lineScale);
+          if (arrowPencil(shp, _ctx, drawStyle, startPath, draw)) continue;
+        }
+        if (!drawStyle.batchOverlay && (drawStyle.overlay ||
+          drawStyle.opacity < 1 || drawStyle.fillOpacity < 1 ||
+          drawStyle.strokeOpacity < 1 || drawStyle.fillEffect)) {
+          // don't batch shapes with opacity, in case they overlap
+          drawPaths([shp], startPath, draw, drawStyle);
+          continue;
+        }
+        key = getStyleKey(drawStyle);
+        if (key in styleIndex === false) {
+          styleIndex[key] = {
+            style: utils.defaults({}, drawStyle),
+            shapes: []
+          };
+        }
+        item = styleIndex[key];
+        item.shapes.push(shp);
+        if (item.shapes.length >= batchSize) {
+          drawPaths(item.shapes, startPath, draw, item.style);
+          item.shapes = [];
+        }
+      }
+      flushBatches();
+    }
+
+    // Every casing in the layer is drawn before any of its lines, as in SVG
+    // (see svg-line-casing.mjs). Finding them runs the styler over the shapes
+    // a second time, which only layers with casings pay for. The casing style
+    // object is reused from one shape to the next, like the styler's, and
+    // copied for a batch.
+    function drawCasings() {
+      var batches = {};
+      var casingStyle = {};
+      var trimForArrows = _ext.scale() <= 100; // see getArrowLinePencil()
+      var casingPencil = null;
+      var taperCasingPencil = null;
+      var casing, batch, casingKey;
+      for (var i=0; i<shapes.length; i++) {
+        shp = shapes[i];
+        if (!shp || filter && !filter(i)) continue;
+        if (styler) styler(drawStyle, i);
+        casing = drawStyle.casing;
+        if (!casing) continue;
+        setCasingStyle(casingStyle, drawStyle, casing);
+        if (drawStyle.lineTaper && internal.svg.parseLineTaper(drawStyle.lineTaper) > 0) {
+          if (!taperCasingPencil) taperCasingPencil = getTaperedCasingPencil(arcs, _ext, lineScale);
+          taperCasingPencil(shp, _ctx, drawStyle, casing);
+          continue;
+        }
+        if (trimForArrows && (drawStyle.lineStart || drawStyle.lineEnd)) {
+          if (!casingPencil) casingPencil = getArrowCasingPencil(arcs, _ext, lineScale);
+          casingPencil(shp, _ctx, drawStyle, casingStyle, startPath);
+          continue;
+        }
+        if (casingStyle.strokeOpacity < 1) {
+          drawPaths([shp], startPath, draw, casingStyle);
+          continue;
+        }
+        casingKey = getCasingStyleKey(casingStyle);
+        batch = batches[casingKey];
+        if (!batch) {
+          batch = batches[casingKey] = {style: utils.defaults({}, casingStyle), shapes: []};
+        }
+        batch.shapes.push(shp);
+        if (batch.shapes.length >= batchSize) {
+          drawPaths(batch.shapes, startPath, draw, batch.style);
+          batch.shapes = [];
+        }
+      }
+      Object.keys(batches).forEach(function(k) {
+        if (batches[k].shapes.length > 0) {
+          drawPaths(batches[k].shapes, startPath, draw, batches[k].style);
+        }
+      });
+    }
+
+    function flushBatches() {
+      Object.keys(styleIndex).forEach(function(key) {
+        var item = styleIndex[key];
+        if (item.shapes.length === 0) return;
+        drawPaths(item.shapes, startPath, draw, item.style);
+        item.shapes = [];
+      });
+    }
+  };
+
+  function drawPaths(shapes, beginPath, drawShape, style, ctx) {
+    ctx = ctx || _ctx;
+    beginPath(ctx, style);
+    for (var i=0, n=shapes.length; i<n; i++) {
+      drawShape(shapes[i], ctx, style);
+    }
+    endPath(ctx, style);
+  }
+
+  // A layer's own outer glow is made from the whole layer, so the layer is
+  // drawn into a canvas of its own and then onto this one with its glow. The
+  // canvas is larger than this one by the reach of the glow, so that shapes
+  // just outside the view still cast theirs into it.
+  function startLayerGlow(glow, pxScale) {
+    var margin = Math.min(getGlowMargin(glow, null, pxScale), MAX_GLOW_MARGIN);
+    var w = _canvas.width + margin * 2;
+    var h = _canvas.height + margin * 2;
+    var src = getGlowSourceCanvas('layer', w, h);
+    var o;
+    if (!src) return null;
+    o = {glow: glow, pxScale: pxScale, margin: margin, w: w, h: h,
+      src: src, ctx: _ctx};
+    src.ctx.setTransform(1, 0, 0, 1, margin, margin);
+    _ctx = src.ctx;
+    return o;
+  }
+
+  function endLayerGlow(o) {
+    o.src.ctx.setTransform(1, 0, 0, 1, 0, 0);
+    _ctx = o.ctx;
+  }
+
+  function compositeLayerGlow(o) {
+    compositeGlows(_ctx, o.src.canvas, -o.margin, -o.margin, o.w, o.h,
+      o.glow, null, o.pxScale);
+  }
+
+  // Draws one shape with its own glows, which are made from the shape alone.
+  // The shape is drawn into a canvas the size of its bounding box and the
+  // reach of its glows, cut down to the part that can be seen.
+  function getGlowShapePencil(arcs, startPath, draw, pxScale) {
+    var t = getScaledTransform(_ext);
+    var b = new Bounds();
+    return function(shp, style) {
+      var outer = style.outerGlow, inner = style.innerGlow;
+      var margin = getGlowMargin(outer, inner, pxScale) +
+        Math.ceil((style.strokeWidth > 0 ? style.strokeWidth * pxScale : 0) / 2);
+      var viewMargin = Math.min(margin * 2, MAX_GLOW_MARGIN);
+      var x0, y0, x1, y1, src;
+      b.empty();
+      arcs.getMultiShapeBounds(shp, b);
+      if (!b.hasBounds()) return;
+      x0 = Math.floor(Math.max(b.xmin * t.mx + t.bx - margin, -viewMargin));
+      x1 = Math.ceil(Math.min(b.xmax * t.mx + t.bx + margin, _canvas.width + viewMargin));
+      y0 = Math.floor(Math.max(b.ymax * t.my + t.by - margin, -viewMargin));
+      y1 = Math.ceil(Math.min(b.ymin * t.my + t.by + margin, _canvas.height + viewMargin));
+      if (x1 <= x0 || y1 <= y0) return;
+      src = getGlowSourceCanvas('shape', x1 - x0, y1 - y0);
+      if (!src) {
+        drawPaths([shp], startPath, draw, style);
+        return;
+      }
+      src.ctx.setTransform(1, 0, 0, 1, -x0, -y0);
+      drawPaths([shp], startPath, draw, style, src.ctx);
+      src.ctx.setTransform(1, 0, 0, 1, 0, 0);
+      compositeGlows(_ctx, src.canvas, x0, y0, x1 - x0, y1 - y0, outer, inner, pxScale);
+    };
+  }
+
+  _self.drawSquareDots = function(shapes, style) {
+    var t = getScaledTransform(_ext),
+        size = getDotSize(style),
+        styler = style.styler || null,
+        xmax = _canvas.width + size,
+        ymax = _canvas.height + size,
+        xmin = -size,
+        ymin = -size,
+        color = style.dotColor || 'black',
+        shp, x, y, i, j, n, m,
+        mx = t.mx,
+        my = t.my,
+        bx = t.bx,
+        by = t.by;
+    if (size === 0) return;
+    if (size <= 6) {
+      // optimized drawing of many small same-colored dots
+      drawSquareDotsFaster(shapes, style, size, t);
+      return;
+    }
+
+    _ctx.fillStyle = color;
+    for (i=0, n=shapes.length; i<n; i++) {
+      shp = shapes[i];
+      for (j=0, m=shp ? shp.length : 0; j<m; j++) {
+        x = shp[j][0] * mx + bx;
+        y = shp[j][1] * my + by;
+        if (x > xmin && y > ymin && x < xmax && y < ymax) {
+          if (styler !== null) { // e.g. selected points
+            styler(style, i);
+            // avoid updating dot size for every shape (assuming dotSize is not dynamic)
+            // size = getDotSize(style);
+            if (style.dotColor != color) {
+              color = style.dotColor || style.fillColor;
+              _ctx.fillStyle = color;
+            }
+          }
+          drawSquare(x, y, size, _ctx);
+        }
+      }
+    }
+  };
+
+  function drawSquareDotsFaster(shapes, style, size, t) {
+    var w = _canvas.width,
+        h = _canvas.height,
+        rgba = _pixelColor(style.dotColor || style.fillColor),
+        styler = style.styler,
+        imageData = _ctx.getImageData(0, 0, w, h),
+        pixels = new Uint32Array(imageData.data.buffer),
+        shp, x, y, i, j, n, m,
+        mx = t.mx,
+        my = t.my,
+        bx = t.bx,
+        by = t.by;
+    if (styler) {
+      for (i=0, n=shapes.length; i<n; i++) {
+        shp = shapes[i];
+        for (j=0, m=shp ? shp.length : 0; j<m; j++) {
+          x = shp[j][0] * mx + bx;
+          y = shp[j][1] * my + by;
+          if (x >= 0 && y >= 0 && x <= w && y <= h) {
+            styler(style, i);
+            rgba = _pixelColor(style.dotColor || style.fillColor);
+            drawSquareFaster(x, y, rgba, size, pixels, w, h);
+          }
+        }
+      }
+    } else {
+      for (i=0, n=shapes.length; i<n; i++) {
+        shp = shapes[i];
+        for (j=0, m=shp ? shp.length : 0; j<m; j++) {
+          x = shp[j][0] * mx + bx;
+          y = shp[j][1] * my + by;
+          if (x >= 0 && y >= 0 && x <= w && y <= h) {
+            drawSquareFaster(x, y, rgba, size, pixels, w, h);
+          }
+        }
+      }
+    }
+    _ctx.putImageData(imageData, 0, 0);
+  }
+
+  // color: 32-bit integer value containing rgba channel values
+  // size: pixels on a side (assume integer)
+  // x, y: non-integer center coordinates
+  // pixels: Uint32Array of pixel colors
+  // w, h: Size of canvas
+  function drawSquareFaster(x, y, rgba, size, pixels, w, h) {
+    var xmin = x < 0 ? 0 : (x - size * 0.5) | 0;
+    var ymin = y < 0 ? 0 : (y - size * 0.5) | 0;
+    var xmax = x >= w-1 ? w-1 : xmin + size - 1;
+    var ymax = y >= h-1 ? h-1 : ymin + size - 1;
+    for (var r = ymin; r <= ymax; r++) {
+      for (var c = xmin; c <= xmax; c++) {
+        pixels[r * w + c] = rgba;
+      }
+    }
+  }
+
+  // sourcePixels: true if one pixel of the preview is one pixel of the raster,
+  // so that drawing it as squares shows the data rather than an artifact of
+  // whatever it was scaled down to.
+  function drawRasterPreview(preview, bbox, sourcePixels) {
+    var img = getRasterCanvas(preview);
+    var t = _ext.getTransform(GUI.getPixelRatio());
+    var p1 = t.transform(bbox[0], bbox[3]);
+    var p2 = t.transform(bbox[2], bbox[1]);
+    var magnification = Math.abs(p2[0] - p1[0]) / img.width / GUI.getPixelRatio();
+    _ctx.imageSmoothingEnabled = rasterPreviewIsSmoothed(sourcePixels, magnification);
+    _ctx.drawImage(img, p1[0], p1[1], p2[0] - p1[0], p2[1] - p1[1]);
+  }
+
+  // TODO: consider using drawStyledPaths(), which draws paths in batches
+  // for faster Canvas rendering. Downside: changes stacking order, which
+  // is bad if circles are graduated.
+  // style.pointShape: 'square' draws squares @radius from center to side
+  //   (read once per call, not per point)
+  _self.drawPoints = function(shapes, style) {
+    if (style.highlight) {
+      drawHighlightPoints(shapes, style);
+      return;
+    }
+    var t = getScaledTransform(_ext),
+        scale = GUI.getPixelRatio() * (style.fixedRadius ? getFixedRadiusScale(style) : _ext.getSymbolScale() || 1),
+        startPath = getPathStart(_ext),
+        styler = style.styler || null,
+        drawPoint = style.pointShape == 'square' ? drawSquarePath : drawCircle,
+        shp, p,
+        mx = t.mx,
+        my = t.my,
+        bx = t.bx,
+        by = t.by;
+
+    for (var i=0, n=shapes.length; i<n; i++) {
+      shp = shapes[i];
+      if (styler) styler(style, i);
+      startPath(_ctx, style);
+      if (!shp || style.radius > 0 === false) continue;
+      for (var j=0, m=shp ? shp.length : 0; j<m; j++) {
+        p = shp[j];
+        drawPoint(p[0] * mx + bx, p[1] * my + by, style.radius * scale, _ctx);
+      }
+      endPath(_ctx, style);
+    }
+  };
+
+  // style.fixedRadius: the radius of handles such as a curve's knots, which is
+  // in screen px, grown if need be to be wider than the line they are on,
+  // style.lineWidth (as the layer's lines are scaled in a preview), up to
+  // style.maxRadius. The radius is the same for every point, which no styler
+  // changes.
+  function getFixedRadiusScale(style) {
+    var lineWidth = (style.lineWidth || 0) * (_ext.getSymbolScale() || 1);
+    return style.radius > 0 ?
+      getHandleRadius(style.radius, lineWidth, style.maxRadius) / style.radius : 1;
+  }
+
+  // Hover and selection markers (see getOverlayStyle() in
+  // gui-overlay-styler.mjs): each circle grown by the highlight, or ringed by
+  // a halo just outside its edge, sized in px from the circle as drawPoints()
+  // draws it, with a radius that follows the symbol scale and a stroke that
+  // does not.
+  function drawHighlightPoints(shapes, style) {
+    var t = getScaledTransform(_ext),
+        pixRatio = GUI.getPixelRatio(),
+        pixScale = getCanvasStrokeScale(pixRatio, 1),
+        symbolScale = _ext.getSymbolScale() || 1,
+        startPath = getPathStart(_ext),
+        styler = style.styler || null,
+        drawPoint = style.pointShape == 'square' ? drawSquarePath : drawCircle,
+        highlight = style.highlight,
+        shp, p, r, sw, d, extra, radius;
+    for (var i=0, n=shapes.length; i<n; i++) {
+      shp = shapes[i];
+      if (styler) styler(style, i);
+      if (!shp || style.radius > 0 === false) continue;
+      r = style.radius * symbolScale;
+      sw = style.featureWidth > 0 ? style.featureWidth : 0;
+      d = r * 2 + sw;
+      extra = getHighlightWidth(d, highlight) - d;
+      startPath(_ctx, style);
+      if (highlight.halo) {
+        radius = r + sw / 2 + extra / 4;
+        _ctx.lineWidth = extra / 2 * pixScale;
+      } else {
+        radius = r + extra / 2;
+        _ctx.lineWidth = sw * pixScale;
+      }
+      for (var j=0; j<shp.length; j++) {
+        p = shp[j];
+        drawPoint(p[0] * t.mx + t.bx, p[1] * t.my + t.by, radius * pixRatio, _ctx);
+      }
+      endPath(_ctx, style);
+    }
+  }
+
+  _self.drawArcs = function(arcs, style, filter) {
+    var startPath = getPathStart(_ext, getLineScale(_ext)),
+        t = getScaledTransform(_ext),
+        ctx = _ctx,
+        // Larger batches reduce the number of stroke() flushes.
+        batch = 100,
+        count = 0,
+        n = arcs.size(),
+        i, iter;
+
+    startPath(ctx, style);
+    for (i=0; i<n; i++) {
+      if (filter && !filter(i)) continue;
+      if (++count % batch === 0) {
+        endPath(ctx, style);
+        startPath(ctx, style);
+      }
+      iter = protectIterForDrawing(arcs.getArcIter(i), _ext);
+      // drawPath(iter, t, ctx, 0.1);
+      drawPath2(iter, t, ctx, roundToHalfPix);
+    }
+    endPath(ctx, style);
+  };
+
+  function getStyleKey(style) {
+    return (style.strokeWidth > 0 ? style.strokeColor + '~' + style.strokeWidth +
+      '~' + (style.lineDash ? style.lineDash + '~' : '') +
+      // a highlight is drawn from the feature's width, at the drawing scale
+      (style.highlight ? style.featureWidth + '~' : '') : '') +
+      (style.fillColor || '') +
+      // styles with <1 opacity are no longer batch-rendered, not relevent to key
+      // (style.strokeOpacity >= 0 ? style.strokeOpacity + '~' : '') : '') +
+      // (style.fillOpacity ? '~' + style.fillOpacity : '') +
+      // (style.opacity < 1 ? '~' + style.opacity : '') +
+      (style.fillPattern ? '~' + style.fillPattern : '');
+  }
+  return _self;
+}
+
+function getScaledLineScale(ext, style) {
+  var previewScale = ext.getSymbolScale();
+  if (previewScale == 1 || style.type != 'styled') {
+    return getLineScale(ext);
+  }
+  return previewScale;
+}
+
+// Width in CSS px of a hover or selection line (see getOverlayStyle() in
+// gui-overlay-styler.mjs), over or around a feature drawn with @lineScale
+function getHighlightLineWidth(style, lineScale) {
+  return getHighlightWidth(style.featureWidth * lineScale, style.highlight);
+}
+
+// Vary line width according to zoom ratio.
+// For performance and clarity don't start widening until zoomed quite far in.
+function getLineScale(ext) {
+  var mapScale = ext.scale(),
+      s = 1;
+  if (mapScale < 0.5) {
+    s *= Math.pow(mapScale + 0.5, 0.35);
+  } else if (mapScale > 30) {
+    s *= Math.pow(mapScale - 29, 0.065);
+  }
+  return s;
+}
+
+function getDotSize(style) {
+  var size = style.dotSize || 1;
+  // TODO: improve
+  var scale = style.dotScale || 1;
+  size += (scale - 1) / 2;
+  size *= Math.pow(scale, 0.3);
+  // shrink dots slightly on retina displays, to adjust for greater clarity
+  // and to reduce number of pixels to draw on large datasets.
+  size *= Math.pow(GUI.getPixelRatio(), 0.8);
+  return Math.round(size);
+}
+
+function getScaledTransform(ext) {
+  var t = ext.getTransform(GUI.getPixelRatio());
+  // A recent Chrome update (v80?) seems to have introduced a performance
+  // regression causing slow object property access.
+  // the effect is intermittent and pretty mysterious.
+  return {
+    mx: t.mx,
+    my: t.my,
+    bx: t.bx,
+    by: t.by
+  };
+}
+
+function getRasterCanvas(preview) {
+  if (preview.canvas) return preview.canvas;
+  var canvas = document.createElement('canvas');
+  var ctx = canvas.getContext('2d');
+  var imageData;
+  canvas.width = preview.width;
+  canvas.height = preview.height;
+  imageData = new ImageData(preview.pixels, preview.width, preview.height);
+  ctx.putImageData(imageData, 0, 0);
+  preview.canvas = canvas;
+  return canvas;
+}
+
+function drawCircle(x, y, radius, ctx) {
+  if (radius > 0) {
+    ctx.moveTo(x + radius, y);
+    ctx.arc(x, y, radius, 0, Math.PI * 2, true);
+  }
+}
+
+// a square outline for a stroke and fill, like drawCircle()'s
+function drawSquarePath(x, y, radius, ctx) {
+  if (radius > 0) {
+    ctx.rect(x - radius, y - radius, radius * 2, radius * 2);
+  }
+}
+
+function drawSquare(x, y, size, ctx) {
+  var offs = size / 2;
+  if (size > 0) {
+    x = Math.round(x - offs);
+    y = Math.round(y - offs);
+    size = Math.ceil(size);
+    ctx.fillRect(x, y, size, size);
+  }
+}
+
+// Draw a path, but skip vertices within a given pixel threshold from the prev. vertex
+// This optimization introduces visible gaps between filled polygons unless the
+// threshold is much smaller than a pixel, so switching to drawPath2.
+function drawPath(vec, t, ctx, minLen) {
+  // copy to local variables because of odd performance regression in Chrome 80
+  var mx = t.mx,
+      my = t.my,
+      bx = t.bx,
+      by = t.by;
+  var x, y, xp, yp;
+  if (!vec.hasNext()) return;
+  x = xp = vec.x * mx + bx;
+  y = yp = vec.y * my + by;
+  ctx.moveTo(x, y);
+  while (vec.hasNext()) {
+    x = vec.x * mx + bx;
+    y = vec.y * my + by;
+    if (Math.abs(x - xp) > minLen || Math.abs(y - yp) > minLen) {
+      ctx.lineTo(x, y);
+      xp = x;
+      yp = y;
+    }
+  }
+}
+
+
+// Draw a path, optimized by snapping pixel coordinates and skipping
+// duplicate coords.
+function drawPath2(vec, t, ctx, round) {
+  // copy to local variables because of odd performance regression in Chrome 80
+  var mx = t.mx,
+      my = t.my,
+      bx = t.bx,
+      by = t.by;
+  var x, y, xp, yp;
+  var count = 0;
+  if (!vec.hasNext()) return;
+  x = round(vec.x * mx + bx);
+  y = round(vec.y * my + by);
+  ctx.moveTo(x, y);
+  while (vec.hasNext()) {
+    xp = x;
+    yp = y;
+    x = round(vec.x * mx + bx);
+    y = round(vec.y * my + by);
+    if (x != xp || y != yp) {
+      ctx.lineTo(x, y);
+      count++;
+    }
+  }
+  if (count === 0) {
+    // draw a tiny line if all coords round to the same location,
+    // so tiny shapes with strokes will consistently be drawn as dots,
+    ctx.lineTo(x + 0.1, y);
+  }
+}
+
+function roundToPix(x) {
+  return x + 0.5 | 0;
+}
+
+function noRound(x) {
+  return x;
+}
+
+function roundToHalfPix(x) {
+  return (x * 2 | 0) / 2;
+}
+
+function getShapePencil(arcs, ext) {
+  var t = getScaledTransform(ext);
+  var iter = new internal.ShapeIter(arcs);
+  return function(shp, ctx, style) {
+    if (style.fillEffect) {
+      ctx.fillStyle = getCanvasFillEffect(ctx, shp, arcs, ext, style);
+    }
+    // Rounding also drops vertices that land on the same pixel, which keeps
+    // detailed shapes fast to draw, so only a style for a few short paths
+    // should turn it off (see gui-overlay-styler.mjs).
+    var round = style.unroundedCoords ? noRound : roundToPix;
+    for (var i=0, n=shp ? shp.length : 0; i<n; i++) {
+      iter.init(shp[i]);
+      // 0.2 trades visible seams for performance
+      // drawPath(protectIterForDrawing(iter, ext), t, ctx, 0.2);
+      drawPath2(protectIterForDrawing(iter, ext), t, ctx, round);
+    }
+  };
+}
+
+// Returns a function that draws one line feature with its arrowheads and fade,
+// and returns false if the feature has neither to draw (a style of 'none', or
+// no stroke), for the caller to draw it the usual way.
+//
+// Heads are sized by the same factor as the line width, so that a preview
+// matches the exported SVG. Far enough in that paths are clipped to the view
+// (see protectIterForDrawing()), the line is drawn clipped and untrimmed and
+// only the heads are added, since a clipped path's ends are not its ends. The
+// fade is placed by the whole line, so it is unaffected by the clipping.
+//
+// A faded part is stroked on its own, with its own gradient, as in SVG.
+//
+// A hover or selection halo (style.highlight.halo; see getOverlayStyle() in
+// gui-overlay-styler.mjs) is wider than the line by the halo's width. Its
+// heads are made for the line's own width, so that they have the line's
+// heads' size, tip and angle, and are grown by half the halo's width all
+// round, as the line is. The halo is translucent, so the line is clipped out
+// of its heads rather than drawn over them. A highlight that is not a halo is
+// a line of its own width, with heads to match.
+//
+// A tapered line is filled, at any scale: its outline is built from the whole
+// line, whose ends set its widths, and clipped to the view (see
+// fillTaperedParts()).
+function getArrowLinePencil(arcs, ext, lineScale) {
+  var t = getScaledTransform(ext);
+  var iter = new internal.ShapeIter(arcs);
+  var strokeScale = getCanvasStrokeScale(GUI.getPixelRatio(), lineScale);
+  var pixScale = getCanvasStrokeScale(GUI.getPixelRatio(), 1);
+  var clipped = ext.scale() > 100;
+  return function(shp, ctx, style, startPath, draw) {
+    var lineWidth = style.strokeWidth;
+    var grow = 0;
+    var highlightWidth, opts, fadeColors;
+    if (style.highlight) {
+      highlightWidth = getHighlightLineWidth(style, lineScale);
+      if (style.highlight.halo) {
+        lineWidth = style.featureWidth;
+        grow = (highlightWidth - style.featureWidth * lineScale) * pixScale / 2;
+      } else {
+        lineWidth = highlightWidth / lineScale;
+      }
+    }
+    opts = internal.svg.makeLineArrowOpts(style.lineStart, style.lineEnd,
+      style.lineEndSize, lineWidth, strokeScale, style.lineFade, style.lineTaper);
+    fadeColors = opts.fade > 0 ? internal.svg.getLineFadeColors(style.strokeColor) : null;
+    var heads = [];
+    var parts = [];
+    var plain = [];
+    var faded = [];
+    var i, coords, shape, clipHeads;
+    if (opts.start == 'none' && opts.end == 'none' && !fadeColors && !(opts.taper > 0) ||
+        !(lineWidth > 0)) {
+      return false;
+    }
+    for (i=0; i<shp.length; i++) {
+      coords = getPixelCoords(iter, shp[i], t);
+      if (coords.length < 2) continue;
+      shape = internal.svg.getLineArrowShape(coords, opts);
+      heads = heads.concat(shape.heads);
+      parts.push({path: shp[i], shape: shape});
+    }
+    clipHeads = grow > 0 && heads.length > 0;
+    if (clipHeads) {
+      ctx.save();
+      clipOutsideHeads(heads, ctx, grow);
+    }
+    if (opts.taper > 0) {
+      fillTaperedParts(parts.map(function(part) { return part.shape; }), ctx, {
+        color: style.strokeColor,
+        fadeColors: fadeColors,
+        alpha: getStrokeAlpha(style),
+        extraWidth: grow * 2,
+        outline: internal.svg.makeTaperOutlineOpts(style.lineCap, style.lineDash, opts, strokeScale)
+      });
+      if (clipHeads) ctx.restore();
+      drawArrowHeads(heads, ctx, style, opts.width, grow);
+      return true;
+    }
+    startPath(ctx, style);
+    for (i=0; i<parts.length; i++) {
+      if (parts[i].shape.fade && fadeColors) {
+        faded.push(parts[i]);
+      } else if (clipped) {
+        plain.push(parts[i].path);
+      } else {
+        traceCoords(parts[i].shape.coords, ctx);
+      }
+    }
+    if (clipped && plain.length > 0) draw(plain, ctx, style);
+    endPath(ctx, style);
+    for (i=0; i<faded.length; i++) {
+      startPath(ctx, style);
+      ctx.strokeStyle = getLineFadeGradient(ctx, faded[i].shape.fade, fadeColors);
+      if (clipped) {
+        draw([faded[i].path], ctx, style);
+      } else {
+        traceCoords(faded[i].shape.coords, ctx);
+      }
+      endPath(ctx, style);
+    }
+    if (clipHeads) ctx.restore();
+    drawArrowHeads(heads, ctx, style, opts.width, grow);
+    return true;
+  };
+}
+
+// Draws the casing of one line feature with arrowheads, along the line as
+// getLineArrowShape() trims it to meet its heads.
+function getArrowCasingPencil(arcs, ext, lineScale) {
+  var t = getScaledTransform(ext);
+  var iter = new internal.ShapeIter(arcs);
+  var strokeScale = getCanvasStrokeScale(GUI.getPixelRatio(), lineScale);
+  return function(shp, ctx, lineStyle, casingStyle, startPath) {
+    var opts = internal.svg.makeLineArrowOpts(lineStyle.lineStart, lineStyle.lineEnd,
+      lineStyle.lineEndSize, lineStyle.strokeWidth, strokeScale, 0);
+    var coords;
+    startPath(ctx, casingStyle);
+    for (var i=0; i<shp.length; i++) {
+      coords = getPixelCoords(iter, shp[i], t);
+      if (coords.length < 2) continue;
+      traceCoords(internal.svg.getLineArrowShape(coords, opts).coords, ctx);
+    }
+    endPath(ctx, casingStyle);
+  };
+}
+
+// Fills the casing of one tapered line feature: the line's outline, wider by
+// the casing's width on each side
+function getTaperedCasingPencil(arcs, ext, lineScale) {
+  var t = getScaledTransform(ext);
+  var iter = new internal.ShapeIter(arcs);
+  var strokeScale = getCanvasStrokeScale(GUI.getPixelRatio(), lineScale);
+  return function(shp, ctx, lineStyle, casing) {
+    var opts = internal.svg.makeLineArrowOpts(lineStyle.lineStart, lineStyle.lineEnd,
+      lineStyle.lineEndSize, lineStyle.strokeWidth, strokeScale, 0, lineStyle.lineTaper);
+    var shapes = [];
+    var coords;
+    for (var i=0; i<shp.length; i++) {
+      coords = getPixelCoords(iter, shp[i], t);
+      if (coords.length > 1) shapes.push(internal.svg.getLineArrowShape(coords, opts));
+    }
+    fillTaperedParts(shapes, ctx, {
+      color: casing.color,
+      alpha: casing.opacity,
+      extraWidth: casing.width * 2 * strokeScale,
+      // solid, with the caps an untapered casing has (see setCasingStyle())
+      outline: internal.svg.makeTaperOutlineOpts(
+        lineStyle.lineCap || (lineStyle.lineDash ? 'butt' : null), null, opts, 1)
+    });
+  };
+}
+
+// Fills the outlines of the parts of a tapered line (@shapes, from
+// getLineArrowShape()) as svg-line-taper.mjs builds them, wider by
+// o.extraWidth for a halo or a casing, with the caps and dashes of
+// o.outline (see makeTaperOutlineOpts()). The parts are one path, unless they
+// fade: each faded part has a gradient of its own.
+function fillTaperedParts(shapes, ctx, o) {
+  var view = getTaperClipBox(ctx, o.extraWidth);
+  var faded = 0;
+  var i, shape;
+  ctx.globalAlpha = o.alpha;
+  ctx.fillStyle = o.color;
+  ctx.beginPath();
+  for (i=0; i<shapes.length; i++) {
+    shape = shapes[i];
+    if (shape.fade && o.fadeColors) {
+      faded++;
+    } else {
+      traceTaperedShape(shape, ctx, o, view);
+    }
+  }
+  ctx.fill();
+  for (i=0; faded > 0 && i<shapes.length; i++) {
+    shape = shapes[i];
+    if (!shape.fade || !o.fadeColors) continue;
+    ctx.fillStyle = getLineFadeGradient(ctx, shape.fade, o.fadeColors);
+    ctx.beginPath();
+    traceTaperedShape(shape, ctx, o, view);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function traceTaperedShape(shape, ctx, o, view) {
+  var extra = o.extraWidth || 0;
+  var pieces = internal.svg.getTaperedOutline(shape.coords,
+    shape.widths[0] + extra, shape.widths[1] + extra,
+    Object.assign({bbox: view}, o.outline));
+  var piece, p, j;
+  pieces = internal.svg.clipTaperedPieces(pieces, view);
+  for (var i=0; i<pieces.length; i++) {
+    piece = pieces[i];
+    if (piece.from) {
+      p = piece.center;
+      ctx.moveTo(p[0], p[1]);
+      ctx.lineTo(piece.from[0], piece.from[1]);
+      ctx.arc(p[0], p[1], piece.radius,
+        Math.atan2(piece.from[1] - p[1], piece.from[0] - p[0]),
+        Math.atan2(piece.to[1] - p[1], piece.to[0] - p[0]));
+    } else if (piece.center) {
+      ctx.moveTo(piece.center[0] + piece.radius, piece.center[1]);
+      ctx.arc(piece.center[0], piece.center[1], piece.radius, 0, Math.PI * 2);
+    } else {
+      p = piece.points;
+      ctx.moveTo(p[0][0], p[0][1]);
+      for (j=1; j<p.length; j++) ctx.lineTo(p[j][0], p[j][1]);
+    }
+    ctx.closePath();
+  }
+}
+
+// The canvas, with a margin wide enough that the edges a clip cuts are out
+// of sight
+function getTaperClipBox(ctx, extraWidth) {
+  var pad = 50 + (extraWidth || 0);
+  return [-pad, -pad, ctx.canvas.width + pad, ctx.canvas.height + pad];
+}
+
+function getStrokeAlpha(style) {
+  return (style.opacity >= 0 ? style.opacity : 1) *
+    (style.strokeOpacity >= 0 ? style.strokeOpacity : 1);
+}
+
+// Sets @out to the style a line's casing is stroked with: wider than the line
+// by the casing's width on each side, with the line's caps and joins and no
+// dashes. Every property is assigned, since @out is reused from one shape to
+// the next. @casing is from getLineCasing(), and its opacity already includes
+// the line's own.
+export function setCasingStyle(out, lineStyle, casing) {
+  out.strokeColor = casing.color;
+  out.strokeWidth = internal.svg.getCasingStrokeWidth(lineStyle.strokeWidth, casing);
+  out.strokeOpacity = casing.opacity;
+  out.lineCap = lineStyle.lineCap || (lineStyle.lineDash ? 'butt' : 'round');
+  out.lineJoin = lineStyle.lineJoin;
+  out.miterLimit = lineStyle.miterLimit;
+  return out;
+}
+
+function getCasingStyleKey(style) {
+  return style.strokeColor + '~' + style.strokeWidth + '~' + style.lineCap + '~' +
+    (style.lineJoin || '') + '~' + (style.miterLimit || '');
+}
+
+// Limits drawing to outside the heads, grown by @grow. An open head is a
+// stroke, which can't be cut out of a clip path, so the line is drawn over it.
+function clipOutsideHeads(heads, ctx, grow) {
+  var big = 1e7;
+  ctx.beginPath();
+  ctx.rect(-big, -big, 2 * big, 2 * big);
+  heads.forEach(function(head) {
+    if (head.type == 'dot') {
+      ctx.moveTo(head.center[0] + head.radius + grow, head.center[1]);
+      ctx.arc(head.center[0], head.center[1], head.radius + grow, 0, Math.PI * 2);
+    } else if (head.type == 'arrow') {
+      traceGrownTriangle(head.points, grow, ctx);
+    }
+  });
+  ctx.clip('evenodd');
+}
+
+// Traces a triangle grown by @r on every side: its edges pushed out by r and
+// joined by arcs around its corners, as one outline, so that a translucent
+// fill covers it once (a fill and a stroke would overlap along its edges).
+export function traceGrownTriangle(p, r, ctx) {
+  var cross = (p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) -
+    (p[1][1] - p[0][1]) * (p[2][0] - p[0][0]);
+  var s = cross > 0 ? 1 : -1;
+  var angles = [], a, b, i, dx, dy;
+  if (cross === 0) return; // no area: nothing to grow
+  for (i=0; i<3; i++) {
+    a = p[i];
+    b = p[(i + 1) % 3];
+    dx = b[0] - a[0];
+    dy = b[1] - a[1];
+    // direction of the outward normal of the edge from a to b
+    angles.push(Math.atan2(-s * dx, s * dy));
+  }
+  ctx.moveTo(p[0][0] + r * Math.cos(angles[2]), p[0][1] + r * Math.sin(angles[2]));
+  for (i=0; i<3; i++) {
+    // around corner i, from the normal of the edge that ends there to the
+    // normal of the edge that starts there
+    a = p[i];
+    ctx.arc(a[0], a[1], r, angles[(i + 2) % 3], angles[i], s < 0);
+  }
+  ctx.closePath();
+}
+
+function getLineFadeGradient(ctx, axis, colors) {
+  var gradient = ctx.createLinearGradient(axis.from[0], axis.from[1], axis.to[0], axis.to[1]);
+  gradient.addColorStop(0, colors.transparent);
+  gradient.addColorStop(1, colors.solid);
+  return gradient;
+}
+
+function getPixelCoords(iter, path, t) {
+  var coords = [];
+  var x, y, prev;
+  iter.init(path);
+  while (iter.hasNext()) {
+    x = iter.x * t.mx + t.bx;
+    y = iter.y * t.my + t.by;
+    if (prev && prev[0] == x && prev[1] == y) continue;
+    prev = [x, y];
+    coords.push(prev);
+  }
+  return coords;
+}
+
+function traceCoords(coords, ctx) {
+  ctx.moveTo(coords[0][0], coords[0][1]);
+  for (var i=1; i<coords.length; i++) {
+    ctx.lineTo(coords[i][0], coords[i][1]);
+  }
+}
+
+// Solid heads and dots are filled with the line's colour; open ones are stroked with
+// its width, always whole and round-cornered, whatever the line's dashes and
+// caps. @grow (optional) widens each head by that much on every side, for a
+// halo.
+function drawArrowHeads(heads, ctx, style, width, grow) {
+  var alpha = getStrokeAlpha(style);
+  var head, p;
+  grow = grow > 0 ? grow : 0;
+  if (heads.length === 0) return;
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = style.strokeColor;
+  ctx.strokeStyle = style.strokeColor;
+  ctx.lineWidth = width + grow * 2;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.setLineDash([]);
+  for (var i=0; i<heads.length; i++) {
+    head = heads[i];
+    ctx.beginPath();
+    if (head.type == 'dot') {
+      ctx.arc(head.center[0], head.center[1], head.radius + grow, 0, Math.PI * 2);
+      ctx.fill();
+      continue;
+    }
+    if (head.type == 'arrow' && grow > 0) {
+      traceGrownTriangle(head.points, grow, ctx);
+      ctx.fill();
+      continue;
+    }
+    p = head.points;
+    ctx.moveTo(p[0][0], p[0][1]);
+    ctx.lineTo(p[1][0], p[1][1]);
+    ctx.lineTo(p[2][0], p[2][1]);
+    if (head.type == 'arrow') {
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      ctx.stroke();
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function protectIterForDrawing(iter, ext) {
+  var bounds, k;
+  if (ext.scale() > 100) {
+    // clip to rectangle when zoomed far in (canvas stops drawing shapes when
+    // the coordinates become too large)
+    // scale the bbox to avoid large fp errors
+    // (affects projected datasets when zoomed very far in)
+    // k too large, long segments won't render; too small, segments will jump around
+    // TODO: consider converting to pixels before clipping
+    k = Math.pow(ext.scale(), 0.45);
+    bounds = ext.getBounds(k);
+    iter = new internal.PointIter(internal.clipIterByBounds(iter, bounds));
+  }
+  return iter;
+}
+
+// Same multiplier as ctx.lineWidth. Retina canvases are pixRatio times the
+// CSS pixel; preview mode multiplies styled strokes by the symbol scale.
+export function getCanvasStrokeScale(pixRatio, lineScale) {
+  return (pixRatio > 1 ? pixRatio : 1) * (lineScale || 1);
+}
+
+// Scale a stroke-dasharray into canvas pixels. Scale 1 returns the authored
+// tokens, so a 100% preview and a non-preview view keep the pattern as stored.
+export function scaleCanvasLineDash(lineDash, scale) {
+  var parts = String(lineDash).split(' ');
+  var out, i;
+  if (!(scale > 0) || scale === 1) return parts;
+  out = new Array(parts.length);
+  for (i = 0; i < parts.length; i++) {
+    out[i] = +parts[i] * scale;
+  }
+  return out;
+}
+
+// Where a fill pattern's origin sits, in canvas pixels. In preview that is
+// the top-left of the page; otherwise the geographic origin, so a pan (which
+// only changes the translation) carries the pattern with the shapes.
+function getPatternAnchor(ext) {
+  var t = ext.getTransform(GUI.getPixelRatio());
+  var frame = ext.getFrameData();
+  if (frame && frame.bbox) {
+    return {
+      x: frame.bbox[0] * t.mx + t.bx,
+      y: frame.bbox[3] * t.my + t.by
+    };
+  }
+  return {x: t.bx, y: t.by};
+}
+
+function getPathStart(ext, lineScale) {
+  var pixRatio = GUI.getPixelRatio();
+  if (!lineScale) lineScale = 1;
+  // Same factor as lineWidth, so dash length and gap stay in proportion to
+  // the stroke. In preview that factor includes the symbol scale; without it
+  // the pattern stays a fixed screen size while the line grows.
+  var strokeScale = getCanvasStrokeScale(pixRatio, lineScale);
+  // The symbol scale itself, not lineScale, which an outline layer does not
+  // follow in preview
+  var patternScale = ext.getSymbolScale() || 1;
+  var pixScale = getCanvasStrokeScale(pixRatio, 1);
+  // Page corner in preview, so the pattern is fixed to the page the way the
+  // exported SVG is. With no frame, the geographic origin, which is enough
+  // for panning: the pattern is not scaled by the geographic zoom then.
+  var patternAnchor = getPatternAnchor(ext);
+  return function(ctx, style) {
+    ctx.beginPath();
+    if (style.strokeWidth > 0) {
+      ctx.lineCap = style.lineCap || 'round';
+      ctx.lineJoin = style.lineJoin || 'round';
+      ctx.lineWidth = style.highlight ?
+        getHighlightLineWidth(style, lineScale) * pixScale :
+        style.strokeWidth * strokeScale;
+      ctx.strokeStyle = style.strokeColor;
+      if (style.lineDash){
+        ctx.lineCap = style.lineCap || 'butt';
+        ctx.setLineDash(scaleCanvasLineDash(style.lineDash, strokeScale));
+      }
+      if (style.miterLimit) {
+        ctx.miterLimit = style.miterLimit;
+      }
+    }
+
+    if (style.fillPattern) {
+      ctx.fillStyle = getCanvasFillPattern(style, patternScale, patternAnchor);
+    } else if (style.fillColor) {
+      ctx.fillStyle = style.fillColor;
+    }
+  };
+}
+
+function endPath(ctx, style) {
+  var fo = style.opacity >= 0 ? style.opacity : 1,
+      so = fo;
+  if (style.strokeOpacity >= 0) so *= style.strokeOpacity;
+  if (style.fillColor || style.fillPattern || style.fillEffect) {
+    if (style.fillOpacity >= 0) {
+      fo *= style.fillOpacity;
+    } else if (style.fillEffect && style.opacity >= 0 === false) {
+      fo = 0.35; // kludge: default opacity of sphere effect
+    }
+    ctx.globalAlpha = fo;
+    ctx.fill();
+  }
+  if (style.strokeWidth > 0) {
+    ctx.globalAlpha = so;
+    ctx.stroke();
+    if (style.lineDash) {
+      ctx.lineCap = 'round';
+      ctx.setLineDash([]);
+    }
+  }
+  ctx.globalAlpha = 1;
+  ctx.closePath();
+}

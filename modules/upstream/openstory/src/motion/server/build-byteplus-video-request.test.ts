@@ -1,0 +1,355 @@
+import { describe, expect, it } from 'vitest';
+import { buildLocationReferenceImages } from '@/cast/location-prompt';
+import { buildBytePlusVideoRequest } from './build-byteplus-video-request';
+
+const base = {
+  imageUrl: 'https://cdn.example.com/still.png',
+  prompt: 'SCARLETT lifts the CORAL_LIPSTICK to the light',
+  aspectRatio: '16:9' as const,
+  duration: 5,
+  heldSeedanceEditSeconds: null,
+};
+
+const references = [
+  {
+    referenceImageUrl: 'https://cdn.example.com/scarlett.png',
+    description: 'Scarlett, red hair',
+    token: 'SCARLETT',
+    role: 'character' as const,
+  },
+];
+
+describe('buildBytePlusVideoRequest', () => {
+  it('uses the Ark model id, not the fal endpoint', () => {
+    const request = buildBytePlusVideoRequest(base, 'seedance_v2_5');
+    expect(request.modelId).toBe('dreamina-seedance-2-5-260628');
+  });
+
+  it('uses adaptive size so first-frame jobs follow the still', () => {
+    expect(buildBytePlusVideoRequest(base, 'seedance_v2_5').size).toBe(
+      'adaptive_720p'
+    );
+    expect(
+      buildBytePlusVideoRequest(
+        { ...base, aspectRatio: '9:16' },
+        'seedance_v2_5'
+      ).size
+    ).toBe('adaptive_720p');
+  });
+
+  // A still demoted into the reference list is no frame role, so `adaptive`
+  // would let Ark size the clip from the first reference — a 3:4 character
+  // sheet rendered a 3:4 clip into a 9:16 sequence (#1809).
+  it('states the sequence ratio when the still is demoted to a reference (#1809)', () => {
+    const portrait = buildBytePlusVideoRequest(
+      {
+        ...base,
+        aspectRatio: '9:16',
+        resolution: '1080p',
+        referenceImages: references,
+      },
+      'seedance_v2_5'
+    );
+    expect(portrait.size).toBe('9:16_1080p');
+    expect(
+      portrait.prompt
+        .filter((part) => part.type === 'image')
+        .map((part) => part.metadata?.role)
+    ).toEqual(['reference', 'reference']);
+    expect(
+      buildBytePlusVideoRequest(
+        { ...base, resolution: '1080p', referenceImages: references },
+        'seedance_v2_5'
+      ).size
+    ).toBe('16:9_1080p');
+  });
+
+  it('pins the still as start_frame when there are no references', () => {
+    const { prompt } = buildBytePlusVideoRequest(base, 'seedance_v2_5');
+    const images = prompt.filter((part) => part.type === 'image');
+    expect(images).toHaveLength(1);
+    expect(images[0]).toMatchObject({
+      source: { value: base.imageUrl },
+      metadata: { role: 'start_frame' },
+    });
+  });
+
+  // Ark rejects a request mixing frame roles with reference roles, so the
+  // still has to become a reference too — never a start_frame alongside them.
+  it('sends every image as a reference role when references are present', () => {
+    const { prompt } = buildBytePlusVideoRequest(
+      { ...base, referenceImages: references },
+      'seedance_v2_5'
+    );
+    const images = prompt.filter((part) => part.type === 'image');
+    expect(images).toHaveLength(2);
+    expect(images.every((p) => p.metadata?.role === 'reference')).toBe(true);
+    expect(images.some((p) => p.metadata?.role === 'start_frame')).toBe(false);
+  });
+
+  it('leads the reference list with the still and declares it in the prompt', () => {
+    const { prompt } = buildBytePlusVideoRequest(
+      { ...base, referenceImages: references },
+      'seedance_v2_5'
+    );
+    const images = prompt.filter((part) => part.type === 'image');
+    expect(images[0]?.source.value).toBe(base.imageUrl);
+    const text = prompt.find((part) => part.type === 'text');
+    expect(text?.content).toContain('@Image1');
+    expect(text?.content).not.toMatch(/(^|[^@])image1\b/);
+  });
+
+  it('binds a reference token to its image position', () => {
+    const { prompt } = buildBytePlusVideoRequest(
+      { ...base, referenceImages: references },
+      'seedance_v2_5'
+    );
+    const text = prompt.find((part) => part.type === 'text');
+    // The still is @Image1, so the first reference is @Image2.
+    expect(text?.content).toContain('@Image2');
+    expect(text?.content).not.toContain('SCARLETT');
+  });
+
+  it('does not append a Reference images legend', () => {
+    const { prompt } = buildBytePlusVideoRequest(
+      {
+        ...base,
+        prompt: 'A slow dolly in',
+        referenceImages: references,
+      },
+      'seedance_v2_5'
+    );
+    const text = prompt.find((part) => part.type === 'text');
+    expect(text?.content).not.toContain('Reference images:');
+  });
+
+  // Left implicit, Ark's own default would apply — and for images that default
+  // is a burnt-in watermark. State it either way.
+  it('always states watermark: false', () => {
+    expect(
+      buildBytePlusVideoRequest(base, 'seedance_v2_5').modelOptions
+    ).toMatchObject({ watermark: false });
+  });
+
+  it('renders a draft at 480p with draft: true, whatever tier was asked (#1756)', () => {
+    const request = buildBytePlusVideoRequest(
+      { ...base, resolution: '1080p', draft: true },
+      'seedance_v2_5'
+    );
+    expect(request.size).toBe('adaptive_480p');
+    expect(request.modelOptions).toMatchObject({ draft: true });
+    expect(
+      buildBytePlusVideoRequest(base, 'seedance_v2_5').modelOptions
+    ).not.toHaveProperty('draft');
+  });
+
+  it('forwards generate_audio only when the caller set it', () => {
+    expect(
+      buildBytePlusVideoRequest(base, 'seedance_v2_5').modelOptions
+    ).not.toHaveProperty('generate_audio');
+    expect(
+      buildBytePlusVideoRequest(
+        { ...base, generateAudio: false },
+        'seedance_v2_5'
+      ).modelOptions
+    ).toMatchObject({ generate_audio: false });
+  });
+
+  it('throws for a model with no BytePlus route rather than falling back silently', () => {
+    expect(() => buildBytePlusVideoRequest(base, 'kling_v3_pro')).toThrow(
+      /No BytePlus model id/
+    );
+  });
+
+  it('sends a long prompt whole — Ark documents no cap for Seedance (#1754)', () => {
+    const { prompt } = buildBytePlusVideoRequest(
+      { ...base, prompt: 'x'.repeat(9000) },
+      'seedance_v2_5'
+    );
+    const text = prompt.find((part) => part.type === 'text');
+    expect(text?.content.length).toBe(9000);
+  });
+});
+
+describe('buildBytePlusVideoRequest — reference-only', () => {
+  const referenceOnlyBase = {
+    prompt: 'A slow dolly toward SCARLETT at the window',
+    aspectRatio: '16:9' as const,
+    duration: 5,
+    referenceOnly: true,
+    heldSeedanceEditSeconds: null,
+  };
+
+  it('states a concrete ratio, since nothing is left for adaptive to follow', () => {
+    expect(
+      buildBytePlusVideoRequest(
+        { ...referenceOnlyBase, referenceImages: references },
+        'seedance_v2_5'
+      ).size
+    ).toBe('16:9_720p');
+    expect(
+      buildBytePlusVideoRequest(
+        {
+          ...referenceOnlyBase,
+          aspectRatio: '9:16',
+          referenceImages: references,
+        },
+        'seedance_v2_5'
+      ).size
+    ).toBe('9:16_720p');
+  });
+
+  it('binds the location by its bible id, like a character by name', () => {
+    const request = buildBytePlusVideoRequest(
+      {
+        ...referenceOnlyBase,
+        prompt: 'SCARLETT waits on metropolitan_sidewalk_corner',
+        referenceImages: [
+          ...buildLocationReferenceImages([
+            {
+              id: 'loc-1',
+              locationId: 'metropolitan_sidewalk_corner',
+              name: 'EXT. METROPOLITAN SIDEWALK CORNER - DAY',
+              referenceImageUrl: 'https://cdn.example.com/corner.png',
+              referenceStatus: 'completed',
+              referenceInputHash: 'hash',
+              selectedReferenceVersionId: null,
+              description: 'A busy corner',
+              consistencyTag: 'metropolitan_sidewalk_corner',
+            },
+          ]),
+          ...references,
+        ],
+      },
+      'seedance_v2_5'
+    );
+    const text = request.prompt.find((part) => part.type === 'text');
+
+    expect(text?.content).toContain('@Image2 waits on @Image1');
+  });
+
+  it('sends every image as a reference role and no start_frame', () => {
+    const request = buildBytePlusVideoRequest(
+      { ...referenceOnlyBase, referenceImages: references },
+      'seedance_v2_5'
+    );
+    const images = request.prompt.filter((part) => part.type === 'image');
+
+    expect(images).toHaveLength(1);
+    expect(images.every((i) => i.metadata?.role === 'reference')).toBe(true);
+    expect(
+      request.prompt.some(
+        (part) =>
+          part.type === 'text' && part.content.includes('starting frame')
+      )
+    ).toBe(false);
+  });
+
+  it('keeps a concrete ratio when a Seedance 2.5 video is only a reference (#2036)', () => {
+    const request = buildBytePlusVideoRequest(
+      {
+        ...referenceOnlyBase,
+        referenceImages: [
+          ...references,
+          {
+            referenceImageUrl: 'https://cdn.example.com/walk.mp4',
+            description: 'a walk',
+            token: 'WALK',
+            role: 'element',
+            kind: 'video',
+            durationSeconds: 8,
+          },
+        ],
+      },
+      'seedance_v2_5'
+    );
+    expect(request.size).toBe('16:9_720p');
+    expect(request.modelOptions.duration).toBeUndefined();
+    expect(request.duration).toBe(5);
+    expect(request.prompt.some((part) => part.type === 'video')).toBe(true);
+  });
+
+  const editRequest = (
+    heldSeedanceEditSeconds: number | null,
+    prompt: string
+  ) =>
+    buildBytePlusVideoRequest(
+      {
+        ...referenceOnlyBase,
+        heldSeedanceEditSeconds,
+        prompt,
+        referenceImages: [
+          {
+            referenceImageUrl: 'https://cdn.example.com/walk.mp4',
+            description: 'a walk',
+            token: 'WALK',
+            role: 'element',
+            kind: 'video',
+            durationSeconds: 8,
+          },
+        ],
+      },
+      'seedance_v2_5'
+    );
+
+  it('sends duration -1 and an adaptive size for an edit the trigger held for (#2036)', () => {
+    const request = editRequest(8, 'Edit the walk so she turns');
+    expect(request.size).toBe('adaptive_720p');
+    expect(request.modelOptions).toMatchObject({ duration: -1 });
+    expect(request.duration).toBe(5);
+  });
+
+  it('never sends an edit the trigger did not hold for (#2036)', () => {
+    // A fixed length on a hold sized for the shot. Ark refuses it unbilled.
+    const request = editRequest(null, 'Edit the walk so she turns');
+    expect(request.size).toBe('16:9_720p');
+    expect(request.modelOptions.duration).toBeUndefined();
+  });
+
+  it('never sends an edit held for a shorter clip than the one attached (#2036)', () => {
+    // A packed clip can carry a longer clip than the shot that was held.
+    const request = editRequest(6, 'Edit the walk so she turns');
+    expect(request.size).toBe('16:9_720p');
+    expect(request.modelOptions.duration).toBeUndefined();
+  });
+
+  it('sends the shot length when a rewrite dropped the word (#2036)', () => {
+    const request = editRequest(8, 'She turns as she walks');
+    expect(request.size).toBe('16:9_720p');
+    expect(request.modelOptions.duration).toBeUndefined();
+  });
+
+  it('keeps a concrete ratio and duration for Seedance 2.0 with a video', () => {
+    const request = buildBytePlusVideoRequest(
+      {
+        ...referenceOnlyBase,
+        referenceImages: [
+          {
+            referenceImageUrl: 'https://cdn.example.com/walk.mp4',
+            description: 'a walk',
+            token: 'WALK',
+            role: 'element',
+            kind: 'video',
+            durationSeconds: 8,
+          },
+        ],
+      },
+      'seedance_v2'
+    );
+    expect(request.size).toBe('16:9_720p');
+    expect(request.modelOptions.duration).toBeUndefined();
+    expect(request.duration).toBe(5);
+  });
+
+  it('sends a text-only request when nothing matched', () => {
+    const request = buildBytePlusVideoRequest(
+      { ...referenceOnlyBase, referenceImages: [] },
+      'seedance_v2_5'
+    );
+
+    expect(request.prompt).toEqual([
+      { type: 'text', content: referenceOnlyBase.prompt },
+    ]);
+    expect(request.size).toBe('16:9_720p');
+  });
+});

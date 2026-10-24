@@ -1,0 +1,6088 @@
+/*
+@import url(http://fonts.googleapis.com/css?family=Source+Sans+Pro:400,600);
+*/
+
+@font-face {
+  font-family: 'SourceSans3';
+  src: url('assets/SourceSans3-VariableFont_wght.ttf') format('truetype');
+  font-display: swap;
+}
+
+@font-face {
+	font-family: 'Iosevka';
+	src: url('assets/iosevka-light.woff2') format('woff2');
+}
+
+:root {
+	--bg-col: #eaf2f4; /* #f8fdff */
+	--xlt-theme-col: #f4f8f9;
+	--accent-col: #ffa; /* yellow logo text */
+	--theme-col: #1385B7; /* blue header / btn col */
+	--dk-theme-col: #196d8e; /* #1A6A96;  btn hover col */
+	--lt-theme-col: #e6f7ff;
+	--colored-text: #10699b;
+	--normal-text: #333;
+	--left-sidebar-width: 420px;
+	--sidebar-panels-separator-position: 50%;
+	--sidebar-resize-col: #f2c65a; /* #d6a51d; */
+}
+
+
+html, body {
+	height: 100%;
+	width: 100%;
+	margin: 0;
+	padding: 0;
+}
+
+body {
+	overflow: hidden;
+	background-color: var(--bg-col);
+	font: 13px/1.4 'SourceSans3', Arial, sans-serif;
+	font-weight: 400;
+	color: #444;
+	user-select: none;
+	-webkit-user-select: none;
+	-moz-user-select: none;
+	cursor: default;
+}
+
+body.map-view {
+	background-color: #fff;
+}
+
+
+.fade-out {
+  animation: fadeOut ease forwards 0.6s;
+}
+
+@keyframes fadeOut {
+  0% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+
+.selectable,.selectable * {
+	user-select: text;
+	cursor: text;
+}
+
+
+/* --- Themed elements -------------- */
+
+.page-header,
+.dialog-btn,
+.sidebar-btn {
+	background-color: var(--theme-col);
+}
+
+.colored-text,
+.save-menu-link,
+.context-menu-item,
+.save-menu-btn,
+.add-field-btn,
+.nav-menu-item,
+.edit-data-btn {
+	color: var(--colored-text);
+}
+
+.dot-underline {
+	border-color: var(--colored-text);
+}
+
+.dot-underline {
+	border-bottom: 1px dotted;
+}
+
+.dot-underline-black {
+	border-bottom: 1px dotted black;
+}
+
+/*.nav-btn * {
+	fill: var(--theme-col);
+}*/
+
+.nav-btn * {
+	fill: var(--theme-col);
+}
+
+.alert-btn + .alert-btn {
+	margin-left: 4px;
+}
+
+.dialog-btn {
+	display: inline-block;
+	margin-bottom: 1px;
+	margin-top: 3px;
+	font-size: 13px;
+	color: white;
+	font-weight: 500;
+	min-width: 28px;
+}
+
+.dialog-btn:hover:not(.disabled),
+.sidebar-btn:hover,
+.btn.header-btn:hover,
+.btn.active-layer-label:hover,
+.dialog-btn.default-btn,
+.dialog-btn.selected-btn {
+	background-color: var(--dk-theme-col);
+}
+
+.dialog-btn.disabled {
+	opacity:  0.5;
+}
+
+.colored-text::selection {
+	background-color: var(--lt-theme-col);
+}
+
+.colored-text::-moz-selection {
+	background-color: var(--lt-theme-col);
+}
+
+.layer-item.active {
+	background-color: var(--lt-theme-col);
+}
+
+/* --- Page header --------------- */
+
+.page-header {
+	position: absolute;
+	color: white;
+	top: 0;
+	left: 0;
+	z-index: 40;
+	width: 100%;
+	height: 30px;
+}
+
+.mapshaper-logo {
+	font-weight: 600;
+	font-size: 17px;
+	margin: 3px 0 0 11px;
+}
+
+.mapshaper-logo .logo-highlight {
+	color: var(--accent-col);
+}
+
+.page-header a {
+	text-decoration: none;
+}
+
+#mode-buttons.page-header-buttons {
+	display: none;
+
+}
+
+/* When the page is preloaded with data (CLI files, ?files= or ?catalog= URL
+   params), suppress the splash header links so they don't flash into view
+   for ~a second before the editor mounts and hides them. */
+.mapshaper-preload #splash-buttons {
+	display: none;
+}
+
+/* On narrow screens, splash links collide with the logo; keep the header clean
+   until data is loaded and the editor controls take over. */
+@media (max-width: 500px) {
+	#splash-buttons {
+		display: none;
+	}
+}
+
+.page-header-buttons {
+	z-index: 20;
+	position: absolute;
+	top: 0px;
+	right: 0px;
+	margin: 0 2px 3px 0;
+}
+
+.btn.header-btn,
+.btn.active-layer-label {
+	color: #fff;
+	border: none;
+	margin-top: 0px;
+	height: 29px;
+	box-sizing: border-box;
+	border-radius: 1px;
+	line-height: 1;
+	font-size: 13px;
+	font-weight: 500;
+	padding: 9px 8px 0px 8px;
+}
+
+.page-header .header-btn.disabled,
+.page-header .header-btn.disabled:hover {
+	background-color: transparent;
+	opacity: 0.5;
+}
+
+.page-header .btn.header-btn.active,
+.btn.toggle-btn.active {
+	background-color: black;
+}
+
+#sponsor-btn {
+	color: var(--accent-col);
+}
+
+#sponsor-btn svg {
+	width: 12px;
+	height: 12px;
+	fill: currentColor;
+	vertical-align: -1px;
+}
+
+/* --- Hamburger menu (post-edit overflow links) --- */
+
+#header-menu-btn {
+	cursor: pointer;
+	user-select: none;
+	/* All header buttons are 29px tall, so top-align the hamburger to keep its
+	   row baseline-neutral. Without this, the SVG-only button (no text) makes
+	   its inline-block baseline = bottom edge, which drags the surrounding
+	   text-containing buttons down to match. */
+	vertical-align: top;
+}
+
+#header-menu-btn svg {
+	display: block;
+	width: 14px;
+	height: 13px;
+	fill: currentColor;
+}
+
+#header-menu-dropdown {
+	position: absolute;
+	top: 30px;
+	right: 0;
+	min-width: 180px;
+	background-color: #fff;
+	color: var(--normal-text);
+	border: 1px solid #ccc;
+	border-radius: 3px;
+	box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+	padding: 4px 0;
+	z-index: 50;
+}
+
+.history-menu-dropdown {
+	pointer-events: none;
+}
+
+.header-menu-item {
+	display: block;
+	padding: 4px 14px;
+	color: var(--normal-text);
+	font-size: 14px;
+	line-height: 1.3;
+	text-decoration: none;
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.header-menu-item:hover,
+.header-menu-item:focus {
+	background-color: var(--lt-theme-col);
+	color: #1A6A96;
+	outline: none;
+}
+
+.header-menu-item.disabled {
+	color: #999;
+	pointer-events: none;
+}
+
+.history-menu-dropdown .info-box {
+	pointer-events: initial;
+	min-width: 185px;
+}
+
+.history-menu-item {
+	color: var(--normal-text);
+	cursor: pointer;
+	padding-top: 2px;
+	white-space: nowrap;
+}
+
+.history-menu-item:hover,
+.history-menu-item:focus {
+	color: #1A6A96;
+	outline: none;
+}
+
+.history-menu-item.disabled {
+	color: #999;
+	cursor: default;
+	opacity: 0.55;
+	pointer-events: none;
+}
+
+.history-menu-note {
+	color: #777;
+	font-size: 12px;
+	line-height: 1.25;
+	max-width: 215px;
+	padding: 0 0 5px 0;
+	white-space: normal;
+}
+
+
+.history-snapshot-list .save-menu-item {
+	right: auto;
+	text-align: left;
+	padding-left: 0;
+	padding-right: 0;
+}
+
+.header-menu-item.header-menu-sponsor svg {
+	width: 12px;
+	height: 12px;
+	fill: #d63384;
+	vertical-align: -1px;
+	margin-right: 6px;
+}
+
+.separator {
+	border-left: 1px solid white;
+	height: 10px;
+	margin: 0 2px 0 2px;
+	display: none;
+}
+
+/* --- Selection tool dialog --------- */
+
+.selection-tool-options {
+	pointer-events: none;
+}
+
+.selection-tool-options .info-box {
+	pointer-events: initial;
+	text-align: center;
+}
+
+/* --- Box tool dialog --------- */
+.box-tool-options {
+	pointer-events: none;
+}
+
+.box-tool-options .btn,
+.selection-tool-options .btn {
+	pointer-events: initial;
+}
+
+.box-coords {
+	margin-top: -23px;
+	pointer-events: initial;
+	position: absolute;
+	z-index: -1;
+	padding: 1px 25px;
+	right: 55px;
+}
+
+/* --- Export dialog --------- */
+
+.export-options .dialog-btn {
+	min-width: 20px;
+}
+
+.export-options table {
+	margin: 0;
+	border-collapse: collapse;
+	border-spacing: 0;
+	width: 100%;
+}
+
+.export-layer-list {
+	max-height: 260px;
+	overflow: hidden;
+	overflow-y: auto;
+	margin-right: -3px;
+}
+
+.export-layer-list > div {
+	white-space: nowrap;
+}
+
+.info-box .export-layer-list input[type="checkbox"] {
+	margin-right: 8px;
+}
+
+.export-group-label {
+	color: #777;
+}
+
+.export-frame-row {
+	white-space: nowrap;
+}
+
+.export-frame-toggle {
+	display: inline-block;
+	margin-left: 8px;
+	cursor: pointer;
+	color: #777;
+}
+
+.export-frame-toggle::after {
+	content: "\25BE";
+	display: inline-block;
+	font-size: 1.1em;
+	margin-left: 4px;
+}
+
+.export-frame-group.closed .export-frame-toggle::after {
+	content: "\25B8";
+}
+
+.export-frame-count {
+	color: #777;
+}
+
+.export-layers.all-content-included .export-layer-list {
+	color: #999;
+}
+
+.export-layers.all-content-included .export-frame-count {
+	color: #aaa;
+}
+
+.export-layers.all-content-included .layer-name {
+	border-bottom-color: transparent;
+	pointer-events: none;
+}
+
+.export-frame-members {
+	padding-left: 18px;
+}
+
+.export-frame-group.closed .export-frame-members {
+	display: none;
+}
+
+.gpkg-layer-list .gpkg-layer-item {
+	display: block;
+	white-space: nowrap;
+}
+
+.gpkg-layer-list {
+	max-height: 200px;
+	overflow: hidden;
+	overflow-y: auto;
+	margin-right: -3px;
+}
+
+/* --- Main area ------------- */
+
+.main-area {
+	position: absolute;
+	top: 0;
+	right: 0;
+	bottom: 0;
+	left: 0;
+	margin: 29px 0 0 0;
+}
+
+
+/* --- Error message ---------- */
+
+.alert-wrapper {
+	z-index: 120;
+	text-align: center;
+	position: absolute;
+	top: 0;
+	right: 0;
+	bottom: 0;
+	left: 0;
+}
+
+.alert-wrapper.non-blocking {
+	pointer-events: none;
+}
+
+.non-blocking > div {
+	pointer-events: auto;
+}
+
+.alert-wrapper p.alert-message {
+	margin: 1px 0 0 0;
+}
+
+.alert-title {
+	line-height: 1.1;
+	font-weight: 600;
+	margin-bottom: 7px;
+}
+
+div.alert-title, div.alert-message {
+	font-size: 16px;
+}
+
+.alert-wrapper .alert-btn {
+	margin-top: 8px;
+}
+
+div.alert-box {
+	margin-top: 36px; /* 55px; */
+	overflow: auto;
+	max-height: 70%;
+	max-width: 400px;
+}
+
+
+
+/* --- Splash screen -------------- */
+
+.import-instructions {
+	margin: 8px 0 0 0;
+	font-size: 15px;
+}
+
+.mini-drop-area {
+	border: 1.5px dashed #999;
+	max-width: 260px;
+	border-radius: 9px;
+	line-height: 1.45;
+	padding: 9px 11px 6px 11px;
+	margin: 9px -1px 3px -1px;
+	min-height: 130px;
+	background: var(--xlt-theme-col);
+}
+
+.catalog-mode .file-catalog {
+	height: 32%;
+}
+
+
+/*#file-selection-btn.inline-btn {
+	padding: 2px 4px 3px 3px;
+}*/
+
+/* --- File catalog --------------- */
+
+.catalog-mode .file-catalog,
+.catalog-mode .file-catalog-spacer {
+	display: block;
+}
+
+.catalog-area {
+	overflow: hidden;
+	border: 1.5px solid #aaa;
+	border-radius: 19px;
+	background-color: var(--bg-col);
+}
+
+.file-catalog table {
+	margin: 0;
+	border-collapse: collapse;
+	height: 100%;
+	width: 100%;
+}
+
+.file-catalog th {
+	vertical-align: top;
+	height: 40px;
+}
+
+.file-catalog,
+.file-catalog-spacer {
+	display: none;
+}
+
+.file-catalog td {
+	margin: 0;
+	cursor: pointer;
+	vertical-align: top;
+}
+
+.file-catalog td:hover {
+	background-color: #e2e2e2;
+}
+
+.file-catalog.downloading td.downloading {
+	background-color: #d5d5d5;
+	background-size: 0% 100%;
+	background-repeat: no-repeat;
+	background-position: top left;
+	background-image: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAMAAABFaP0WAAAAGXRFWHRTb2Z0d2FyZQBBZG9iZSBJbWFnZVJlYWR5ccllPAAAAAZQTFRFt7e3AAAAgOo4JQAAAA5JREFUeNpiYAABgAADAAAGAAHgQhFOAAAAAElFTkSuQmCC);
+}
+
+/* --- Import screen -------------- */
+
+.option-menu .text-input {
+	width: 230px;
+	background: rgba(255, 255, 255, 0.4);
+	border: 1px solid #999;
+	padding: 0 3px;
+	height: 18px;
+	font-size: 13px;
+	margin: 0 0 5px 0;
+}
+
+input[type=text]:focus,
+input[type=number]:focus,
+textarea:focus {
+	outline: none;
+	border-color: #d3aa00;
+	box-shadow: 0 0 0 2px rgba(212, 168, 0, 0.4);
+}
+
+/* The interface is pointer-only. No custom control carries a tabindex, because
+   partial keyboard support was worse than none: tabbing reached a few buttons
+   and skipped most, and the menus a tab stop could open could not then be
+   navigated or dismissed from the keyboard.
+
+   This is the backstop for what is still focusable of necessity -- a span made
+   contenteditable for renaming, an element focused by script -- so that a UA
+   focus ring cannot appear over the interface. Text fields are excluded: they
+   have to show where the caret is, and the rule above is how they show it. */
+:focus:not(input):not(textarea):not(select) {
+	outline: none;
+}
+
+::placeholder {
+	color: #aaa;
+	opacity: 1;
+}
+
+
+#mshp-not-supported {
+	display: none;
+	z-index: 100;
+	text-align: center;
+}
+
+.dropped-file-list {
+	margin-bottom: 4px;
+	max-height: 300px;
+	overflow-y: auto;
+}
+
+.dropped-file-list img.close-btn {
+	position: absolute;
+	cursor: pointer;
+	width: 14px;
+	height: 14px;
+	padding: 0;
+	top: 3px;
+	right: 0px;
+}
+
+.dropped-file-list > div {
+	position: relative;
+}
+
+.dropped-file-list span {
+	margin-right: 16px;
+}
+
+#import-options .queued-file-section {
+	display: none;
+}
+
+.queued-files #import-options .queued-file-section {
+	margin-top: 10px;
+	display: block;
+}
+
+.queued-files #import-options .import-instructions {
+	display: none;
+}
+
+
+#import-options .dropped-file-list p {
+	line-height: 1;
+	margin-bottom: 5px;
+	font-size: 14px;
+	font-weight: 600;
+}
+
+.popup-dialog {
+	display: none;
+	z-index: 80;	
+	text-align: center;
+}
+
+.popup-dialog.popup-align-left {
+	text-align: left;
+	padding-left: 12px;
+}
+
+.contextmenu,
+.draw-menu {
+	position: absolute;
+	border-radius: 6px;
+	border: 1px solid #d5d5d5;
+	box-shadow: 0 1px 7px rgba(0,0,0,0.18);
+	background-color: #fff;
+	font-size: 13px;
+	/* z-index: 40; */
+	z-index: 200;
+	padding: 4px 0;
+}
+
+.contextmenu-item {
+	padding: 6px;
+}
+
+.info-box,.popup {
+	border-radius: 11px;
+	border: 1px solid #d5d5d5;
+	box-shadow: 0 1px 7px rgba(0,0,0,0.18);
+	background-color: #fff;
+}
+
+.info-box {
+	min-width: 230px;
+	word-wrap: break-word;
+	text-align: left;
+	margin-top: 9px;
+	/* padding: 14px 16px 13px 18px; */
+	padding: 12px 14px 12px 16px;
+	vertical-align: top;
+	display: inline-block;
+	/* border: 1px solid #aaa; */
+}
+
+.info-box label {
+	cursor: pointer;
+}
+
+.sidebar-buttons {
+	display: none;
+	position: absolute;
+	background-color: white;
+	padding: 1px 3px;
+	top: 207px;
+	right: 0;
+	z-index: 19;
+}
+
+.btn.sidebar-btn {
+	display: block;
+	margin-bottom: 2px;
+	margin-top: 2px;
+	font-size: 13px;
+	color: white;
+	min-width: 28px;
+}
+
+.btn.sidebar-btn.hidden {
+	display: none;
+}
+
+.info-box h3 {
+	font-size: 17px;
+	line-height: 1.1;
+	padding: 0;
+	margin: 0 0 0.4em 0;
+	font-weight: 500;
+}
+
+.info-box h3.list-header {
+	margin-bottom: 0.1em;
+}
+
+.info-box h4 {
+	font-size: 15.5px;
+	font-weight: 400;
+	margin: 5px 0 2px 0;
+}
+
+.info-box p {
+	white-space: pre-line;
+	margin: 0 0 6px 0;
+	line-height: 1.25;
+	/* font-size: 90%; */
+}
+
+
+
+/*.option-menu input[type="radio"],
+.option-menu input[type="checkbox"]  */
+input[type="radio"],
+input[type="checkbox"] 
+{
+	position: relative;
+	top: 1px;
+	width: 12px;
+	height: 12px;
+	cursor: pointer;
+}
+
+.info-box .tip-button {
+	margin: 3px 2px 0 10px;
+
+}
+
+.info-box input[type="checkbox"] {
+	margin: 3px 5px 0 1px;
+}
+
+.info-box input.radio {
+	margin: 0 5px 0 0;
+}
+
+/* --- Progress bar --------------- */
+
+.progress-message {
+	position: absolute;
+	width: 100%;
+	z-index: 90;
+	text-align: center;
+	top: 52px;
+}
+
+.progress-message > div {
+	display: inline-block;
+	text-transform: uppercase;
+	padding: 3px 6px;
+	font-size: 15px;
+	color: black;
+	background-color: rgba(255, 255, 222, 0.85);
+	border: 1px solid var(--normal-text);
+}
+
+/* === Editing interface ========== */
+
+#mshp-main-page {
+	position: relative;
+	height: 100%;
+	width: 100%;
+}
+
+
+/* --- Sidebar panels ------------ */
+
+.sidebar-panels {
+	right: auto;
+	width: var(--left-sidebar-width);
+	max-width: 100%;
+	box-sizing: border-box;
+	border-right: 1px solid #c6c6c6; /*#cfd8dc;*/
+	/* box-shadow: 2px 0 8px rgba(0,0,0,0.12); */
+	z-index: 30;
+	pointer-events: none;
+	display: none;
+}
+
+.sidebar-panel {
+	position: relative;
+}
+
+.sidebar-panel:first-child {
+	height: var(--sidebar-panels-separator-position);
+}
+
+.sidebar-panel:last-child {
+	height: calc(100% - var(--sidebar-panels-separator-position));
+}
+
+.sidebar-panels:not(:has(> .sidebar-panel.open ~ .sidebar-panel.open)) > .sidebar-panel.open {
+	height: 100%;
+}
+
+.sidebar-panels:not(:has(> .sidebar-panel.open ~ .sidebar-panel.open)) .sidebar-panels-resize-handle {
+	display: none;
+}
+
+body.sidebar-open .sidebar-panels {
+	display: flex;
+	flex-direction: column;
+}
+
+.console-area {
+	font-size: 12px;
+}
+
+body.sidebar-open .map-area {
+	left: var(--left-sidebar-width);
+}
+
+.sidebar-resize-handle {
+	display: none;
+	position: absolute;
+	top: 29px;
+	bottom: 0;
+	left: calc(var(--left-sidebar-width) - 4px);
+	width: 8px;
+	z-index: 35;
+	cursor: ew-resize;
+	pointer-events: auto;
+}
+
+.sidebar-resize-handle::before {
+	content: "";
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: 3px;
+	width: 2px;
+	background-color: transparent;
+}
+
+body.sidebar-open .sidebar-resize-handle {
+	display: block;
+}
+
+body.sidebar-resizing,
+body.sidebar-resizing * {
+	cursor: ew-resize !important;
+	user-select: none;
+}
+
+body.sidebar-resizing .sidebar-resize-handle::before,
+.sidebar-resize-handle:hover::before {
+	background-color: var(--sidebar-resize-col);
+}
+
+.sidebar-panels-resize-handle {
+	display: block;
+	position: absolute;
+	left: 0;
+	right: 0;
+	top: -4px;
+	height: 8px;
+	z-index: 35;
+	cursor: ns-resize;
+	pointer-events: auto;
+}
+
+.sidebar-panels-resize-handle::before {
+	content: "";
+	position: absolute;
+	left: 0;
+	right: 0;
+	top: 3px;
+	height: 2px;
+	background-color: transparent;
+}
+
+body.sidebar-panels-resizing,
+body.sidebar-panels-resizing * {
+	cursor: ns-resize !important;
+	user-select: none;
+}
+
+body.sidebar-panels-resizing .sidebar-panels-resize-handle::before,
+.sidebar-panels-resize-handle:hover::before {
+	background-color: var(--sidebar-resize-col);
+}
+
+/* Give the console a little more line length on wide screens. */
+@media screen and (max-width: 525px) {
+	body.sidebar-open .map-area {
+		display: none;
+	}
+}
+
+@media screen and (min-width: 1200px) {
+	:root {
+		--left-sidebar-width: 460px;
+	}
+
+	.console-area {
+		font-size: 13px;
+	}
+}
+
+@media screen and (min-width: 1400px) {
+	:root {
+		--left-sidebar-width: 500px;
+	}
+
+	.console-area {
+		font-size: 14px;
+	}
+}
+
+:root {
+	--sidebar-strip-height: 34px;
+}
+
+/* Icon buttons for opening the sidebar, shown on the map while the sidebar is
+   closed. Sized and styled to mirror the .nav-buttons on the right, and like
+   them hidden on the splash screen: body.map-view is set once data is
+   imported or the splash popup is dismissed. */
+.sidebar-tabs {
+	position: absolute;
+	top: 35px; /* 29px header + the 6px offset of .nav-buttons */
+	left: 0;
+	z-index: 40;
+	padding: 3px;
+	background-color: white;
+	border-radius: 7px;
+	pointer-events: auto;
+}
+
+body:not(.map-view) .sidebar-tabs {
+	display: none;
+}
+
+body.sidebar-open .sidebar-tabs {
+	display: none;
+}
+
+body.sidebar-tabs-over-popup .sidebar-tabs {
+	z-index: 90;
+}
+
+/* keep the line intersection readout clear of the buttons */
+body:not(.sidebar-open) .intersection-display {
+	left: 44px;
+}
+
+.sidebar-tab {
+	position: relative;
+	padding: 3px 4px;
+	line-height: 1;
+	cursor: pointer;
+}
+
+.sidebar-icon {
+	display: block;
+}
+
+.sidebar-icon * {
+	fill: var(--theme-col);
+}
+
+.sidebar-tab.layer-tab {
+	padding-bottom: 6px;
+}
+
+.sidebar-tab.console-tab {
+	padding-top: 7px;
+}
+
+.sidebar-tab:hover .sidebar-icon * {
+	fill: #166689;
+}
+
+/* Tooltip to the right of the button, matching the .nav-btn tooltips */
+.sidebar-tab[data-tooltip]:hover::after {
+	content: attr(data-tooltip);
+	position: absolute;
+	top: 50%;
+	left: calc(100% + 3px);
+	transform: translateY(-50%);
+	pointer-events: none;
+	background-color: rgba(255, 255, 255, 0.85);
+	color: var(--colored-text);
+	font-size: 12px;
+	line-height: 12px;
+	padding: 3px 6px 4px 6px;
+	white-space: nowrap;
+}
+
+/* centre on the icon, which the console button's extra top padding lowers */
+.sidebar-tab.console-tab[data-tooltip]:hover::after {
+	top: calc(50% + 2px);
+}
+
+/* Panel toggles at the top of the open sidebar. Each toggles its own panel,
+   so both can be on at once. */
+.sidebar-strip {
+	display: none;
+	position: absolute;
+	top: 29px;
+	left: 0;
+	z-index: 30;
+	width: var(--left-sidebar-width);
+	max-width: 100%;
+	height: var(--sidebar-strip-height);
+	box-sizing: border-box;
+	align-items: flex-start;
+	gap: 6px;
+	padding: 7px 10px 0 10px;
+	background-color: white;
+	border-right: 1px solid #c6c6c6;
+}
+
+body.sidebar-open .sidebar-strip {
+	display: flex;
+}
+
+body.sidebar-open .sidebar-panels {
+	margin-top: calc(29px + var(--sidebar-strip-height));
+}
+
+.sidebar-strip-btn {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	padding: 3px 8px 3px 6px;
+	border: 1px solid #cfdde4;
+	border-radius: 12px;
+	color: var(--theme-col);
+	font-size: 13px;
+	font-weight: 500;
+	line-height: 14px;
+	cursor: pointer;
+	user-select: none;
+}
+
+.sidebar-strip-btn:hover {
+	border-color: var(--theme-col);
+}
+
+.sidebar-strip-btn.active {
+	background-color: var(--theme-col);
+	border-color: var(--theme-col);
+	color: white;
+}
+
+.sidebar-strip-btn.active:hover {
+	background-color: var(--dk-theme-col);
+	border-color: var(--dk-theme-col);
+}
+
+.sidebar-strip-btn.active .sidebar-icon * {
+	fill: white;
+}
+
+/* matches the × of .label-style-close on the tool panels */
+.sidebar-hide-btn {
+	margin-left: auto;
+	padding: 3px 0 0 4px;
+	font-size: 16px;
+	line-height: 1;
+	cursor: pointer;
+	user-select: none;
+	color: black;
+}
+
+
+
+.console-window {
+	pointer-events: auto;
+	background-color: black;
+	position: absolute;
+	text-align: center;
+	overflow: auto;
+	width: 100%;
+	height: 100%;
+}
+
+.console-buffer {
+	cursor: text;
+	width: 100%;
+	position: relative;
+	color: white;
+	font-family: Iosevka, monospace;
+	line-height: 1.35;
+	margin: 8px 0 20px 0;
+	word-break: break-all;
+	word-wrap: break-word;
+	white-space: pre-wrap;
+	 /* Removing this workaround: non-standard behavior fixed in recent Chrome
+	white-space: pre; */
+}
+
+.console-buffer > div {
+	text-align: left;
+	/* max-width: 640px; */
+	margin: 0 auto;
+	padding: 0 10px 0 14px;
+}
+
+.console-error {
+	color: #f93b00;
+}
+
+.console-warn {
+	color: #f5b542;
+}
+
+.console-message {
+	color: #eddd98;
+}
+
+.console-example {
+	color: #b9dffc;
+}
+
+.console-help,
+.console-info {
+	white-space: normal;
+	word-break: normal;
+	overflow-wrap: anywhere;
+}
+
+.console-info {
+	font-size: 13px;
+}
+
+.console-help-line,
+.console-info-title,
+.console-info-subtitle {
+	white-space: pre-wrap;
+}
+
+.console-help-spacer {
+	height: 0.75em;
+}
+
+.console-help-table,
+.console-info-table,
+.console-attribute-table {
+	border-collapse: collapse;
+	margin: 2px 0 8px 0;
+	width: 100%;
+}
+
+.console-help-table td,
+.console-info-table td,
+.console-attribute-table td,
+.console-attribute-table th {
+	padding: 1px 10px 1px 0;
+	vertical-align: top;
+	text-align: left;
+	font-weight: normal;
+}
+
+.console-help-table td:first-child,
+.console-info-table td:first-child,
+.console-attribute-table td:first-child,
+.console-attribute-table th:first-child {
+	white-space: nowrap;
+	width: 1%;
+	color: #b9dffc;
+}
+
+.console-attribute-table tr:first-child {
+	border-bottom: 1px solid rgba(255,255,255,0.35);
+}
+
+.console-info-layer + .console-info-layer {
+	margin-top: 1em;
+}
+
+.console-info-title {
+	color: #fff;
+	border-bottom: 1px solid rgba(255,255,255,0.35);
+	line-height: 1.45; /* space between border and text */
+}
+
+.console-info-subtitle {
+	margin-top: 0.65em;
+}
+
+.layer-info-popup .console-info-title {
+	color: var(--normal-text);
+	border-bottom-color: #ccc;
+}
+
+.layer-info-popup .console-attribute-table tr:first-child {
+	border-bottom-color: #ccc;
+}
+
+.layer-info-popup .console-info-table td:first-child,
+.layer-info-popup .console-attribute-table td:first-child,
+.layer-info-popup .console-attribute-table th:first-child {
+	color: #555;
+}
+
+.input-field {
+	outline: none;
+	min-width: 100px;
+}
+
+/* --- Layer menu ----------- */
+
+.layer-control-btn {
+	top: 0;
+	width: 100%;
+	position: absolute;
+	text-align: center;
+	z-index: 30;
+	display: none;
+	pointer-events: none;
+}
+
+.layer-control-btn.active {
+	display: block;
+}
+
+.active-layer-label {
+	white-space: nowrap;
+	pointer-events: auto;
+	margin-right: 20px;
+}
+
+.active-layer-label:focus,
+.active-layer-label:focus-visible {
+	outline: none;
+}
+
+body.simplify .layer-control-btn {
+	display: none;
+}
+
+@media (max-width: 850px) {
+	.layer-control-btn,
+	.layer-control-btn.active {
+		display: none;
+	}
+}
+
+@media (max-width: 700px) {
+	.info-box {
+		margin-top: 8px;
+	}
+
+	div.nav-buttons {
+		top: 2px;
+	}
+
+	.btn.header-btn {
+		padding-left: 5px;
+		padding-right: 5px;
+	}
+
+	/* the toolbar in the bottom center can reach this far, so the basemap
+	   buttons go up a row */
+	.mshp-main-map .basemap-overlay-buttons {
+		bottom: 58px;
+	}
+}
+
+.layer-control .info-box {
+	padding: 0;
+	pointer-events: none;
+}
+
+.layer-control div.info-box-scrolled {
+	position: relative;
+	z-index: -1;
+	background-color: white;
+	max-height: 500px;
+	overflow: hidden;
+	overflow-y: auto;
+	padding: 2px 14px 10px 14px;
+	pointer-events: auto;
+	border-radius: 9px;
+}
+
+.layer-control .info-box {
+	/* (Chrome fix) raise layer menu above container to catch events */ 
+	position: relative;
+	z-index: 90;
+}
+
+.layer-area {
+	background-color: #fff;
+}
+
+.layer-area .info-box {
+	position: static;
+	z-index: auto;
+	display: block;
+	box-sizing: border-box;
+	width: 100%;
+	height: 100%;
+	min-width: 0;
+	margin: 0;
+	border: 0;
+	border-radius: 0;
+	box-shadow: none;
+}
+
+.layer-area div.info-box-scrolled {
+	z-index: auto;
+	box-sizing: border-box;
+	width: 100%;
+	height: 100%;
+	max-height: none;
+	border-radius: 0;
+}
+
+.layer-control .no-layer-note {
+	color: #777;
+	margin: 0 0 5px 0;
+	font-size: 13px;
+}
+
+/* "Add files", "Add labels" and "Draw" are separate groups, and a narrow
+   sidebar wraps between them, never inside one. The dot
+   between them is each group's ::before, hung to the group's left: a group that
+   starts a line has its dot pushed past the left edge of the row and clipped,
+   so no line ends or begins with a stray dot. */
+.layer-add-links {
+	margin: 0 0 12px 0;
+	font-size: 13px;
+	line-height: 1.2;
+	overflow: hidden;
+}
+
+.layer-add-links-inner {
+	display: flex;
+	flex-wrap: wrap;
+	margin-left: -1.6em;
+}
+
+/* The padding holds the dot, so that a group long enough to wrap starts its
+   later lines at the row's edge rather than under the clipped dot. */
+.layer-add-links-group {
+	padding-left: 1.6em;
+}
+
+.layer-add-links-group::before {
+	content: "·";
+	display: inline-block;
+	width: 1.6em;
+	margin-left: -1.6em;
+	text-align: center;
+	color: #777;
+	font-weight: bold;
+}
+
+.layer-add-links-group:first-child {
+	white-space: nowrap;
+}
+
+.layer-menu-link {
+	color: var(--colored-text);
+	cursor: pointer;
+}
+
+.layer-menu-link:hover {
+	text-decoration: underline;
+}
+
+.draw-menu-arrow {
+	display: inline-block;
+	margin-left: 4px;
+	vertical-align: 1px;
+	border-left: 3.5px solid transparent;
+	border-right: 3.5px solid transparent;
+	border-top: 4px solid currentColor;
+}
+
+.draw-menu-btn.open {
+	text-decoration: underline;
+}
+
+/* "+ New frame", below the frame sections and a rule like theirs: a new frame
+   is added at the end of the list */
+.map-frame-add-group {
+	border-top: 1px solid #ddd;
+	margin: 8px 0 6px 0;
+	padding-top: 7px;
+	line-height: 1.2;
+	font-size: 13px;
+}
+
+.layer-add-links .layer-menu-link {
+	font-size: 12px;
+}
+
+.draw-menu-item {
+	font-size: 12px;
+}
+
+.layer-menu .layer-list {
+	margin-top: -2px;
+}
+
+.layer-menu .layer-item {
+	position: relative;
+	margin-left: -14px;
+	margin-right: 6px;
+	padding: 0 14px;
+	width: 100%;
+}
+
+.layer-menu .layer-list .layer-item,
+.layer-menu .frame-members .layer-item {
+	cursor: pointer;
+	padding: 3px 14px;
+}
+
+/* The Layers section, then one section per frame, each below a rule */
+.layer-section {
+	position: relative;
+}
+
+.frame-section {
+	border-top: 1px solid #ddd;
+	margin-top: 8px;
+	padding-top: 7px;
+}
+
+/* A bar down the left edge of the section whose layers are on the map, from
+   its heading to its last layer, at the left edge of the rows */
+.several-sections .layer-section.active-section::before {
+	content: "";
+	position: absolute;
+	left: -14px;
+	top: 0;
+	bottom: 0;
+	width: 4px;
+	background-color: var(--theme-col);
+	z-index: 1; /* over the active row's background */
+}
+
+.several-sections .frame-section.active-section::before {
+	top: 7px;
+}
+
+.layer-section.closed > .layer-list,
+.layer-section.closed > .frame-members,
+.layer-section.closed > .unframed-empty-note {
+	display: none;
+}
+
+.unframed-empty-note {
+	color: #777;
+	font-size: 13px;
+	padding: 2px 0 6px;
+}
+
+/* The Layers heading and each frame heading share the same type and height.
+   The bottom padding also keeps the first row in a frame on the same vertical
+   rhythm as the rows that follow it. */
+.layer-menu .layer-section-heading {
+	padding-bottom: 3px;
+}
+
+.layer-menu .layer-section.closed > .layer-section-heading {
+	padding-bottom: 0;
+}
+
+.layer-menu .layer-section-heading h3 {
+	display: inline;
+	font-size: 14px;
+	line-height: 17px;
+	margin: 0;
+}
+
+/* A frame's size and menu sit on the same line as its name */
+.layer-menu .frame-item {
+	cursor: pointer;
+}
+
+.layer-menu .frame-item .layer-row {
+	align-items: baseline;
+	line-height: 17px;
+}
+
+.layer-menu .frame-item .layer-btn {
+	top: 0;
+}
+
+.frame-members .layer-item:hover:not(.active):not(.dragging) {
+	background-color: #f7f7f7;
+}
+
+/* The chevron of the style panels' sections, pointing right when closed and
+   down when open */
+.layer-menu .section-arrow {
+	position: relative;
+	display: inline-block;
+	box-sizing: border-box;
+	width: 6px;
+	height: 6px;
+	margin-left: 1px;
+	margin-right: 9px;
+	vertical-align: middle;
+	border-right: 1.5px solid #222;
+	border-bottom: 1.5px solid #222;
+	transform: translateY(-3px) rotate(45deg);
+	transition: transform 0.12s;
+	cursor: pointer;
+}
+
+/* a wider target than the chevron itself */
+.layer-menu .section-arrow::before {
+	content: "";
+	position: absolute;
+	inset: -6px;
+}
+
+.layer-section.closed .section-arrow {
+	transform: translate(-1px, -2px) rotate(-45deg);
+}
+
+/* The whole heading switches to its section, as a frame's heading does */
+.layer-menu .unframed-section > .layer-section-heading {
+	cursor: pointer;
+}
+
+/* Only the section on the map has working eye icons; the others show which
+   layers are visible in pale grey */
+.inactive-section img.eye-btn {
+	opacity: 0 !important;
+	cursor: default;
+}
+
+.inactive-section .pinnable.pinned img.black-eye {
+	opacity: 0.15 !important;
+}
+
+.pin-all img,
+.layer-item img
+{
+	width: 15px;
+	height: 15px;
+	padding: 2px 2px 3px 2px;
+	right: 6px;
+}
+
+.layer-item .layer-btn {
+	position: absolute;
+	top: 3px;
+}
+
+
+.layer-item .more-btn {
+	position: absolute;
+	right: 28px;
+	width: 18px;
+	height: 18px;
+	opacity: 1;
+	cursor: pointer;
+	border-radius: 3px;
+}
+
+
+img.close-btn {
+	opacity: 0.2;
+}
+
+.close2-btn {
+	display: inline-block;
+	background-color: #e5e5e5;
+	background-image: url("images/close2.png");
+	background-size: cover;
+	float: right;
+	height:  18px;
+	width:  18px;
+	margin-right: -3px;
+	cursor: pointer;
+	border-radius: 4px;
+}
+
+.close2-btn:hover {
+	background-color: #d5d5d5;
+}
+
+.pin-all img {
+	position: absolute;
+	cursor: pointer;
+	top: 0;
+}
+
+
+.layer-item .more-btn::before {
+	content: "";
+	position: absolute;
+	top: 8px;
+	left: 2px;
+	width: 3px;
+	height: 3px;
+	border-radius: 50%;
+	background-color: #000;
+	box-shadow: 5px 0 0 #000, 10px 0 0 #000;
+}
+
+.layer-item .more-btn:hover {
+	background-color: #e5e5e5;
+}
+
+img.eye-btn {
+	opacity: 0;
+}
+
+.pinnable:not(.pinned):not(.active) img.black-eye,
+.pinnable.active.invisible img.black-eye {
+	opacity: 0.2;
+}
+
+.pinnable:not(.pinned) img.black-eye:hover {
+	opacity: 0.3;
+}
+
+/*.pinnable.pinned.active img.black-eye {
+	opacity: 0;
+}*/
+
+.pinnable.active:not(.pinned):not(.invisible) img.black-eye,
+.pinnable.pinned:not(.active) img.green-eye,
+.pinnable.active.pinned:not(.invisible) img.black-eye {
+	opacity: 1
+}
+
+.pinnable img.black-eye {
+	z-index: 1;
+}
+
+/* Name and contents on one line. The contents column has a fixed width, so it
+   lines up from row to row, and the name takes the rest, truncated if long. */
+.layer-item .layer-row {
+	display: flex;
+	align-items: baseline;
+	gap: 12px;
+	margin-right: 44px; /* room for row controls */
+	line-height: 17px;
+	white-space: nowrap;
+}
+
+.layer-item .layer-name-col {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+
+/* wraps a point layer that lists several kinds of feature */
+.layer-item .layer-contents {
+	flex: none;
+	width: 9em;
+	white-space: normal;
+	font-size: 12px;
+	color: #666;
+}
+
+/* hints at a tooltip that counts the features with null geometry */
+.layer-item .layer-contents.has-nulls span {
+	border-bottom: 1px dotted #999;
+}
+
+/* a name being edited is shown in full, over the contents column */
+.layer-item:has(.layer-name.editing) .layer-contents {
+	visibility: hidden;
+}
+
+.layer-item .layer-name {
+	display: inline-block;
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	vertical-align: top;
+	min-height: 14px; /* For FF when content is empty */
+	min-width: 2px;
+	outline: none;
+	font-size: 13px;
+}
+
+.layer-item .row.layer-problems {
+	color: #f93b00;
+}
+
+.layer-item .layer-name.editing {
+	border-bottom: 1px solid transparent;
+	max-width: none;
+	overflow: visible;
+	position: relative;
+	z-index: 3;
+}
+
+.layer-item .layer-name::selection {
+	background: black;
+	color: white;
+	text-decoration: none;
+}
+
+.layer-item .layer-name::-moz-selection {
+	background: black;
+	color: white;
+	text-decoration: none;
+}
+
+.layer-list .layer-item:hover:not(.active):not(.dragging) {
+	background-color: #f7f7f7;
+}
+
+
+.layer-item.drag-target:not(.active) {
+	background-color: #f7f7f7;
+}
+
+.layer-item.drag-target * {
+	/* opacity: 0.3; */
+}
+
+.layer-item.drag-target.active {
+	/* background-color: #BDE2F4; */
+}
+
+.layer-item.insert-above:not(.drag-target) {
+	border-top: 1px solid black;
+}
+
+.layer-item.insert-below:not(.drag-target) {
+	border-bottom: 1px solid black;
+}
+
+/* --- Intersection control ----------*/
+
+.intersection-display {
+	cursor: default;
+	visibility: visible;
+	display: none;
+	position: absolute;
+	z-index: 20;
+	top: 10px;
+	left: 13px;
+}
+
+.intersection-check {
+	display: none;
+}
+
+.intersection-count .icon {
+	background-color: #F24400;
+	display: inline-block;
+	width: 5px;
+	height: 5px;
+	margin: 0 5px 2px 0;
+}
+
+.intersection-count .icon.black {
+	background-color: black;
+}
+
+.intersection-display .close-btn {
+	width: 16px;
+	height: 16px;
+	cursor: pointer;
+	position: relative;
+	top: 4px;
+	margin-left: 1px;
+}
+
+/*.intersection-display .text-btn.disabled {
+	visibility: hidden;
+}*/
+
+
+/* --- Popup -------------------- */
+
+.popup {
+	font-size: 13px;
+	box-sizing: border-box;
+	position: absolute;
+	z-index: 40;
+	top: 7px;
+	left: 7px;
+	padding: 5px 0;
+}
+
+.popup div.popup-tab {
+	position: absolute;
+	pointer-events: none;
+	right: -81px;
+	width: 80px;
+	top: 6px;
+}
+
+.popup-tab .popup-nav {
+	display: inline-block;
+	pointer-events: auto;
+	background-color: rgba(234,234,234,0.85);
+	padding: 3px 5px 3px 4px;
+	white-space: nowrap;
+}
+
+.popup-nav .popup-nav-arrow {
+	cursor: pointer;
+	padding: 0 1px;
+}
+
+.popup > div.popup-content {
+	box-sizing: border-box;
+	overflow: hidden;
+	overflow-y: auto;
+	padding: 4px 12px 3px;
+	line-height: 1.2;
+}
+
+.popup table {
+	border-spacing: 0px;
+}
+
+.popup table td {
+	vertical-align: top;
+	/* padding: 2px 0; */
+	min-width: 80px;
+	max-width: 180px;
+	color: black;
+	height: 17px; /* functions like min-height on <td> */
+}
+
+.popup td.field-name {
+	color: #aaa;
+	padding-right: 7px;
+	font-weight: normal;
+	min-width: 60px;
+	max-width: 260px;
+}
+
+.popup .value {
+	outline: none;
+	word-wrap: break-word;
+}
+
+.popup .num-field {
+	font-style: italic;
+}
+
+.popup .empty, .popup .null-value {
+	min-width: 4px;
+	display: inline-block;
+	min-height: 13px;
+}
+
+.popup .null-value {
+	color: #aaa;
+}
+
+.popup .note {
+	font-style: italic;
+	min-height: 16px;
+}
+
+.popup .editable-cell .value.editing {
+	color: black;
+	border-bottom: none;
+}
+
+.popup .editable-cell .value::selection {
+	color: white;
+	background: black;
+}
+
+.popup .editable-cell .value::-moz-selection {
+	color: white;
+	background: black;
+}
+
+.ruler-popup {
+	position: absolute;
+	z-index: 45;
+	top: 12px;
+	left: 50%;
+	transform: translateX(-50%);
+	min-width: 160px;
+	padding: 6px 28px 6px 10px;
+	border-radius: 11px;
+	border: 1px solid #d5d5d5;
+	box-shadow: 0 1px 7px rgba(0,0,0,0.18);
+	background: rgba(255,255,255,0.94);
+	font-size: 13px;
+	line-height: 1.25;
+	text-align: center;
+	box-sizing: border-box;
+	pointer-events: auto;
+}
+
+.ruler-popup-content div + div {
+	margin-top: 2px;
+}
+
+.ruler-geographic-distance,
+.ruler-projected-distance {
+	font-size: 14px;
+	font-weight: 600;
+}
+
+.ruler-distance-method {
+	color: #777;
+	font-size: 11px;
+}
+
+.ruler-geographic-distance::before,
+.ruler-projected-distance::before {
+	content: "";
+	display: inline-block;
+	width: 18px;
+	margin-right: 6px;
+	vertical-align: 3px;
+}
+
+.ruler-geographic-distance::before {
+	border-top: 2px solid #cc35a5;
+}
+
+.ruler-projected-distance::before {
+	border-top: 2px dashed #cc35a5;
+}
+
+.ruler-popup .ruler-close-btn {
+	position: absolute;
+	top: 5px;
+	right: 1px;
+}
+
+
+/* --- Map ---------------------- */
+
+.map-layers {
+	z-index: 0;
+	position: relative;
+	height: 100%;
+}
+
+.display-options {
+	pointer-events: none;
+}
+
+.display-options .info-box {
+	width:  min-content;
+	pointer-events: initial;
+}
+
+/* --- Messages inbox --------------- */
+
+.messages-btn.btn {
+	/* SVG-only button; align like the hamburger so its baseline doesn't drag
+	   the row's text-bearing buttons down. */
+	padding: 8px 8px 4px 8px;
+	user-select: none;
+	vertical-align: top;
+	cursor: pointer;
+	position: relative;
+}
+
+.messages-btn.btn.hidden {
+	display: none;
+}
+
+.messages-btn svg {
+	display: block;
+	fill: currentColor;
+}
+
+.messages-badge {
+	position: absolute;
+	top: 2px;
+	right: -1px;
+	min-width: 14px;
+	height: 14px;
+	padding: 0 3px;
+	border-radius: 7px;
+	background-color: #d63333;
+	color: #fff;
+	font-size: 10px;
+	line-height: 14px;
+	font-weight: 600;
+	text-align: center;
+	box-sizing: border-box;
+	pointer-events: none;
+}
+
+.messages-badge.warn {
+	background-color: #d68f33;
+}
+
+/* Quick pulse to draw attention when a new message arrives. The animation
+   is added by JS for ~2s and then removed, so it doesn't cycle forever. */
+.messages-btn.pulse .messages-badge {
+	animation: messages-pulse 0.9s ease-out 2;
+}
+
+@keyframes messages-pulse {
+	0%   { transform: scale(1);   box-shadow: 0 0 0 0 rgba(214, 51, 51, 0.55); }
+	60%  { transform: scale(1.15); box-shadow: 0 0 0 6px rgba(214, 51, 51, 0); }
+	100% { transform: scale(1);   box-shadow: 0 0 0 0 rgba(214, 51, 51, 0); }
+}
+
+.messages-panel {
+	pointer-events: none;
+}
+
+.messages-panel .info-box {
+	pointer-events: initial;
+	width: 360px;
+	max-width: 90vw;
+}
+
+.messages-empty {
+	color: #888;
+	font-size: 13px;
+	font-style: italic;
+	padding: 4px 0 8px 0;
+}
+
+.messages-list {
+	max-height: 50vh;
+	overflow: hidden;
+	overflow-y: auto;
+	margin: 0 -4px 6px -4px;
+	user-select: text;
+}
+
+.message-item {
+	position: relative;
+	border-left: 3px solid #888;
+	background-color: #f4f7fa;
+	padding: 6px 22px 6px 9px;
+	margin: 4px 4px;
+	border-radius: 3px;
+	font-size: 13px;
+	line-height: 1.35;
+}
+
+.message-item.severity-warn {
+	border-left-color: #d68f33;
+	background-color: #fbf3e6;
+}
+
+.message-item.severity-error {
+	border-left-color: #d63333;
+	background-color: #fbecec;
+}
+
+.message-item .message-title {
+	font-weight: 600;
+	display: block;
+	margin-bottom: 1px;
+}
+
+.message-item .message-body {
+	white-space: pre-wrap;
+	word-wrap: break-word;
+}
+
+.message-item .message-time {
+	color: #888;
+	font-size: 11px;
+	margin-top: 2px;
+	display: block;
+}
+
+.message-item .message-dismiss {
+	position: absolute;
+	top: 3px;
+	right: 5px;
+	width: 16px;
+	height: 16px;
+	line-height: 14px;
+	text-align: center;
+	color: #888;
+	cursor: pointer;
+	font-size: 14px;
+	user-select: none;
+	border-radius: 8px;
+}
+
+.message-item .message-dismiss:hover {
+	color: var(--normal-text);
+	background-color: rgba(0, 0, 0, 0.05);
+}
+
+.messages-footer {
+	text-align: right;
+	padding-top: 4px;
+	border-top: 1px solid #eee;
+}
+
+.messages-footer .messages-clear-btn {
+	font-size: 12px;
+	min-width: 0;
+	padding: 3px 9px;
+}
+
+.basemap-container {
+	z-index: -1;
+	position:  absolute;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+}
+
+.basemap {
+	display: none;
+	position: relative;
+	height: 100%;
+}
+
+/* The basemap's logo and attribution, lifted out of the basemap so that they
+   can be clicked (see liftCornerControls()). The font is the one Mapbox
+   sets on its map element, which they are no longer inside. */
+.basemap-controls {
+	display: none;
+	position: absolute;
+	z-index: 20;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	pointer-events: none;
+	font: 12px/20px "Helvetica Neue", Arial, Helvetica, sans-serif;
+}
+
+.basemap-on .basemap-controls {
+	display: block;
+}
+
+/* The "i" goes to the right of the logo, centered on it. Mapbox adds the logo
+   after the attribution, and floats each control onto a row of its own. */
+.basemap-controls .mapboxgl-ctrl-bottom-left {
+	display: flex;
+	align-items: flex-end;
+}
+
+.basemap-controls .mapboxgl-ctrl-bottom-left > .mapboxgl-ctrl-attrib {
+	order: 1;
+	margin: 0 0 5px 6px;
+}
+
+/* Mapbox rings the button whenever it has focus, so a click would leave it
+   ringed; the ring is kept for keyboard focus */
+.basemap-controls .mapboxgl-ctrl-attrib-button:focus:not(:focus-visible) {
+	box-shadow: none;
+}
+
+
+p.basemap-warning {
+	color: #cc0000;
+	font-size: 87%;
+	margin-bottom: 0;
+}
+
+.basemap-note {
+	font-size: 87%;
+}
+
+.basemap-prompt {
+	width: 100%;
+	text-align:  center;
+	z-index:  -2;
+	bottom: 8px;
+	font-size: 22px;
+	color: #aaa;
+	position: absolute;
+}
+
+.basemap-style-btn {
+	position:  relative;
+	border-width: 2px;
+	border-color: #e3e3e3;
+	border-style: solid;
+	border-radius: 6px;
+}
+
+div.basemap-style-btn.active {
+	border-color: #f7ba23;
+}
+
+.basemap-style-btn:not(.disabled) {
+	cursor: pointer;
+}
+
+.basemap-buttons:not(.disabled) .basemap-style-btn:hover:not(.active) {
+	border-color: #f7e286;
+}
+
+/* A pill in the bottom-right corner, the size of the floating toolbar and level
+   with it, with a 28px thumbnail per basemap like the toolbar's buttons. */
+.basemap-overlay-buttons {
+	z-index: 20;
+	position: absolute;
+	bottom: 12px;
+	right: 12px;
+	padding: 4px;
+	background-color: rgba(255, 255, 255, 0.96);
+	border: 1px solid #ddd;
+	border-radius: 8px;
+	box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
+	line-height: 0px;
+	display: none;
+}
+
+.basemap-style-btn.basemap-overlay-btn {
+	box-sizing: border-box;
+	display: inline-block;
+	vertical-align: top;
+	width: 28px;
+	height: 28px;
+	border-width: 1px;
+	border-radius: 5px;
+	overflow: hidden;
+}
+
+.basemap-style-btn.basemap-overlay-btn + .basemap-overlay-btn {
+	margin-left: 4px;
+}
+
+.basemap-overlay-buttons.disabled > div {
+	opacity: 0.5;
+}
+
+.basemap-overlay-btn img {
+	margin-left: -22px;
+	margin-top: -4px;
+	width: 65px;
+}
+
+.add-basemap-menu input[type=text] {
+	width: 222px;
+	margin-top: 3px;
+	margin-bottom: 4px;
+	padding: 2px;
+	font-size: 12px;
+}
+
+.add-basemap-menu .menu-section {
+	margin-top: 7px;
+	margin-bottom: 6px;
+}
+
+.added-basemaps {
+	margin-bottom: 4px;
+}
+
+.added-basemaps > div {
+	position: relative;
+	cursor: pointer;
+}
+
+.added-basemaps img.close-btn {
+	position: absolute;
+	cursor: pointer;
+	width: 14px;
+	height: 14px;
+	padding: 0;
+	top: 3px;
+	right: 0px;
+}
+
+.basemap-list-item.active img.off-icon {
+	display:none;
+}
+
+.basemap-list-item:not(.active) img.on-icon {
+	display:none;
+}
+
+.basemap-list-item img.off-icon {
+	opacity: 0.3;
+}
+
+.basemap-list-item:hover img.off-icon {
+	opacity: 0.7;
+}
+
+.added-basemaps img {
+	width: 14px;
+	height: 14px;
+	padding-top: 2px;
+	padding-right: 2px;
+	vertical-align: top;
+}
+
+
+.mapbox-improve-map {
+	display: none;
+}
+
+.mshp-main-map {
+	/* Floating editing panels and popup panels that align with them */
+	--map-panel-top: 7px;
+	--map-panel-right: 36px;
+	/* background-color: #fff; */
+}
+
+.map-layers.symbol-hit {
+	cursor: pointer;
+}
+
+.map-layers.symbol-hit.dragging {
+	cursor: default;
+}
+
+.map-layers.add-points,
+.map-layers.draw-tool,
+.map-layers.curve-tool,
+.map-layers.label-tool,
+.map-layers.symbol-tool,
+.map-layers.snip-tool,
+.map-layers.ruler-tool {
+	cursor: crosshair;
+}
+
+.map-layers.snip-tool.no-snip {
+	cursor: default;
+}
+
+/* Over a selected label's text, where a drag moves the text (or the whole
+   label) rather than placing a label or panning the map. */
+.map-layers.label-text-drag {
+	cursor: move;
+}
+
+/* Over one of a selected label's control points -- a knot, its anchor, or a
+   callout handle -- which a drag moves on its own. Not the text's cursor,
+   because the two are often close together or on top of each other. */
+.map-layers.label-handle {
+	cursor: pointer;
+}
+
+/* The symbol tool: over a symbol, which a drag moves, and over a knot of a
+   selected curve, which a drag moves on its own. */
+.map-layers.symbol-move {
+	cursor: move;
+}
+
+.map-layers.symbol-handle {
+	cursor: pointer;
+}
+
+/* Over a selected label's width handle, which only moves sideways. */
+.map-layers.label-resize {
+	cursor: ew-resize;
+}
+
+.map-layers.ruler-dragging {
+	cursor: grabbing;
+}
+
+.map-layers.draw-tool.draw-select {
+	cursor: pointer;
+}
+
+/* The curve tool: over a line, which a click selects, and over a knot of the
+   selected curve, which a drag moves. */
+.map-layers.curve-tool.curve-select,
+.map-layers.curve-tool.curve-handle {
+	cursor: pointer;
+}
+
+/* Not the move cursor, which is large enough to hide the vertex markers. */
+.map-layers.reshape-tool.reshape-vertex {
+	cursor: pointer;
+}
+
+body.pan .map-layers:not(.drawing) {
+	cursor: grab;
+}
+
+body.pan.panning .map-layers:not(.drawing) {
+	cursor: grabbing;
+}
+.map-layers canvas {
+	pointer-events: none;
+	position: absolute;
+}
+
+.map-layers canvas.retina {
+	transform-origin: top left;
+	-webkit-transform-origin: top left;
+	transform: scale3D(0.5, 0.5, 1);
+	-webkit-transform: scale3D(0.5, 0.5, 1);
+}
+
+.map-layers > svg {
+	position: absolute;
+}
+
+.map-layers > svg.ruler-overlay {
+	top: 0;
+	left: 0;
+	z-index: 20;
+	pointer-events: none;
+	overflow: visible;
+}
+
+.map-layers > svg.preview-overlay {
+	top: 0;
+	left: 0;
+	z-index: 15;
+	pointer-events: none;
+	overflow: hidden;
+}
+
+.map-layers > svg.preview-background-overlay {
+	top: 0;
+	left: 0;
+	pointer-events: none;
+	overflow: hidden;
+}
+
+.preview-outside-mask {
+	fill: rgba(24, 28, 32, 0.38);
+	fill: #999;
+	fill: #000;
+	opacity: 0.85;
+	opacity: 0.3;
+	fill-rule: evenodd;
+}
+
+.preview-page-border {
+	fill: none;
+	stroke: rgba(30, 30, 30, 0.9);
+	stroke-width: 1.5px;
+	vector-effect: non-scaling-stroke;
+}
+
+.preview-page-neatline {
+	pointer-events: none;
+}
+
+.ruler-line {
+	fill: none;
+	stroke: #cc35a5;
+	stroke-width: 2;
+	stroke-dasharray: 7 5;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	vector-effect: non-scaling-stroke;
+}
+
+.ruler-great-circle {
+	stroke: #cc35a5;
+	stroke-width: 2;
+	stroke-dasharray: none;
+}
+
+.ruler-endpoint {
+	fill: #fff;
+	stroke: #cc35a5;
+	stroke-width: 2;
+	vector-effect: non-scaling-stroke;
+}
+
+.ruler-endpoint.ruler-great-circle-endpoint {
+	stroke: #cc35a5;
+}
+
+.map-layers > svg text.selected {
+	stroke: #FFC3FF;
+	stroke-width: 4;
+	paint-order: stroke;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+.map-layers > svg.dragging,
+.map-layers > svg text.selected {
+	cursor: pointer;
+}
+
+.map-layers > svg text.label-style-selected {
+	stroke: #fce300;
+	stroke-opacity: 0.25;
+	paint-order: stroke fill;
+	stroke-width: 4px;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+/* A path label whose text is longer than its path. Export drops these; the
+   editor keeps them visible and marked, because a hidden label can't be
+   found and so can't be fixed. Same halo convention as the states above. */
+.map-layers > svg text.label-overflow {
+	stroke: #ff7f2a;
+	stroke-opacity: 0.45;
+	paint-order: stroke fill;
+	stroke-width: 4px;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+/* ---  IN-PLACE LABEL EDITING --- */
+
+/* The textarea is the model of record for an editing session: it holds focus so
+   that keyboard handling, selection, clipboard and IME all come from the
+   browser. It is invisible but must stay focusable, so it cannot be hidden with
+   display:none or visibility:hidden. */
+.label-edit-input {
+	position: absolute;
+	z-index: -1;
+	opacity: 0;
+	width: 1px;
+	height: 1em;
+	padding: 0;
+	border: none;
+	resize: none;
+	overflow: hidden;
+	white-space: pre;
+	pointer-events: none;
+}
+
+.label-edit-overlay {
+	pointer-events: none;
+}
+
+/* Label tool cues: an outline around the object rather than a halo over the
+   glyphs, so that it reads as something you have hold of. A solid line, to
+   distinguish it from the dashed box of a label being typed into -- the two
+   states look different because they behave differently.
+
+   Hover and selection draw the same shapes, because they mean the same thing
+   about the same object; hover is simply lighter. The alternative, highlighting
+   the anchor point on hover and the label on selection, made the two look like
+   different objects. */
+.label-cue {
+	pointer-events: none;
+}
+
+.label-cue-hovered {
+	opacity: 0.4;
+}
+
+/* Hairline, like every other reference shape the tool draws: the box says where
+   the label is, and a heavier outline reads as an object in its own right
+   rather than as a mark on one. */
+.label-cue-box {
+	fill: none;
+	stroke: #3a7ddc;
+	stroke-width: 1px;
+	vector-effect: non-scaling-stroke;
+}
+
+/* The anchor is what the text is positioned against, and label-pos can put it
+   well outside the box, so it is worth marking on its own.
+   Drawn as a ring rather than a dot, and beneath the glyphs: a centered label
+   sits right on top of its anchor, and a filled marker would blot out a letter.
+   Same treatment as the path guide's knots, since both are handles. */
+.label-cue-anchor {
+	fill: #fff;
+	stroke: #3a7ddc;
+	stroke-width: 1.5px;
+	vector-effect: non-scaling-stroke;
+}
+
+/* The line between an anchor and the text being dragged away from it, drawn
+   only while that drag is on. Dashed, and a shade lighter than the box: it is
+   the relationship being edited rather than a part of either end. */
+.label-cue-tether {
+	fill: none;
+	stroke: #3a7ddc;
+	stroke-width: 1px;
+	stroke-dasharray: 2 2;
+	opacity: 0.7;
+	vector-effect: non-scaling-stroke;
+}
+
+/* A copy of the baseline the label's text runs along. Unfilled: stroking an
+   open curve must not paint the area it encloses. */
+.label-cue-curve {
+	fill: none;
+	stroke: #3a7ddc;
+	stroke-width: 1px;
+	stroke-opacity: 0.8;
+	vector-effect: non-scaling-stroke;
+}
+
+/* The grab handles on a selected curve, one per knot. Same ring treatment as
+   the anchor marker and the path guide's knots, because all three are handles
+   and a knot is an anchor on a curve.
+   A corner knot is drawn as a square by the renderer; both shapes share this
+   rule, so a corner differs in outline and not in colour. */
+.label-cue-knot {
+	fill: #fff;
+	stroke: #3a7ddc;
+	stroke-width: 1.5px;
+	vector-effect: non-scaling-stroke;
+}
+
+/* A selected text block's column: the width handle's box, drawn fainter than
+   the box around the text, which is the label itself. */
+.label-cue-column {
+	fill: none;
+	stroke: #3a7ddc;
+	stroke-width: 1px;
+	stroke-dasharray: 3 3;
+	stroke-opacity: 0.6;
+	vector-effect: non-scaling-stroke;
+}
+
+/* A selected label's width and callout handles. The callout's end at the text
+   is filled, so that the two ends of the line read differently. */
+.label-cue-handle {
+	fill: #fff;
+	stroke: #3a7ddc;
+	stroke-width: 1.5px;
+	vector-effect: non-scaling-stroke;
+}
+
+.label-cue-attach {
+	fill: #3a7ddc;
+	stroke: #fff;
+	stroke-width: 1px;
+}
+
+/* The width being dragged out for a new text block: a line's height, dashed
+   like the other things the tool draws that are not yet a label. */
+.label-block-guide {
+	fill: none;
+	stroke: #3a7ddc;
+	stroke-width: 1px;
+	stroke-dasharray: 3 2;
+	vector-effect: non-scaling-stroke;
+	pointer-events: none;
+}
+
+/* The cue for a selection too large to outline label by label -- selecting a
+   whole layer to restyle it. A halo in the selection's own blue, the same
+   treatment the older styling mode uses in yellow: at that size the question
+   is which labels are in the selection, not where each one's anchor is. */
+.map-layers > svg text.label-cue-marked {
+	stroke: #3a7ddc;
+	stroke-opacity: 0.3;
+	paint-order: stroke fill;
+	stroke-width: 4px;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+/* Transparent rather than fill:none / stroke:none, because an unpainted shape
+   is not hit-testable. */
+.label-edit-hit-area {
+	fill: transparent;
+	stroke: none;
+	pointer-events: all;
+}
+
+/* The thickened baseline follows the curve, so only its stroke should catch
+   clicks -- filling an open curve would claim the whole area it encloses. */
+.label-edit-hit-baseline {
+	fill: none;
+	stroke: transparent;
+	pointer-events: stroke;
+}
+
+/* The curve a label's text is set along, ghosted while the label is open for
+   editing. Fainter than the guide drawn while the path is being placed, and in
+   the same violet, because it is the same curve at a later stage. */
+.label-edit-path {
+	fill: none;
+	stroke: #cc6acc;
+	stroke-width: 1.2px;
+	stroke-opacity: 0.4;
+	vector-effect: non-scaling-stroke;
+}
+
+/* Shows where an anchored label is even when it has no text -- the state a
+   label is in between being created and being typed into. A path label shows
+   its ghosted curve instead.
+   Solid, not dashed: at the size of an empty label the dashes were most of the
+   outline, which made the box look tentative rather than like a place to type. */
+.label-edit-box {
+	fill: none;
+	stroke: #cc6acc;
+	stroke-width: 1px;
+	vector-effect: non-scaling-stroke;
+}
+
+/* A text block's column, the width its text wraps to, behind the box around
+   the text itself. Fainter and dashed, because it is a limit rather than the
+   label: the box is what a callout meets. */
+.label-edit-column {
+	fill: none;
+	stroke: #cc6acc;
+	stroke-width: 1px;
+	stroke-dasharray: 3 3;
+	stroke-opacity: 0.6;
+	vector-effect: non-scaling-stroke;
+}
+
+.label-edit-selection {
+	fill: #cc6acc;
+	fill-opacity: 0.3;
+	stroke: none;
+}
+
+.label-edit-caret {
+	stroke: #000;
+	stroke-width: 1.5px;
+	vector-effect: non-scaling-stroke;
+	animation: label-caret-blink 1.1s steps(1) infinite;
+}
+
+@keyframes label-caret-blink {
+	0%, 50% { stroke-opacity: 1; }
+	50.01%, 100% { stroke-opacity: 0; }
+}
+
+/* ---  MAP BUTTONS --- */
+
+/*.pointer-btn {
+	z-index: 2;
+}*/
+
+.nav-buttons {
+	z-index: 20;
+	position: absolute;
+	text-align: center;
+	top: 6px;
+	right: 0;
+	padding: 3px; 
+	background-color: rgba(255, 255, 255, 1);
+	border-radius: 7px;
+}
+
+.nav-btn-wrapper {
+	position: relative;
+}
+
+.nav-sub-btn {
+	position: absolute;
+	display: none;
+	cursor: pointer;
+	top: 4px;
+	padding: 4px;
+	right: 20px;
+	z-index: -2;
+}
+
+.nav-sub-btn svg * {
+	fill: black !important;
+}
+
+
+.inline-checkbox {
+	margin-left: 5px;
+}
+
+#save-preference {
+	/* display: none; */
+}
+
+.nav-sub-menu {
+	position: absolute;
+	z-index: -1;
+	display: none;
+	pointer-events: none;
+	padding: 5px 0px;
+	background-color: white;
+	top: 0px;
+	right: 24px;
+	text-align: right;
+	white-space: nowrap;
+	border-radius: 6px;
+	border: 1px solid #ddd;
+	box-shadow: 0 1px 7px rgba(0,0,0,0.12);
+}
+
+.pointer-btn .nav-sub-menu {
+	top: -2px;
+}
+
+.nav-btn.open .nav-sub-menu {
+	display: block;
+	pointer-events: inherit;
+}
+
+
+.nav-btn {
+	position: relative;
+	cursor:pointer;
+	/* padding: 3px 3px 5px 3px; */
+	padding: 3px 4px;
+	line-height: 1;
+}
+
+.nav-btn.menu-btn {
+	padding-top:  2px;
+}
+
+.nav-btn.selected {
+	background-color: black;
+	border-radius: 5px;
+}
+
+.nav-btn:hover:not(.disabled) svg *,
+.nav-btn.hover.menu-btn:not(.disabled) svg * {
+	fill: #166689;
+}
+
+.nav-btn.menu-btn.selected:not(.disabled) svg * {
+	fill: white;
+}
+
+/* Tooltip shown to the left of a nav button on hover. It borrows the type of
+   .nav-menu-item so the strip reads as one family, but stays a flat label --
+   no border, radius or shadow -- so it is not mistaken for the arrow menu.
+   The translucent white wash keeps it legible over dark map content. */
+.nav-btn[data-tooltip]:hover:not(.disabled)::after {
+	content: attr(data-tooltip);
+	position: absolute;
+	/* Below .nav-sub-menu, which is at -1 and lingers for a moment after the
+	   pointer leaves the arrow button: the tooltip must pass behind it. */
+	z-index: -2;
+	top: 50%;
+	right: calc(100% + 2px);
+	transform: translateY(-50%);
+	pointer-events: none;
+	background-color: rgba(255, 255, 255, 0.85);
+	color: var(--colored-text);
+	font-size: 12px;
+	line-height: 12px;
+	padding: 3px 6px 4px 6px;
+	white-space: nowrap;
+}
+
+.nav-btn.preview-toggle {
+	align-items: center;
+	box-sizing: border-box;
+	display: flex;
+	height: 28px;
+	justify-content: center;
+	margin-top: 2px;
+	padding-bottom: 0;
+	padding-top: 1px;
+}
+
+.preview-toggle svg {
+	display: block;
+	height: 16px;
+	transform: translateY(-1px);
+	width: 16px;
+}
+
+.preview-readout {
+	position: absolute;
+	z-index: 20;
+	top: 6px;
+	left: 50%;
+	transform: translateX(-50%);
+	background: rgba(255, 255, 255, 0.96);
+	border: 1px solid #ddd;
+	border-radius: 5px;
+	box-shadow: 0 1px 5px rgba(0,0,0,0.12);
+	color: #333;
+	cursor: pointer;
+	font-size: 12px;
+	line-height: 15px;
+	padding: 3px 7px;
+	white-space: nowrap;
+}
+
+.preview-readout-arrow {
+	color: #777;
+	font-size: 16px;
+	font-weight: bold;
+	line-height: 9px;
+	margin-left: 6px;
+	position: relative;
+	top: -1px;
+}
+
+.preview-scale-menu {
+	position: absolute;
+	z-index: 1;
+	display: none;
+	pointer-events: none;
+	padding: 5px 0;
+	background-color: white;
+	top: calc(100% + 4px);
+	right: 0;
+	text-align: right;
+	white-space: nowrap;
+	border-radius: 6px;
+	border: 1px solid #ddd;
+	box-shadow: 0 1px 7px rgba(0,0,0,0.12);
+}
+
+.preview-readout.open .preview-scale-menu {
+	display: block;
+	pointer-events: inherit;
+}
+
+.preview-scale-menu-item {
+	color: #555;
+	padding: 3px 9px;
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.preview-scale-menu-item:hover {
+	color: black;
+	background: var(--lt-theme-col);
+}
+
+.label-style-panel {
+	/* The shape of a field in every style panel: the label panel set them,
+	   and the line, polygon and circle panels are drawn from the same parts.
+	   A row is only legible when the select, the colour field, the size field
+	   and the button beside them are all the same height. */
+	--label-field-height: 22px;
+	--label-field-radius: 4px;
+	--label-field-border: #ccc;
+	/* The narrow column of a split row, wide enough for the longest caption
+	   over it -- "Letter spacing", which measures 71px -- and the same in
+	   every row of every panel, so that the field edges line up down the
+	   whole stack. */
+	--label-split-b-width: 74px;
+	/* Same glyph on native <select>s and the saved-style menu. The custom menu
+	   used a CSS triangle; the font menus used the OS arrow. A drawn stroke
+	   rather than a filled triangle: it is lighter than the text beside it,
+	   which is what a menu's arrow should be. */
+	--label-menu-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='7' viewBox='0 0 10 7'%3E%3Cpath fill='none' stroke='%23666' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round' d='M1 1.5l4 4 4-4'/%3E%3C/svg%3E");
+	position: absolute;
+	z-index: 21;
+	top: var(--map-panel-top);
+	right: var(--map-panel-right);
+	/* Wide enough for a pair of controls side by side, which is what these
+	   panels are mostly made of: at 185px the narrow column of a pair was too
+	   narrow for its own caption, and "Letter spacing" was clipped. */
+	width: 216px;
+	padding: 8px 12px 12px;
+	text-align: left;
+	background-color: white;
+	border: 1px solid #ddd;
+	border-radius: 6px;
+	box-shadow: 0 1px 7px rgba(0,0,0,0.12);
+}
+
+.label-style-panel button,
+.label-style-panel select,
+.label-style-panel input {
+	font-size: 11.5px;
+}
+
+.label-style-panel button.label-style-close {
+	font-size: 16px; /* close button icon */
+}
+
+.frame-properties-popup {
+	width: 264px;
+}
+
+.frame-properties-form.label-style-panel,
+.frame-create-form.label-style-panel {
+	background: transparent;
+	border: 0;
+	border-radius: 0;
+	box-shadow: none;
+	box-sizing: border-box;
+	max-height: none;
+	overflow: visible;
+	padding: 0;
+	position: static;
+	width: 100%;
+}
+
+/* The neatline's width sits beside the colour and opacity it applies to, and
+   the background row leaves the column empty rather than pushing a lone field
+   onto a line of its own. */
+.frame-properties-form .label-split-row {
+	column-gap: 8px;
+	grid-template-columns: 1fr 54px;
+}
+
+/* Wide enough for "Aspect ratio", and fixed rather than auto so that the ratio
+   at the top of the panel lines up with the details at the bottom, which are a
+   separate grid. */
+.frame-property-detail-row {
+	display: grid;
+	font-size: 12px;
+	gap: 6px;
+	grid-template-columns: 66px 1fr;
+	margin-top: 6px;
+}
+
+.frame-property-detail-row > span:first-child {
+	color: #555;
+}
+
+.frame-property-detail-value {
+	overflow-wrap: anywhere;
+}
+
+.frame-create-popup {
+	width: 264px;
+}
+
+.scalebar-properties-popup {
+	width: 264px;
+}
+
+.scalebar-properties-box .alert-title {
+	cursor: move;
+	user-select: none;
+	touch-action: none;
+}
+
+.scalebar-properties-form.label-style-panel {
+	background: transparent;
+	border: 0;
+	border-radius: 0;
+	box-shadow: none;
+	box-sizing: border-box;
+	max-height: none;
+	overflow: visible;
+	padding: 0;
+	position: static;
+	width: 100%;
+}
+
+.label-style-row.scalebar-row {
+	align-items: end;
+	display: grid;
+	gap: 6px;
+}
+
+.scalebar-two-col {
+	grid-template-columns: 1fr 1fr;
+}
+
+.scalebar-row select {
+	box-sizing: border-box;
+	min-width: 0;
+	width: 100%;
+}
+
+.scalebar-row > * {
+	min-width: 0;
+}
+
+.frame-input-cell > .scalebar-distance-field,
+.frame-input-cell > .scalebar-stepper-field {
+	display: flex;
+	width: 100%;
+}
+
+.scalebar-properties-note {
+	color: #a33;
+	font-size: 12px;
+	margin-bottom: 8px;
+}
+
+/* The field tips are drawn above the "?" that opens them, which the box's own
+   overflow would clip. The dialog is three rows and two buttons and never has
+   anything to scroll. */
+.alert-box.frame-create-box {
+	overflow: visible;
+}
+
+/* A field and the "?" beside it. The field itself is a .frame-field-row, shared
+   with Frame properties, so that the dialog that creates a frame and the panel
+   that edits it look like one program. The gap matches the option rows below,
+   so that every field ends on the same vertical and the tips line up. */
+.frame-create-row {
+	align-items: center;
+	display: flex;
+	gap: 8px;
+	margin-top: 6px;
+}
+
+.frame-create-row > .frame-field-row {
+	flex: 1;
+	min-width: 0;
+}
+
+/* float is what the static tips in index.html are placed with; here the row is
+   a flex container, which ignores it. */
+.frame-create-popup .tip-button {
+	flex: none;
+	float: none;
+	margin-top: 0;
+	margin-left: 0;
+	width: 12px;
+}
+
+/* The button names what it does and is as wide as its name, so the two options
+   are left-aligned at a common width rather than sized by their labels. */
+.frame-create-option-row {
+	align-items: center;
+	display: flex;
+	gap: 8px;
+	margin-top: 6px;
+}
+
+/* flex: none, or the margin field beside the first button shrinks it and the
+   two options stop looking like peers. */
+.frame-create-option-row > .dialog-btn {
+	box-sizing: border-box;
+	flex: none;
+	margin: 0;
+	text-align: center;
+	width: 130px;
+}
+
+.frame-create-margin {
+	align-items: center;
+	display: flex;
+	flex: 1;
+	gap: 6px;
+	min-width: 0; /* a flex item defaults to min-width:auto and will not shrink below its field */
+}
+
+.frame-create-margin > input {
+	box-sizing: border-box;
+	flex: 1;
+	min-width: 0;
+}
+
+.frame-field-row {
+	align-items: center;
+	display: flex;
+	gap: 8px;
+}
+
+.frame-field-row > span {
+	flex: 0 0 82px;
+}
+
+.frame-field-row > input,
+.frame-field-row > select {
+	flex: 1;
+	min-width: 0;
+}
+
+.frame-field-row > .label-panel-action-btn {
+	flex: none;
+}
+
+/* Two class names, because .label-style-row's display:block is declared later
+   in this file and a single class would lose to it -- which is what stacked
+   width and height down the panel at full width instead of pairing them. */
+.label-style-row.frame-size-row {
+	align-items: end;
+	display: grid;
+	gap: 6px;
+	grid-template-columns: 1fr 1fr 54px;
+}
+
+.frame-create-margin > span,
+.frame-input-cell > span {
+	color: #555;
+	font-size: 12px;
+}
+
+.frame-input-cell > input {
+	box-sizing: border-box;
+	width: 100%;
+}
+
+.frame-units-select {
+	width: 54px;
+}
+
+.label-style-panel select,
+.label-saved-style-btn {
+	background-image: var(--label-menu-chevron);
+	background-repeat: no-repeat;
+	background-position: right 6px center;
+	background-size: 10px 7px;
+}
+
+.label-style-panel select {
+	-webkit-appearance: none;
+	appearance: none;
+	padding: 0 20px 0 6px;
+}
+
+/* The size the app's dialogs title themselves at (.info-box h3), so that a
+   panel pinned over the map is headed like the menus beside it. */
+.label-style-panel-title {
+	position: relative;
+	font-weight: 600;
+	font-size: 17px;
+}
+
+.label-style-close {
+	position: absolute;
+	right: -5px;
+	border: 0;
+	background: transparent;
+	cursor: pointer;
+	font-size: 16px;
+	line-height: 1;
+}
+
+.label-style-row {
+	display: block;
+	margin: 3px 0;
+}
+
+.label-style-row span,
+.label-style-row-label {
+	display: block;
+	/* margin-bottom: 3px; */
+	color: #555;
+}
+
+.label-style-row select {
+	width: 100%;
+	box-sizing: border-box;
+}
+
+.label-style-panel select,
+.label-style-panel input[type="text"] {
+	box-sizing: border-box;
+	height: var(--label-field-height);
+	background-color: white;
+	border: 1px solid var(--label-field-border);
+	border-radius: var(--label-field-radius);
+	box-shadow: none;
+}
+
+.label-style-panel select:focus {
+	border-color: #d3aa00;
+	box-shadow: none;
+	outline: none;
+}
+
+/* A font menu draws each name in its own font, which only a customizable
+   select can do: a native menu ignores an option's font, at least in Chrome
+   and Safari on a Mac. The closed menu keeps the chevron the other menus have
+   and the font they are drawn in, which is the browser's control font rather
+   than the panel's: base-select inherits the panel's instead. */
+@supports (appearance: base-select) {
+	.label-style-panel select.font-menu,
+	.label-style-panel select.font-menu::picker(select) {
+		appearance: base-select;
+	}
+
+	.label-style-panel select.font-menu {
+		align-items: center;
+		color: FieldText;
+		font: -webkit-small-control;
+		font-size: 11.5px;
+	}
+
+	.label-style-panel select.font-menu::picker-icon {
+		display: none;
+	}
+
+	.label-style-panel select.font-menu::picker(select) {
+		max-height: min(420px, 70vh);
+		min-width: anchor-size(width);
+		padding: 4px 0;
+		background: white;
+		border: 1px solid var(--label-field-border);
+		border-radius: 6px;
+		box-shadow: 0 2px 10px rgba(0,0,0,0.18);
+	}
+
+	.label-style-panel select.font-menu optgroup {
+		font-weight: normal;
+		font-size: 11.5px;
+		padding: 2px 0 1px 0;
+		font-family: SourceSans3;
+		color: #888;
+	}
+
+	.label-style-panel select.font-menu optgroup legend {
+		padding: 6px 10px 2px;
+	}
+
+	.label-style-panel select.font-menu option {
+		padding: 1px 10px 0px 6px;
+		font-weight: normal;
+		font-size: 14px;
+		color: #222;
+		white-space: nowrap;
+	}
+
+	.label-style-panel select.font-menu option::checkmark {
+		width: 12px;
+		font-family: system-ui, sans-serif;
+		font-size: 11px;
+	}
+
+	.label-style-panel select.font-menu option:hover,
+	.label-style-panel select.font-menu option:focus-visible {
+		background: #f2ebce;
+		outline: none;
+	}
+
+	.label-style-panel select.font-menu option:checked {
+		background: #fbf6e2;
+	}
+}
+
+.label-style-panel input[type="text"] {
+	-webkit-appearance: none;
+	appearance: none;
+}
+
+.label-style-panel input[type="text"]:focus {
+	border-color: #d3aa00;
+	box-shadow: none;
+	outline: none;
+}
+
+.label-create-expression-row input {
+	width: 100%;
+	box-sizing: border-box;
+}
+
+.label-create-copy-row {
+	display: flex;
+	align-items: flex-start;
+	gap: 5px;
+}
+
+.label-create-copy-row input {
+	margin-top: 1px;
+}
+
+.label-create-copy-row span {
+	display: inline;
+	margin: 0;
+	color: #555;
+}
+
+.label-style-row button {
+	margin-right: 5px;
+}
+
+/* Saved styles: a menu that applies one and a button that saves the current
+   one, under a heading. The menu is built from divs rather than being a
+   <select>, because each row carries its own delete button -- see
+   gui-style-preset-control.mjs.
+
+   A section of the panel like Text and Icon, so the spacing above it is the
+   whitespace those sections are separated by, in the panel that has them, and
+   this margin in the layer panel, which does not. */
+.label-saved-style-row {
+	margin-top: 11px;
+}
+
+/* The two controls sit in the panel's A and B columns, on the same grid as a
+   split row: Apply style lines up with the fields and menus above it, and
+   Save current with the narrow column beside them. Every style panel is the
+   same width, so one grid does for all three. */
+.label-saved-style-controls {
+	display: grid;
+	grid-template-columns: 1fr var(--label-split-b-width);
+	column-gap: 10px;
+	margin-top: 4px;
+}
+
+/* min-width:0 lets the menu shrink to its column: a grid track is otherwise
+   at least as wide as its contents, and the names in the list can be long. */
+.label-saved-style-menu {
+	position: relative;
+	min-width: 0;
+}
+
+/* Sized, bordered and lettered like the panel's fields rather than like its
+   19px icon buttons, because that is what these two are: a menu the width of
+   a field, and a button beside it. The type is the fields' own -- these are
+   divs, so the panel's rule for button, select and input does not reach them
+   and they were left at the app's 14px. */
+.label-saved-style-button {
+	box-sizing: border-box;
+	display: flex;
+	align-items: center;
+	height: var(--label-field-height);
+	padding: 0 6px;
+	border: 1px solid var(--label-field-border);
+	border-radius: var(--label-field-radius);
+	background-color: white;
+	font-size: 12px;
+	color: #000;
+	cursor: pointer;
+	user-select: none;
+}
+
+/* "Save current" is 63px of SourceSans3 and 68px of the Arial it falls back
+   to, in a column of 74: too near its edges to read as inset from them, so
+   the label is centred and the padding is only what keeps the widest of the
+   two fonts off the border. */
+.label-saved-style-save {
+	justify-content: center;
+	padding: 0 2px;
+}
+
+/* The panel's own disabled look: live colours, faded as a whole. */
+.label-saved-style-button.disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+
+.label-saved-style-button:hover:not(.disabled),
+.label-saved-style-button.open {
+	background-color: #f0f0f0;
+}
+
+.label-saved-style-btn {
+	padding-right: 20px;
+}
+
+/* The label gives way to the chevron rather than running under it. */
+.label-saved-style-btn span {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+/* Above the panel's own rows, and free to hang past its bottom edge -- the
+   panel does not clip, and this row is the last thing in it. */
+.label-saved-style-list {
+	position: absolute;
+	top: 100%;
+	left: 0;
+	/* At least as wide as the menu, and wider if the names need it: the button
+	   is only as wide as the space left over beside Save current, and a style
+	   name is what the user is trying to read. It can hang over the map --
+	   nothing clips it -- but not indefinitely; past that, names ellipsize. */
+	min-width: 100%;
+	width: max-content;
+	max-width: 240px;
+	z-index: 30;
+	margin-top: 2px;
+	padding: 3px 2px;
+	max-height: 40vh;
+	overflow-y: auto;
+	background: white;
+	/* The size of the button it drops from, which is the size of a field. */
+	font-size: 12px;
+	border: 1px solid #bbb;
+	border-radius: var(--label-field-radius);
+	box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+}
+
+.label-saved-style-list.drop-up {
+	top: auto;
+	bottom: 100%;
+	margin: 0 0 2px 0;
+}
+
+.label-saved-style-item {
+	display: flex;
+	align-items: center;
+}
+
+/* The name is the target for applying, and the highlight stops where it does,
+   so that the row reads as two things to click rather than one with a hazard
+   at the end of it. */
+.label-saved-style-name {
+	flex: 1;
+	min-width: 0;
+	padding: 3px 4px 3px 8px;
+	border-radius: 3px;
+	color: var(--normal-text);
+	cursor: pointer;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.label-saved-style-name:hover {
+	background: var(--lt-theme-col);
+}
+
+/* Hidden by visibility rather than left out, so that a name is the same width
+   whether or not the pointer is on it. */
+.label-saved-style-delete {
+	flex: none;
+	width: 16px;
+	padding: 2px 4px 2px 0;
+	text-align: center;
+	line-height: 1;
+	color: #999;
+	cursor: pointer;
+	visibility: hidden;
+}
+
+.label-saved-style-item:hover .label-saved-style-delete {
+	visibility: visible;
+}
+
+.label-saved-style-delete:hover {
+	color: #c00;
+}
+
+.label-saved-style-empty {
+	padding: 3px 8px;
+	color: #999;
+	cursor: default;
+}
+
+/* Two controls on one line: a font style and its size, a colour and its
+   opacity, the icon shapes and the icon's size. Both columns are the same
+   width in every row, rather than each row's right column being sized to
+   whatever it happens to hold -- the panel is a stack of these pairs, and
+   sizing them one row at a time leaves every field edge in a slightly
+   different place.
+
+   Bottom-aligned, so that a caption above one control cannot push it out of
+   line with the control beside it: the frame's neatline width has a "Width"
+   over it and the colour beside it has a longer caption, and the two still
+   have to be level. */
+.label-split-row {
+	display: grid;
+	grid-template-columns: 1fr var(--label-split-b-width);
+	column-gap: 10px;
+	align-items: end;
+}
+
+.label-split-cell > span,
+.label-split-cell > .label-style-row-label {
+	display: block;
+	margin-bottom: 2px;
+	color: #555;
+}
+
+.label-editing-status,
+.label-style-selection-row,
+.label-style-panel .label-style-row.label-style-selection-row > span {
+	font-size: 12px;
+	color: #555;
+}
+
+.label-style-panel .label-style-row > span,
+.label-style-panel .label-split-cell > span,
+.label-style-panel .label-style-row > .label-style-row-label,
+.label-style-panel .label-split-cell > .label-style-row-label,
+.label-style-panel .frame-input-cell > span,
+.label-style-panel .point-style-note {
+	font-size: 11px;
+	color: #555;
+}
+
+/* A "?" just after its caption rather than floated to the far edge of the row,
+   and in the caption's size, so it reads as part of the caption. */
+.label-style-panel .label-style-row-label > .tip-button {
+	float: none;
+	margin: 0 0 0 4px;
+	font-size: 12px;
+	font-weight: bold;
+}
+
+/* The panel sits at the top of the map, where a bubble drawn above its "?"
+   would go under the page header, so these open downward, tail pointing up. */
+.label-style-panel .label-style-row-label > .tip-button .tip-anchor {
+	bottom: auto;
+	top: 22px;
+}
+
+.label-style-panel .label-style-row-label > .tip-button .tip:after,
+.label-style-panel .label-style-row-label > .tip-button .tip:before {
+	top: auto;
+	bottom: 100%;
+	border-top-color: transparent;
+}
+
+.label-style-panel .label-style-row-label > .tip-button .tip:after {
+	border-bottom-color: #fff;
+}
+
+.label-style-panel .label-style-row-label > .tip-button .tip:before {
+	border-bottom-color: #999;
+}
+
+/* A pattern's size and gap are a pair, measured the same way, so they share
+   the row equally rather than one taking the narrow column. */
+.layer-pattern-size-row {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	column-gap: 10px;
+}
+
+.layer-pattern-size-row .label-split-cell {
+	min-width: 0;
+}
+
+.layer-pattern-code-row input[type="text"] {
+	width: 100%;
+}
+
+.label-split-row .label-split-cell + .label-split-cell {
+	white-space: nowrap;
+}
+
+/* A line's taper goes in the narrow column, under its fade, with nothing
+   beside it. */
+.layer-arrow-taper-cell,
+.symbol-curve-taper-cell {
+	grid-column: 2;
+}
+
+.label-split-cell > select,
+.label-split-cell > .size-field,
+.label-split-cell > input[type="text"] {
+	width: 100%;
+	box-sizing: border-box;
+}
+
+.label-split-cell > .size-field {
+	display: flex;
+}
+
+.label-style-panel .size-field input.size-field-input {
+	flex: 1;
+	width: auto;
+}
+
+/* A grid track is at least as wide as its contents unless told otherwise, and
+   a text input's contents are twenty characters whatever width it is given --
+   without this the colour field pushes the opacity beside it off the panel. */
+.label-split-row .label-split-cell {
+	min-width: 0;
+}
+
+.label-font-style-row select {
+	width: 100%;
+	box-sizing: border-box;
+}
+
+/* Both take their width from the split row's narrow column; a value reads from
+   the left edge of the field, where the caption above it starts. */
+.label-style-panel .label-opacity-input,
+.label-style-panel .label-measure-input {
+	padding: 0 4px;
+	vertical-align: top;
+}
+
+/* One disabled look for the whole panel. Left to themselves the controls each
+   fade differently -- a select takes the browser's grey, an input with
+   -webkit-appearance: none takes no styling at all, and a widget built from
+   divs takes whatever it was given -- so an inert row ends up in three or four
+   shades. Each control keeps its live colours and the whole thing is faded by
+   the same amount, which also fades its border. */
+.label-style-panel select:disabled,
+.label-style-panel input[type="text"]:disabled,
+.label-style-panel .size-field.disabled,
+.label-style-panel .label-color-field.disabled,
+.label-style-panel .label-panel-action-btn.disabled,
+.label-style-panel .label-btn-group.disabled {
+	opacity: 0.45;
+	color: var(--normal-text);
+	-webkit-text-fill-color: var(--normal-text);
+	background-color: white;
+	border-color: var(--label-field-border);
+}
+
+/* Nothing inside an already-faded control fades again: two 0.45s over each
+   other is 0.2, and a widget made of a wrapper and an input -- the size and
+   colour fields -- was coming out half the weight of the plain input beside
+   it. The parts still take their own disabled state, because a disabled input
+   cannot be typed into and a disabled button cannot be pressed; it is only the
+   fading that belongs to the whole. */
+.label-style-panel .label-btn-group.disabled .label-panel-btn.disabled,
+.label-style-panel .size-field.disabled .label-panel-btn.disabled,
+.label-style-panel .size-field.disabled input:disabled,
+.label-style-panel .label-color-field.disabled input:disabled,
+.label-style-panel .label-color-field.disabled .label-color-chit.disabled {
+	opacity: 1;
+	color: inherit;
+}
+
+/* Whitespace and a bold heading separate the sections; a rule as well would be
+   a third answer to a question already settled twice. */
+.label-style-panel .label-style-section + .label-style-section {
+	margin-top: 8px;
+	padding-top: 0;
+	border-top: 0;
+}
+
+/* Baselines, not boxes: the heading and the caption beside it are set at
+   different sizes, and centring their boxes leaves the smaller one's baseline
+   a pixel or two high. The switch has no baseline to share, so it centres on
+   the line itself. */
+.label-style-panel .label-style-section-title {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+}
+
+/* A layer with no features: every control is faded and inert, leaving the
+   headings, the "Editing:" line that says why, and the close button. */
+.label-style-panel.no-targets .label-style-row:not(.label-style-selection-row) {
+	opacity: 0.45;
+	pointer-events: none;
+}
+
+/* Closed sections stack a little closer than open ones, which are spaced to
+   set their controls apart. */
+.label-style-panel .label-style-section.collapsed + .label-style-section {
+	margin-top: 0;
+}
+
+/* A closed section shows only its heading (see makeCollapsibleSection()). */
+.label-style-panel .label-style-section.collapsed > :not(.label-style-section-title) {
+	display: none;
+}
+
+/* The whole heading opens and closes the section, so that the target is the
+   width of the panel rather than the chevron. Centred rather than set on a
+   baseline: the chevron, the dot and the × have none to share. */
+.label-style-panel .label-section-heading {
+	align-items: center;
+	gap: 5px;
+	cursor: pointer;
+	user-select: none;
+}
+
+/* A chevron, pointing right when closed and down when open, the convention
+   for a disclosure: two sides of a square, turned. */
+.label-style-panel .label-section-arrow {
+	flex: none;
+	box-sizing: border-box;
+	width: 6px;
+	height: 6px;
+	margin: 0 2px 0 1px;
+	border-right: 1.5px solid #222;
+	border-bottom: 1.5px solid #222;
+	transform: translateY(-2px) rotate(45deg);
+	transition: transform 0.12s;
+}
+
+.label-style-panel .label-style-section.collapsed .label-section-arrow {
+	transform: translateX(-2px) rotate(-45deg);
+}
+
+/* Whether the features being styled have the section's style: a dot for all
+   of them, half of one for some -- the hard edge of the mixed switch, for the
+   same reason -- and nothing for none. */
+.label-style-panel .label-section-marker {
+	flex: none;
+	margin-left: 2px;
+	box-sizing: border-box;
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	visibility: hidden;
+}
+
+.label-style-panel .label-section-marker.on {
+	visibility: visible;
+	background: var(--theme-col);
+}
+
+.label-style-panel .label-section-marker.mixed {
+	visibility: visible;
+	border: 1px solid var(--theme-col);
+	background: linear-gradient(to right, var(--theme-col) 50%, white 50%);
+}
+
+.label-style-panel .label-section-remove {
+	margin-left: auto;
+	padding: 0 3px;
+	font-size: 16px;
+	font-weight: normal;
+	line-height: 14px;
+	color: #555;
+	cursor: pointer;
+}
+
+.label-style-panel .label-section-remove:hover {
+	color: #222;
+}
+
+.label-style-panel.no-targets .label-section-marker,
+.label-style-panel.no-targets .label-section-remove {
+	visibility: hidden;
+}
+
+.label-style-panel .label-style-section-title.hidden {
+	display: none;
+}
+
+.label-style-panel .label-style-section-name {
+	font-size: 13.5px;
+	color: #222;
+}
+
+.label-style-panel .label-style-section-minor .label-style-section-name {
+	font-size: 12px;
+	font-weight: normal;
+	line-height: 1;
+	color: #555;
+}
+
+/* Where label text is measured (gui-label-measure.mjs). Off the page rather
+   than display:none, which would give it no layout and its text no box. */
+.label-measure-svg {
+	position: absolute;
+	left: -10000px;
+	top: -10000px;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+}
+
+/* Where text blocks are wrapped (gui-label-wrap.mjs), for the same reason. The
+   wrapping <div> sets its own width, which the clipped box does not limit. */
+.label-wrap-measure {
+	position: absolute;
+	left: -10000px;
+	top: -10000px;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+}
+
+/* The panels' one grey, which their captions are set in. In the label panel
+   a placeholder is only ever "mixed": a property that is not set shows the
+   value the renderer uses instead, in black, as a value. */
+.label-style-panel ::placeholder {
+	color: #555;
+}
+
+/* Buttons that answer one question share a border and sit flush, the way the
+   size field and its stepper do: four shapes are four answers to "which
+   symbol", not four separate controls. They divide the width of their cell so
+   that the group lines up with the field above or below it. */
+.label-style-panel .label-btn-group {
+	display: flex;
+	box-sizing: border-box;
+	height: var(--label-field-height);
+	border: 1px solid var(--label-field-border);
+	border-radius: var(--label-field-radius);
+	background: white;
+	overflow: hidden;
+}
+
+.label-style-panel .label-btn-group .label-panel-btn {
+	flex: 1;
+	width: auto;
+	height: auto;
+	border: none;
+	border-radius: 0;
+	background: white;
+}
+
+.label-style-panel .label-btn-group .label-panel-btn + .label-panel-btn {
+	border-left: 1px solid #e0e0e0;
+}
+
+/* Hover leaves the selected button alone. Every hover fill in the panel is
+   lighter than the selection it would sit on, so pointing at the chosen answer
+   made it look less chosen than its neighbours -- and there is nothing to
+   preview anyway, since clicking it changes nothing. */
+.label-style-panel .label-btn-group .label-panel-btn:hover:not(.disabled):not(.selected) {
+	background: #f0f0f0;
+}
+
+.label-style-panel .label-btn-group .label-panel-btn.selected {
+	background: #dcdcdc;
+	color: black;
+}
+
+/* A switch, because whether the label has a symbol at all is a yes/no that the
+   four shapes below it then qualify. Off is a pale track with the knob left,
+   on a dark one with the knob right, and mixed -- some of the selected labels
+   on, some off -- is both halves at once with the knob over the join. */
+.label-toggle {
+	position: relative;
+	top: -1px;
+	flex: none;
+	width: 26px;
+	height: 15px;
+	border-radius: 8px;
+	background: #ccc;
+	cursor: pointer;
+	user-select: none;
+	transition: background-color 0.12s;
+}
+
+.label-toggle-knob {
+	position: absolute;
+	top: 2px;
+	left: 2px;
+	width: 11px;
+	height: 11px;
+	border-radius: 50%;
+	background: white;
+	box-shadow: 0 1px 2px rgba(0,0,0,0.25);
+	transition: left 0.12s;
+}
+
+.label-toggle.on {
+	background: #333;
+}
+
+.label-toggle.on .label-toggle-knob {
+	left: 13px;
+}
+
+/* The hard edge is the point: a gradient stop rather than a blend, so that the
+   track reads as one half on and one half off rather than as a third colour. */
+.label-toggle.mixed {
+	background: linear-gradient(to right, #333 50%, #ccc 50%);
+}
+
+.label-toggle.mixed .label-toggle-knob {
+	left: 7.5px;
+}
+
+.label-toggle.disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+
+.label-style-section-title {
+	margin-top: 8px;
+	margin-bottom: 0px;
+	font-weight: 600;
+	color: #333;
+}
+
+.label-style-section + .label-style-section .label-style-section-title {
+	margin-top: 2px;
+}
+
+.label-color-row {
+	position: relative;
+}
+
+.label-panel-btn {
+	box-sizing: border-box;
+	user-select: none;
+	cursor: pointer;
+	border: 1px solid #999;
+	border-radius: 3px;
+	background: #eee;
+	padding: 0;
+	height: 19px;
+	width: 19px;
+}
+
+.label-panel-btn.disabled {
+	color: #999;
+	cursor: default;
+	opacity: 0.45;
+}
+
+.label-panel-action-btn {
+	box-sizing: border-box;
+	display: inline-flex;
+	align-items: center;
+	height: var(--label-field-height);
+	padding: 0 8px;
+	border: 1px solid var(--label-field-border);
+	border-radius: var(--label-field-radius);
+	background-color: white;
+	font-size: 12px;
+	color: var(--normal-text);
+	cursor: pointer;
+	user-select: none;
+	margin-top: 4px;
+}
+
+.label-panel-action-btn:hover:not(.disabled) {
+	background-color: #f0f0f0;
+}
+
+.label-panel-action-btn.disabled {
+	cursor: default;
+}
+
+/* Buttons wrap rather than run off the panel: two of them fit on one line in
+   the polygon panel and would not if either name grew. */
+.label-panel-button-row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px 6px;
+}
+
+/* In the narrow column beside the fill's colour, level with it and as wide
+   as the fields in that column. */
+.label-split-cell > .layer-palettes-btn {
+	display: flex;
+	justify-content: center;
+	width: 100%;
+	margin-top: 0;
+	white-space: nowrap;
+}
+
+.label-style-panel .label-color-field {
+	display: flex;
+	align-items: center;
+	box-sizing: border-box;
+	height: var(--label-field-height);
+	padding: 0 3px;
+	border: 1px solid var(--label-field-border);
+	border-radius: var(--label-field-radius);
+	background: white;
+}
+
+.label-style-panel .label-color-field:focus-within {
+	border-color: #d3aa00;
+}
+
+.label-style-panel .label-color-field .label-color-chit {
+	flex: none;
+	width: 13px;
+	height: 13px;
+	margin-right: 6px;
+	border: 1px solid rgba(0,0,0,0.22);
+	/* border-radius: 2px; */
+}
+
+/* A swatch for a selection whose colours disagree: split rather than empty,
+   because empty is how the swatch says the colour is unset. Two greys, so that
+   it cannot be read as one of the colours in the selection. */
+.label-style-panel .label-color-field .label-color-chit.mixed {
+	background-image: linear-gradient(135deg, #d9d9d9 0 50%, #8c8c8c 50% 100%);
+}
+
+.label-style-panel .label-color-field input[type="text"] {
+	flex: 1;
+	width: auto;
+	min-width: 0;
+	height: auto;
+	padding: 0;
+	border: none;
+	border-radius: 0;
+	background: transparent;
+	box-shadow: none;
+}
+
+.label-style-panel .label-color-field input[type="text"]:focus {
+	border: none;
+	box-shadow: none;
+	outline: none;
+}
+
+.label-style-panel .label-color-field.disabled {
+	opacity: 0.45;
+}
+
+/* The opacity at the end of a colour field, behind a divider the height of the
+   field. Wide enough for "100%" and for "mixed", and no wider: the hex value
+   beside it gets the rest. Selectors as specific as the colour field's input
+   rules above, which would otherwise stretch it and take its divider away. */
+.label-style-panel .label-color-field input.label-opacity-input,
+.label-style-panel .label-color-field input.label-opacity-input:focus {
+	flex: none;
+	align-self: stretch;
+	width: 44px;
+	height: auto;
+	margin: 0 -3px 0 4px;
+	padding: 0 4px 0 6px;
+	border: none;
+	border-left: 1px solid var(--label-field-border);
+	border-radius: 0;
+}
+
+.label-css-row input {
+	width: 100%;
+	box-sizing: border-box;
+}
+
+.point-style-note {
+	color: #555;
+	line-height: 1.3;
+}
+
+.point-create-labels-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.point-create-copy-label {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	margin: 0;
+	color: #555;
+	font-size: 12px;
+}
+
+.point-create-copy-label span {
+	display: inline;
+	margin: 0;
+	color: #555;
+}
+
+/* Fixed rather than absolute so that a panel inside a scrolling box cannot trap
+   the picker: Frame properties lives in an .alert-box that scrolls its
+   overflow, which clipped the picker into the panel instead of letting it float
+   over it. ColorPicker sets top/left from the field it belongs to when it
+   opens. */
+.label-color-picker {
+	position: fixed;
+	z-index: 25;
+	padding: 8px;
+	background: white;
+	border: 1px solid #ddd;
+	border-radius: 6px;
+	box-shadow: 0 1px 7px rgba(0,0,0,0.18);
+	/* dragged by whatever isn't a control */
+	cursor: move;
+}
+
+.label-color-picker input {
+	cursor: text;
+}
+
+.label-color-picker button {
+	cursor: pointer;
+}
+
+/* A style panel is a stacking context, below the floating toolbars (25), so a
+   picker that opens low enough to reach them would be drawn under them. The
+   panel comes forward while one of its pickers is open. */
+.label-style-panel.color-picker-open {
+	z-index: 26;
+}
+
+.label-color-picker canvas {
+	display: block;
+	width: 256px;
+	margin: 0 0 6px 0;
+	cursor: crosshair;
+}
+
+.label-color-presets {
+	margin: 0 0 6px 0;
+}
+
+.label-color-preset-row {
+	display: flex;
+	gap: 2px;
+	margin-bottom: 2px;
+}
+
+.label-color-preset {
+	box-sizing: border-box;
+	width: 14px;
+	height: 14px;
+	border: 1px solid rgba(0, 0, 0, 0.25);
+	cursor: pointer;
+}
+
+.label-color-preset:hover,
+.label-color-preset:focus {
+	outline: 1px solid #d3aa00;
+	outline-offset: 1px;
+}
+
+.label-color-preset-group-start {
+	margin-left: 2px;
+}
+
+.label-color-picker.dragging-color canvas {
+	cursor: none;
+}
+
+body.dragging-color-picker,
+body.dragging-color-picker * {
+	cursor: none !important;
+}
+
+.label-color-canvas-wrap {
+	position: relative;
+	width: 256px;
+	overflow: visible;
+}
+
+.label-color-marker {
+	position: absolute;
+	pointer-events: none;
+	overflow: visible;
+}
+
+.label-color-marker circle {
+	fill: none;
+	stroke-width: 1.5;
+}
+
+.label-color-picker-fields {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin-top: 6px;
+}
+
+/* Like the panels' own buttons (.label-panel-action-btn) */
+.label-color-picker-fields button {
+	box-sizing: border-box;
+	height: var(--label-field-height, 22px);
+	margin: 0 0 0 auto;
+	padding: 0 8px;
+	border: 1px solid var(--label-field-border, #c6c6c6);
+	border-radius: var(--label-field-radius, 4px);
+	background-color: white;
+	box-shadow: none;
+	font: inherit;
+	font-size: 12px;
+	color: var(--normal-text);
+	cursor: pointer;
+}
+
+.label-color-picker-fields button:hover {
+	background-color: #f0f0f0;
+}
+
+.label-style-selection-row {
+	line-height: 1;
+}
+
+.label-style-selection-row button {
+	margin-right: 5px;
+}
+
+.label-style-selection-row .label-editing-status,
+.label-style-selection-row .label-editing-clear {
+	display: inline;
+}
+
+.label-style-selection-row .label-editing-clear.hidden {
+	display: none;
+}
+
+.label-style-selection-row .label-editing-clear {
+	margin-left: 8px;
+	color: var(--colored-text);
+	cursor: pointer;
+}
+
+.label-style-selection-row .label-editing-clear:hover,
+.repair-btn:hover {
+	text-decoration: underline;
+}
+
+.label-position-grid {
+	display: grid;
+	grid-template-columns: repeat(3, 10px);
+	gap: 2px;
+}
+
+.label-position-grid .label-panel-btn {
+	width: 9px;
+	height: 9px;
+	cursor: pointer;
+	border-radius: 0;
+	background: white;
+}
+
+/* Nine plain squares: a border on each would double the lines in a shape that
+   is nothing but lines, so the cells are filled and the chosen one is dark. */
+.text-style-panel .label-position-grid {
+	grid-template-columns: repeat(3, 10px);
+	gap: 3px;
+	margin-top: -14px;
+	margin-bottom: 3px;
+}
+
+.text-style-panel .label-position-grid .label-panel-btn {
+	width: 10px;
+	height: 10px;
+	border: none;
+	border-radius: 1px;
+	background: #dcdcdc;
+}
+
+.text-style-panel .label-position-grid .label-panel-btn:hover:not(.disabled):not(.selected) {
+	background: #c4c4c4;
+}
+
+.text-style-panel .label-position-grid .label-panel-btn.selected {
+	background: black;
+}
+
+/* The position a dragged label is nearest, which is where it roughly belongs
+   and the cell that puts it back. Between the unlit grey and the lit black,
+   because it is saying something weaker than either: not "here" but "about
+   here, and not exactly". */
+.text-style-panel .label-position-grid .label-panel-btn.nearest:not(.selected) {
+	background: #a0a0a0;
+}
+
+/* The grid and the Fixed/Draggable toggle share the position row, the toggle
+   against the right edge so that it lines up with the fields in the rows
+   above. */
+.text-style-panel .label-position-row {
+	margin-top: 3px;
+	display: flex;
+	/* align-items: center; */
+	justify-content: space-between;
+}
+
+/* Words rather than glyphs, so these segments size to their text instead of
+   splitting the group evenly, and sit in a group narrow enough to read as one
+   control beside the grid. */
+.text-style-panel .label-drag-mode-buttons .label-panel-btn {
+	display: flex;
+	flex: 0 0 auto;
+	align-items: center;
+	padding: 0 7px;
+	font-size: 12px;
+}
+
+/* Words, like the label panel's Fixed/Draggable, but splitting the group
+   evenly so that it lines up with the shapes above. */
+.layer-style-panel .layer-arrow-position-buttons .label-panel-btn,
+.layer-style-panel .layer-cap-buttons .label-panel-btn,
+.symbol-style-panel .symbol-arrowhead-buttons .label-panel-btn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0 4px;
+	font-size: 12px;
+}
+
+/* The symbol panel's icon controls and curve controls, when it shows both,
+   are two groups rather than two sections of one. */
+.symbol-style-panel.label-style-panel .label-style-section.symbol-section-rule {
+	margin-top: 12px;
+	padding-top: 4px;
+	border-top: 1px solid #e4e4e4;
+}
+
+/* A marker's label: a field a few characters wide with its caption beside it,
+   and Auto at the right of the column. */
+.symbol-style-panel .label-split-cell.symbol-label-text-cell {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+/* Room for two characters, the widest a marker's label usually is. In em so
+   that it holds two at whatever size the panel's type is. */
+.symbol-style-panel .symbol-label-text-cell > input.symbol-label-text-input {
+	flex: none;
+	width: 2.4em;
+	padding: 0 2px;
+	text-align: center;
+}
+
+.symbol-style-panel .symbol-label-text-cell span {
+	margin-bottom: 0;
+	font-size: 11px;
+	color: #555;
+}
+
+.symbol-style-panel .symbol-label-auto {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin-left: auto;
+}
+
+/* In the caption of a marker's Baseline, while it has one of its own: takes
+   the text back to where the font's capitals are centred. */
+.symbol-style-panel .label-style-row span.symbol-baseline-auto {
+	display: inline;
+	cursor: pointer;
+}
+
+.symbol-style-panel .label-style-row span.symbol-baseline-auto.hidden {
+	display: none;
+}
+
+.label-panel-btn.selected {
+	background-color: black;
+	border-color: black;
+	color: white;
+}
+
+.label-icon-buttons .label-panel-btn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.label-icon-symbol {
+	display: block;
+	width: 13px;
+	height: 13px;
+	fill: currentColor;
+	stroke: none;
+}
+
+.label-icon-symbol[data-shape="ring"] {
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 1.8;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+.label-icon-symbol[data-shape="star"] {
+	transform: scale(1.4);
+}
+
+/* Drawn as the symbol is, an outline around a hollow star, in the artwork's
+   own 40-unit coordinates -- so the stroke width is in those units too. */
+.label-icon-symbol[data-shape="nyt-star"] {
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 5;
+	stroke-miterlimit: 10;
+	transform: scale(0.95);
+}
+
+/* The NYT icons, in a menu opened from the end of the icon buttons */
+.icon-shape-menu {
+	position: fixed;
+	z-index: 1000;
+	padding: 4px 0;
+	border: 1px solid #d5d5d5;
+	border-radius: 6px;
+	background-color: #fff;
+	box-shadow: 0 1px 7px rgba(0,0,0,0.18);
+	font-size: 12px;
+}
+
+.icon-shape-menu-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 4px 12px 4px 10px;
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.icon-shape-menu-item:hover {
+	background-color: #f0f0f0;
+}
+
+.icon-shape-menu-item.selected {
+	font-weight: bold;
+}
+
+.icon-shape-menu-item.disabled {
+	opacity: 0.35;
+	cursor: default;
+}
+
+.icon-shape-menu-item.disabled:hover {
+	background-color: transparent;
+}
+
+.label-align-buttons .label-panel-btn,
+.label-callout-buttons .label-panel-btn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+/* Lines like the alignment glyphs, with the arrowhead and the dot filled. */
+.label-callout-symbol {
+	display: block;
+	width: 16px;
+	height: 16px;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 1.4;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+.label-callout-symbol .fill {
+	fill: currentColor;
+	stroke: none;
+}
+
+/* Drawn larger than the icon symbols above, which share its viewBox but not
+   its proportions: three rules across the middle are ink over less than half
+   of the box, where a circle or a square fills most of its own, so at the same
+   13px both the glyph and its weight read smaller than the shapes beside it.
+   16px also puts the 16-unit viewBox at one unit per pixel, so the half-pixel
+   baselines the rules are drawn on land where they were meant to. */
+.label-align-symbol {
+	display: block;
+	width: 16px;
+	height: 16px;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 1.5;
+	stroke-linecap: round;
+}
+
+/* A size field and its stepper share a border and sit flush, so that the three
+   elements read as one control rather than three. The buttons are always
+   visible: they are the primary affordance of the panel's most-used numbers,
+   and revealing them on hover would either reserve their space anyway or
+   overlap the value being adjusted. */
+.size-field {
+	display: inline-flex;
+	align-items: stretch;
+	box-sizing: border-box;
+	height: var(--label-field-height, 19px);
+	border: 1px solid var(--label-field-border, #999);
+	border-radius: var(--label-field-radius, 3px);
+	background: #fff;
+	overflow: hidden;
+	vertical-align: top;
+}
+
+.size-field.disabled {
+	opacity: 0.45;
+}
+
+/* input.size-field-input, not .size-field-input: the panels give their text
+   inputs a border through an attribute selector, and the field's own border is
+   the one that has to show. */
+.size-field input.size-field-input {
+	width: 40px;
+	min-width: 0;
+	height: auto;
+	margin: 0;
+	padding: 0 3px;
+	border: none;
+	border-radius: 0;
+	box-shadow: none;
+	background: transparent;
+	color: black;
+}
+
+/* The field shows focus on its outer border, so that the ring cannot be drawn
+   between the input and the stepper it shares an edge with. */
+.size-field input.size-field-input:focus {
+	outline: none;
+	border: none;
+	box-shadow: none;
+}
+
+.size-field:focus-within {
+	border-color: #d3aa00;
+}
+
+/* The stepper is inset from the field's border rather than dividing it: the
+   value is the field's content and the arrows are a control within it, which
+   is also how the native spinner reads. */
+.size-field .size-field-stepper {
+	display: flex;
+	flex-direction: column;
+	margin: 2px 2px 2px 0;
+	border: 1px solid #d6d6d6;
+	border-radius: 2px;
+	background: #f7f7f7;
+	overflow: hidden;
+}
+
+/* Half-height buttons, so the pair occupies the width of one: the panel's rows
+   are tight and a size field shares its row with a label. */
+.size-field .size-field-btn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 13px;
+	height: 8px;
+	border: none;
+	border-radius: 0;
+	background: transparent;
+}
+
+.size-field .size-field-arrow {
+	display: block;
+	width: 7px;
+	height: 5px;
+	fill: #444;
+	stroke: none;
+}
+
+/* Popups mark their contents .selectable, which gives everything in them a
+   text cursor */
+.size-field .size-field-stepper,
+.size-field .size-field-stepper * {
+	cursor: default;
+	user-select: none;
+}
+
+.size-field .size-field-btn:hover:not(.disabled) {
+	background: #e2e2e2;
+}
+
+.nav-menu-item,
+.contextmenu-item,
+.draw-menu-item {
+	background-color: #fff;
+	white-space: nowrap;
+	/* padding: 3px 10px 4px 10px; */
+	margin: 1px 10px;
+	padding: 2px 0;
+	cursor: pointer;
+	font-size: 12px;
+	line-height: 13px;
+}
+
+.contextmenu-label {
+	color: #999;
+	white-space: nowrap;
+	padding: 5px 10px 1px 10px;
+	font-size: 12px;
+	line-height: 12px;
+	margin-top: -2px;
+}
+
+/* How many labels a "select" item would select. In the grey of a menu heading
+   rather than the item's own colour: it qualifies what the item says rather
+   than being part of it. */
+.contextmenu-count {
+	font-size: 10px;
+	color: #999;
+}
+
+.contextmenu-item:hover .contextmenu-count {
+	color: #777;
+}
+
+/* color tile shown instead of a bullet in the raster color readout */
+.contextmenu-swatch {
+	display: inline-block;
+	width: 10px;
+	height: 10px;
+	margin-right: 7px;
+	vertical-align: 0;
+	border: 1px solid rgba(0,0,0,0.25);
+	border-radius: 2px;
+}
+
+.nav-menu-item:hover,
+.contextmenu-item:hover,
+.draw-menu-item:hover,
+.nav-btn:hover .nav-sub-menu:not(.active):not(:hover) .nav-menu-item[data-name=info] {
+	color: black;
+	background: var(--lt-theme-col);
+}
+
+.nav-menu-item.selected {
+	color: black;
+}
+
+/* bullets https://www.w3schools.com/charsets/ref_utf_geometric.asp */
+.nav-sub-menu.active .nav-menu-item.selected:before {
+	content: "\25B8";
+	position: relative;
+	margin-left: -7px;
+	left: -2px;
+	top: 1px;
+}
+
+/* Active-layer name at the top of the arrow menu. inline-size containment
+   keeps a long name from widening the menu: the heading takes the width set
+   by the tool names and cuts the layer name short with an ellipsis. */
+.nav-menu-heading {
+	contain: inline-size;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	margin: 1px 10px 3px 10px;
+	padding: 1px 0 3px 0;
+	border-bottom: 1px solid #e4e4e4;
+	color: #999;
+	font-size: 11px;
+	line-height: 12px;
+}
+
+.nav-menu-divider {
+	margin: 4px 10px;
+	border-top: 1px solid #e4e4e4;
+}
+
+.save-menu {
+	text-align: right;
+	padding-bottom: 5px;
+}
+
+.save-menu-entry {
+	line-height: 11px;
+	padding: 4px 7px 5px 7px;
+	background: white;
+}
+
+.save-menu-btn {
+	display: inline-block;
+	border-radius: 4px;
+	border: 1px solid #aaa;
+	font-size: 13px;
+	margin-left: 4px;
+	padding: 2px 4px 3px 4px;
+}
+
+.add-field-btn,
+.edit-data-btn {
+	display: inline-block;
+	font-size: 12px;
+	margin-top: 3px;
+}
+
+.save-menu-btn:hover,
+.add-field-btn:hover,
+.edit-data-btn:hover {
+	color: black;
+}
+
+.save-menu-link,
+.save-menu-btn,
+.add-field-btn,
+.edit-data-btn {
+	cursor: pointer;
+}
+
+
+
+.save-menu-link:hover {
+	color: black;
+}
+
+.save-item-label {
+	font-weight: 600;
+}
+
+.save-item-size {
+	/*color: #999;*/
+	font-weight: 600;
+	font-size: 11px;
+	letter-spacing: 0.5;
+}
+
+.save-menu-item {
+	position: relative;
+	right: 0;
+	text-align: right;
+	background-color: #fff;
+	white-space: nowrap;
+	padding: 3px 7px 0px 7px;
+	line-height: 11px;
+	cursor: pointer;
+}
+
+.nav-btn.disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+
+/* --- FLOATING TOOLBAR --- */
+
+/*
+ * Anchored at bottom-center of the map area. Multiple toolbars stack
+ * vertically (newest on top). Designed to host buttons and other small
+ * controls; the inner content slot leaves room for a future drag handle.
+ */
+
+.floating-toolbar-stack {
+	position: absolute;
+	z-index: 25;
+	bottom: 12px;
+	left: 50%;
+	transform: translateX(-50%);
+	display: flex;
+	flex-direction: column-reverse;
+	align-items: center;
+	gap: 8px;
+	pointer-events: none;
+}
+
+/* Undo/redo stays at the bottom, below any mode toolbar, whichever toolbar
+   happened to be created first. */
+.floating-toolbar-stack > .edit-toolbar {
+	order: -1;
+}
+
+.floating-toolbar {
+	pointer-events: auto;
+	display: flex;
+	align-items: center;
+	background-color: rgba(255, 255, 255, 0.96);
+	border: 1px solid #ddd;
+	border-radius: 8px;
+	box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
+	padding: 4px;
+}
+
+/* The toolbar being hovered comes forward, so that a tooltip drawn above a
+   button is not painted behind the toolbar stacked over it. */
+.floating-toolbar:hover {
+	z-index: 1;
+}
+
+.floating-toolbar-content {
+	display: flex;
+	align-items: center;
+	gap: 0;
+}
+
+.undo-redo-buttons {
+	display: flex;
+	align-items: center;
+}
+
+/* the separator is for undo/redo docked ahead of a tool's own controls */
+.edit-toolbar .undo-redo-buttons > .floating-toolbar-separator {
+	display: none;
+}
+
+.floating-toolbar-separator {
+	width: 1px;
+	height: 18px;
+	margin: 0 4px;
+	background-color: #ddd;
+}
+
+.floating-toolbar-btn {
+	position: relative;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 28px;
+	height: 28px;
+	border-radius: 5px;
+	cursor: pointer;
+	user-select: none;
+}
+
+.floating-toolbar-btn svg {
+	width: 24px;
+	height: 24px;
+}
+
+.floating-toolbar-btn.text-btn {
+	font-size: 12px;
+	padding: 0 6px;
+	width: auto;
+	/* The toolbar is a flex row, which would otherwise squeeze a two-word
+	   label onto two lines and leave the button taller than its neighbours. */
+	flex: none;
+	white-space: nowrap;
+}
+
+.floating-toolbar-btn svg * {
+	fill: var(--theme-col);
+	transition: fill 100ms ease;
+}
+
+/* A line in an icon is drawn in the icon's color and not filled */
+.floating-toolbar-btn svg .stroked {
+	fill: none;
+	stroke: var(--theme-col);
+	transition: stroke 100ms ease;
+}
+
+.floating-toolbar-btn:hover:not(.disabled) {
+	background-color: var(--lt-theme-col);
+}
+
+.floating-toolbar-btn:hover:not(.disabled) svg * {
+	fill: #166689;
+}
+
+.floating-toolbar-btn:hover:not(.disabled) svg .stroked {
+	fill: none;
+	stroke: #166689;
+}
+
+.floating-toolbar-btn:active:not(.disabled) {
+	background-color: #cdebf9;
+}
+
+/* A toggle button that is currently armed */
+.floating-toolbar-btn.selected {
+	background-color: #cdebf9;
+}
+
+.floating-toolbar-btn.selected svg * {
+	fill: #166689;
+}
+
+.floating-toolbar-btn.selected svg .stroked {
+	fill: none;
+	stroke: #166689;
+}
+
+/* An icon button's blue wash goes with its themed icon, but a text button is
+   grey and takes the grey the panels' action buttons use. A selected button
+   keeps its own background while hovered rather than flashing back to grey. */
+.floating-toolbar-btn.text-btn:hover:not(.disabled):not(.selected) {
+	background-color: #f0f0f0;
+}
+
+.floating-toolbar-btn.text-btn:active:not(.disabled):not(.selected) {
+	background-color: #e5e5e5;
+}
+
+.floating-toolbar-btn.text-btn.selected {
+	background-color: #e5e5e5;
+}
+
+.floating-toolbar-btn.disabled {
+	cursor: default;
+}
+
+.floating-toolbar-btn.disabled svg * {
+	fill: #b8c4ca;
+}
+
+.floating-toolbar-btn.disabled svg .stroked {
+	fill: none;
+	stroke: #b8c4ca;
+}
+
+/* A captioned control: a segmented mode switch or a short typed value. The
+   caption is what lets the control be read at a glance, so it is always shown
+   rather than hidden behind a tooltip. */
+.floating-toolbar-group {
+	position: relative;
+	display: flex;
+	align-items: center;
+	flex: none;
+	gap: 5px;
+	margin: 0 4px;
+}
+
+.floating-toolbar-caption {
+	font-size: 12px;
+	color: #808080;
+	white-space: nowrap;
+	user-select: none;
+}
+
+.floating-toolbar-label {
+	font-size: 12px;
+	font-weight: 600;
+	color: #333;
+	white-space: nowrap;
+	user-select: none;
+	padding: 0 4px;
+}
+
+/* Both modes stay visible inside a single outlined well, so the lit one reads
+   as the current state rather than as the result of clicking. */
+.floating-toolbar-segments {
+	display: flex;
+	align-items: center;
+	background-color: #f0f0f0;
+	border-radius: 6px;
+	padding: 2px;
+	gap: 2px;
+}
+
+.floating-toolbar-segments .floating-toolbar-btn {
+	height: 22px;
+	border-radius: 4px;
+}
+
+/* A segment sits on the well rather than on the toolbar, so its hover has to
+   darken past the well's own grey to register. */
+.floating-toolbar-segments .floating-toolbar-btn:hover:not(.disabled):not(.selected) {
+	background-color: #e4e4e4;
+}
+
+.floating-toolbar-segments .floating-toolbar-btn.selected {
+	background-color: #fff;
+	color: #166689;
+	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+.floating-toolbar-field {
+	cursor: default;
+}
+
+.floating-toolbar-field input[type=text] {
+	width: 48px;
+	height: 22px;
+	box-sizing: border-box;
+	font-size: 12px;
+	padding: 0 5px;
+	border: 1px solid #ddd;
+	border-radius: 4px;
+	background-color: #fff;
+	color: var(--dark-text-col);
+	-webkit-appearance: none;
+	appearance: none;
+	outline: none;
+}
+
+/* The same flat focus as the panels: the border turns gold and the global
+   input rule's glow is suppressed. */
+.floating-toolbar-field input[type=text]:focus {
+	border-color: #d3aa00;
+	box-shadow: none;
+	outline: none;
+}
+
+/* Tooltip shown above the button (or captioned control) on hover */
+.floating-toolbar-btn[data-tooltip]:hover:not(.disabled)::after,
+.floating-toolbar-group[data-tooltip]:hover::after {
+	content: attr(data-tooltip);
+	position: absolute;
+	bottom: calc(100% + 8px);
+	left: 50%;
+	transform: translateX(-50%);
+	background-color: rgba(40, 40, 40, 0.92);
+	color: #fff;
+	font-size: 11px;
+	line-height: 1;
+	white-space: nowrap;
+	padding: 5px 7px;
+	border-radius: 4px;
+	pointer-events: none;
+	z-index: 1;
+}
+
+.zoom-box {
+	position: absolute;
+	border: 1px solid #cc6acc;
+	z-index: 15;
+	pointer-events: none;
+}
+
+.zoom-box.rectangles {
+	border: none;
+	cursor: default;
+}
+
+.zoom-box .handle {
+	position: absolute;
+	z-index: 16;
+	/* cursor: pointer; */
+	background: #cc6acc;
+	/* pointer-events: all; */
+}
+
+.zoom-box.hittable .handle {
+	pointer-events: all;
+}
+
+/* Overlay frames on the previewed page; below the frame editor's handles */
+.map-layers > svg.frame-overlay-previews {
+	top: 0;
+	left: 0;
+	z-index: 10;
+	pointer-events: none;
+	overflow: hidden;
+}
+
+.frame-overlay-preview {
+	pointer-events: none;
+}
+
+.frame-overlay-box {
+	position: absolute;
+	box-sizing: border-box;
+	z-index: 14;
+	border: 1px dashed #555;
+	background: rgba(255, 255, 255, 0.55);
+	cursor: inherit;
+	overflow: hidden;
+}
+
+.frame-overlay-box.selected {
+	cursor: move;
+}
+
+.frame-overlay-box:hover,
+.frame-overlay-box.dragging {
+	border-style: solid;
+	/* background: rgba(255, 255, 255, 0.75); */
+}
+
+.frame-overlay-box.showing-content {
+	border-color: transparent;
+	background: transparent;
+}
+
+.frame-overlay-box.showing-content:hover,
+.frame-overlay-box.showing-content.dragging,
+.frame-overlay-box.showing-content.selected {
+	border-color: transparent;
+	background: transparent;
+}
+
+body.pan .frame-overlay-box:hover:not(.selected):not(.showing-content),
+body.panning .frame-overlay-box:hover:not(.selected):not(.showing-content) {
+	border-style: dashed;
+	background: rgba(255, 255, 255, 0.55);
+}
+
+.frame-overlay-box.full-page-overlay {
+	cursor: default;
+}
+
+.overlay-corner-control .floating-toolbar-btn.text-btn {
+	font-size: 16px;
+	/* min-width: 24px; */
+	justify-content: center;
+}
+
+.overlay-full-page-label {
+	color: #808080;
+	font-weight: normal;
+}
+
+/* the overlay whose placement the overlay toolbar is showing */
+.frame-overlay-box.selected {
+	border: 1px solid var(--colored-text);
+}
+
+.frame-overlay-box-label {
+	display: flex;
+	box-sizing: border-box;
+	justify-content: center;
+	width: 100%;
+	max-width: 100%;
+	padding: 3px 5px;
+	font-size: 12px;
+	pointer-events: none;
+	user-select: none;
+}
+
+.frame-overlay-box.showing-content .frame-overlay-box-label {
+	background: rgba(255, 255, 255, 0.7);
+	opacity: 0;
+}
+
+.frame-overlay-box.showing-content:hover .frame-overlay-box-label,
+.frame-overlay-box.showing-content .frame-overlay-box-label:focus-within {
+	opacity: 1;
+}
+
+body.pan .frame-overlay-box.showing-content .frame-overlay-box-label,
+body.panning .frame-overlay-box.showing-content .frame-overlay-box-label {
+	opacity: 0;
+}
+
+.frame-overlay-preview-toggle {
+	flex: none;
+	border: 0;
+	padding: 0;
+	background: transparent;
+	color: var(--colored-text);
+	font: inherit;
+	cursor: pointer;
+	pointer-events: auto;
+}
+
+.frame-overlay-preview-toggle:hover {
+	text-decoration: underline;
+}
+
+/* Simplification control ------------ */
+
+@media (max-width: 765px) {
+	body.simplify  .simplify-control-wrapper {
+		top: 26px;
+	}
+
+	body.simplify .page-header {
+		height: 55px;
+	}
+
+	body.simplify .main-area {
+		margin-top: 55px;
+	}
+}
+
+.simplify-control-wrapper {
+	display: none;
+	position: absolute;
+	width: 100%;
+	overflow: hidden;
+	margin: 0 auto 0 auto;
+	top: 0px;
+}
+
+.simplify-control {
+	text-align: center;
+	white-space: nowrap;
+	padding: 0 90px 0 12px;
+}
+
+.simplify-control .slider {
+	margin: 15px 5px 0 3px;
+	position: relative;
+	vertical-align: top;
+	display: inline-block;
+}
+
+.simplify-control .track {
+	border-radius: 2px;
+	width: 340px;
+	background-color: #fff;
+	height: 2px;
+}
+
+.simplify-control .handle {
+	position: absolute;
+	top: -2px;
+}
+
+.simplify-control .handle img {
+	width: 20px;
+	height: 20px;
+	margin-left: -10px;
+	margin-top: -10px;
+}
+
+.simplify-control .clicktext {
+	width: 56px;
+	background: rgba(255, 255, 255, 0.5);
+	text-align: center;
+	border: 1px solid rgba(0,0,0,0);
+	font-size: 13px;
+}
+
+.simplify-control .clicktext:focus {
+	background: #fff;
+}
+
+/* Color scheme panel (gui-color-scheme-panel.mjs): it opens in the polygon
+   style panel's place, which is hidden until it closes. */
+.layer-style-panel.replaced {
+	display: none;
+}
+
+.color-scheme-note {
+	font-size: 11px;
+	line-height: 1.3;
+	color: #555;
+}
+
+.label-style-panel .color-scheme-select-row > span {
+	margin-bottom: 2px;
+}
+
+.color-scheme-palette-cell {
+	position: relative;
+}
+
+.color-scheme-palette-btn {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	box-sizing: border-box;
+	height: var(--label-field-height);
+	padding: 0 20px 0 4px;
+	border: 1px solid var(--label-field-border);
+	border-radius: var(--label-field-radius);
+	background: white var(--label-menu-chevron) no-repeat right 6px center / 10px 7px;
+	cursor: pointer;
+	user-select: none;
+}
+
+/* The background stops at the border: a gradient repeats under a border,
+   which would show the first color along the far edge. */
+.color-scheme-strip {
+	flex: none;
+	width: 48px;
+	height: 12px;
+	border: 1px solid rgba(0,0,0,0.15);
+	background-clip: padding-box;
+}
+
+.label-style-panel .color-scheme-palette-btn > span,
+.label-style-panel .color-scheme-palette-item > span {
+	display: inline;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 12px;
+	color: var(--normal-text);
+}
+
+.color-scheme-palette-menu {
+	position: absolute;
+	z-index: 2;
+	top: 100%;
+	left: 0;
+	right: -84px;
+	max-height: 260px;
+	overflow-y: auto;
+	margin-top: 2px;
+	padding: 3px 0;
+	background: white;
+	border: 1px solid #ccc;
+	border-radius: var(--label-field-radius);
+	box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+
+.color-scheme-palette-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 3px 8px;
+	cursor: pointer;
+}
+
+.color-scheme-palette-item:hover {
+	background-color: #f0f0f0;
+}
+
+.color-scheme-palette-item.selected {
+	background-color: var(--lt-theme-col);
+}
+
+.color-scheme-palette-heading {
+	padding: 7px 8px 2px;
+	font-size: 11px;
+	color: #888;
+	cursor: default;
+}
+
+.color-scheme-tile-row {
+	margin-top: 10px;
+}
+
+.color-scheme-tiles {
+	position: relative;
+	display: flex;
+	gap: 3px;
+}
+
+/* Where a dragged categorical swatch would go */
+.color-scheme-drop-marker {
+	position: absolute;
+	z-index: 1;
+	width: 2px;
+	margin-left: -0.5px;
+	background-color: #000;
+	pointer-events: none;
+}
+
+.color-scheme-tiles.dragging .color-scheme-tile {
+	cursor: grabbing;
+}
+
+.color-scheme-tiles.dragging .color-scheme-tile:hover::after {
+	display: none;
+}
+
+.color-scheme-tile-cell.drag-source .color-scheme-tile {
+	opacity: 0.35;
+}
+
+.color-scheme-tiles.two-rows {
+	flex-wrap: wrap;
+	row-gap: 7px;
+}
+
+.color-scheme-tiles.two-rows > .color-scheme-tile-cell {
+	flex: none;
+	width: calc((100% - (var(--tiles-per-row) - 1) * 3px) / var(--tiles-per-row));
+}
+
+/* The pins' tooltips are placed against the cell, which ends at the pin */
+.color-scheme-tile-cell {
+	position: relative;
+	flex: 1;
+	min-width: 0;
+}
+
+.color-scheme-tile {
+	position: relative;
+	height: 26px;
+	border-radius: 3px;
+	box-shadow: inset 0 0 0 1px rgba(0,0,0,0.12);
+	cursor: pointer;
+	touch-action: none;
+	user-select: none;
+}
+
+.color-scheme-tile.selected {
+	box-shadow: 0 0 0 2px #000;
+}
+
+/* A continuous ramp: the gradient over half-height tiles, which are its
+   color stops. The script places each gradient over its tiles. */
+.color-scheme-gradient {
+	position: relative;
+	height: 12px;
+	margin-bottom: 4px;
+}
+
+.color-scheme-gradient-segment {
+	position: absolute;
+	top: 0;
+	height: 100%;
+	border-radius: 3px;
+	box-shadow: inset 0 0 0 1px rgba(0,0,0,0.12);
+}
+
+.color-scheme-tiles.continuous .color-scheme-tile {
+	height: 14px;
+}
+
+/* A dot under each color the user set between the ends of a ramp; the ends
+   are always pinned, so they have no dot. */
+.color-scheme-pin {
+	width: 7px;
+	height: 7px;
+	margin: 4px auto 0;
+	border-radius: 50%;
+}
+
+.color-scheme-pin.pinned {
+	background: #222;
+	cursor: pointer;
+}
+
+.label-color-picker-fields input.label-color-picker-input {
+	flex: 1;
+	width: auto;
+	min-width: 0;
+	font-family: Menlo, Consolas, monospace;
+	font-size: 11.5px;
+}
+
+/* Format tabs over a picker's color field, and the color palette panel's
+   scheme types: a segmented control on a grey well, the chosen tab drawn like
+   the panels' fields and buttons. */
+.label-color-format-tabs,
+.color-scheme-tabs {
+	display: flex;
+	margin-top: 6px;
+	border-radius: var(--label-field-radius, 4px);
+	background-color: #f0f0f0;
+}
+
+.label-color-picker .label-color-format-tab,
+.color-scheme-tabs .color-scheme-tab {
+	flex: 1;
+	min-width: 0;
+	box-sizing: border-box;
+	height: var(--label-field-height, 22px);
+	margin: 0;
+	padding: 0 4px;
+	border: 1px solid transparent;
+	border-radius: var(--label-field-radius, 4px);
+	background: transparent;
+	box-shadow: none;
+	font: inherit;
+	font-size: 12px;
+	color: #777;
+	cursor: pointer;
+}
+
+.label-color-picker .label-color-format-tab:hover:not(.selected),
+.color-scheme-tabs .color-scheme-tab:hover:not(.selected) {
+	color: var(--normal-text);
+}
+
+.label-color-picker .label-color-format-tab.selected,
+.color-scheme-tabs .color-scheme-tab.selected {
+	border-color: var(--label-field-border, #c6c6c6);
+	background-color: white;
+	color: var(--normal-text);
+	cursor: default;
+}
+
+/* In the style panel, the scheme's colors take the place of the fill's swatch
+   and hex value. */
+.label-style-panel .label-color-field.has-scheme .label-color-chit,
+.label-style-panel .label-color-field.has-scheme .label-color-input {
+	display: none;
+}
+
+.layer-scheme-strip {
+	display: none;
+	flex: 1;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
+	height: 100%;
+	cursor: pointer;
+}
+
+.label-color-field.has-scheme .layer-scheme-strip {
+	display: flex;
+}
+
+.layer-scheme-colors {
+	flex: 1;
+	height: 13px;
+	border: 1px solid rgba(0,0,0,0.22);
+	background-clip: padding-box;
+}
+
+.layer-scheme-remove {
+	flex: none;
+	padding: 0 2px;
+	font-size: 14px;
+	line-height: 1;
+	color: #777;
+}
+
+.layer-scheme-remove:hover {
+	color: #000;
+}
+
+.layer-palettes-btn.selected {
+	background-color: var(--lt-theme-col);
+}
+
+.color-scheme-slider-row:not(.hidden) {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.color-scheme-tile-row + .color-scheme-slider-row {
+	margin-top: 6px;
+}
+
+.color-scheme-slider-label,
+.color-scheme-hint-label {
+	position: relative;
+	flex: none;
+	cursor: default;
+}
+
+/* Gray like the fields and buttons, and the same at rest, on hover and while
+   dragged. --fill (set by the script) is how far the light gray part of the
+   track goes. The handle is a 12px box, which sets how far it travels, drawn
+   as a 16px circle by its box-shadow rings, so that at either end it covers
+   the end of the track. */
+.color-scheme-slider-row input[type=range] {
+	-webkit-appearance: none;
+	appearance: none;
+	flex: 1;
+	min-width: 0;
+	height: 18px;
+	margin: 0 7px 0 4px;
+	background: transparent;
+	cursor: pointer;
+}
+
+.color-scheme-slider-row input[type=range]:focus {
+	outline: none;
+}
+
+.color-scheme-slider-row input[type=range]::-webkit-slider-runnable-track {
+	box-sizing: border-box;
+	height: 7px;
+	border: 1px solid var(--label-field-border);
+	border-radius: 3.5px;
+	background: linear-gradient(to right, #dadada var(--fill, 0%), white var(--fill, 0%));
+}
+
+.color-scheme-slider-row input[type=range]::-moz-range-track {
+	box-sizing: border-box;
+	height: 7px;
+	border: 1px solid var(--label-field-border);
+	border-radius: 3.5px;
+	background: white;
+}
+
+.color-scheme-slider-row input[type=range]::-moz-range-progress {
+	height: 5px;
+	border-radius: 3.5px 0 0 3.5px;
+	background: #dadada;
+}
+
+.color-scheme-slider-row input[type=range]::-webkit-slider-thumb {
+	-webkit-appearance: none;
+	width: 12px;
+	height: 12px;
+	margin-top: -3.5px;
+	border: none;
+	border-radius: 50%;
+	background: white;
+	box-shadow: 0 0 0 1px white, 0 0 0 2px #888;
+}
+
+.color-scheme-slider-row input[type=range]::-moz-range-thumb {
+	width: 12px;
+	height: 12px;
+	border: none;
+	border-radius: 50%;
+	background: white;
+	box-shadow: 0 0 0 1px white, 0 0 0 2px #888;
+}
+
+.color-scheme-slider-row input[type=range]:focus-visible::-webkit-slider-thumb {
+	box-shadow: 0 0 0 1px white, 0 0 0 2px #888, 0 0 0 4px var(--theme-col);
+}
+
+.color-scheme-slider-row input[type=range]:focus-visible::-moz-range-thumb {
+	box-shadow: 0 0 0 1px white, 0 0 0 2px #888, 0 0 0 4px var(--theme-col);
+}
+
+/* Presets have only the reverse button in the vibrance row, and sequential
+   and diverging presets, the range */
+.color-scheme-slider-row.preset {
+	justify-content: flex-end;
+}
+
+.color-scheme-slider-row.preset > :not(.color-scheme-icon-btn):not(.color-scheme-range-part),
+.color-scheme-slider-row.preset > .long-hue-btn,
+.color-scheme-slider-row:not(.ranged) > .color-scheme-range-part {
+	display: none;
+}
+
+/* A strip of the whole preset, shaded outside the part the tiles use */
+.color-scheme-range {
+	position: relative;
+	flex: 1;
+	min-width: 0;
+	height: 12px;
+	margin: 0 9px 0 6px;
+	cursor: pointer;
+	touch-action: none;
+}
+
+.color-scheme-range-strip {
+	position: absolute;
+	inset: 0;
+	border-radius: 2px;
+	box-shadow: inset 0 0 0 1px rgba(0,0,0,0.12);
+}
+
+.color-scheme-range-shade {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	background-color: rgba(255, 255, 255, 0.75);
+}
+
+.color-scheme-range-shade.left {
+	left: 0;
+}
+
+.color-scheme-range-shade.right {
+	right: 0;
+}
+
+.color-scheme-range-handle {
+	position: absolute;
+	top: -4px;
+	bottom: -4px;
+	width: 4px;
+	margin-left: -3px;
+	border: 1px solid #444;
+	border-radius: 2px;
+	background-color: white;
+	cursor: ew-resize;
+}
+
+.color-scheme-range-handle:focus-visible {
+	outline: 2px solid var(--theme-col);
+	outline-offset: 1px;
+}
+
+.color-scheme-icon-btn {
+	position: relative;
+	flex: none;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	box-sizing: border-box;
+	width: var(--label-field-height, 22px);
+	height: var(--label-field-height, 22px);
+	padding: 0;
+	border: 1px solid var(--label-field-border);
+	border-radius: var(--label-field-radius, 4px);
+	background-color: white;
+	color: var(--normal-text);
+	font: inherit;
+	cursor: pointer;
+}
+
+.label-style-row .color-scheme-icon-btn {
+	margin-right: 0;
+}
+
+.color-scheme-icon-btn:hover {
+	background-color: #f0f0f0;
+}
+
+.color-scheme-icon-btn.selected {
+	background-color: var(--lt-theme-col);
+}
+
+/* A bar under the categorical swatches in use, joined across the gaps
+   between them; diverging tiles have one under the tiles their classes use,
+   above the pin dots */
+.color-scheme-pin.used,
+.color-scheme-bar.used {
+	width: 100%;
+	height: 3px;
+	margin: 4px 0 0;
+	border-radius: 0;
+	background-color: #333;
+}
+
+.color-scheme-pin.used.joined,
+.color-scheme-bar.used.joined {
+	width: calc(100% + 3px);
+}
+
+.color-scheme-bar {
+	height: 3px;
+	margin-top: 4px;
+}
+
+.color-scheme-bar + .color-scheme-pin {
+	margin-top: 2px;
+}
+
+/* The pivot class switch, level with the select beside it */
+.color-scheme-toggle-line {
+	display: flex;
+	align-items: center;
+	height: var(--label-field-height);
+}
+
+/* Under an interpolated tile whose color was moved to fit the sRGB gamut,
+   in place of a pin dot */
+.color-scheme-pin.adjusted {
+	width: 0;
+	height: 0;
+	border-radius: 0;
+	border-left: 4px solid transparent;
+	border-right: 4px solid transparent;
+	border-bottom: 7px solid #dd5555;
+}
+
+/* In the floating toolbar's tooltip style, below the pins so as not to cover
+   the tiles. A newline in the text breaks the line. --tooltip-shift is set
+   on hover to keep the tooltip inside the window; the script reads the
+   tooltip's width, so it is sized as a border box. */
+.color-scheme-pin[data-tooltip]:hover::after,
+.color-scheme-tile[data-tooltip]:hover::after,
+.color-scheme-slider-label[data-tooltip]:hover::after,
+.color-scheme-hint-label[data-tooltip]:hover::after,
+.color-scheme-icon-btn[data-tooltip]:hover::after {
+	content: attr(data-tooltip);
+	box-sizing: border-box;
+	position: absolute;
+	top: calc(100% + 5px);
+	left: 50%;
+	transform: translateX(calc(-50% + var(--tooltip-shift, 0px)));
+	background-color: rgba(40, 40, 40, 0.92);
+	color: #fff;
+	font-size: 11px;
+	line-height: 1.3;
+	white-space: pre;
+	padding: 5px 7px;
+	border-radius: 4px;
+	pointer-events: none;
+	z-index: 1;
+}
+/* The Breaks row: the method's menu in the left column, the button that opens
+   the class breaks dialog in the right */
+.color-scheme-customize-cell > .label-panel-action-btn {
+	display: flex;
+	justify-content: center;
+	width: 100%;
+	padding: 0 4px;
+	white-space: nowrap;
+}
+
+.label-style-panel .color-scheme-customize-cell > .label-panel-action-btn.selected {
+	background-color: var(--lt-theme-col);
+}
+
+/* Class breaks dialog (gui-class-breaks-dialog.mjs): to the left of the color
+   scheme panel, which is 216px wide with 12px of padding and a border on each
+   side, 36px from the right */
+.label-style-panel.class-breaks-dialog {
+	right: 286px;
+	width: 216px;
+}
+
+.class-breaks-chart {
+	position: relative;
+	margin-top: 8px;
+}
+
+.class-breaks-bars {
+	display: flex;
+	align-items: flex-end;
+	/* gap: 1px; */
+	height: 72px;
+	border-bottom: 1px solid #999;
+}
+
+.class-breaks-bar {
+	flex: 1;
+	background-color: #b8b8b8;
+}
+
+/* a line up through the histogram at each break; the lines and the handles
+   share the bars' width, so that a value has the same left in both */
+.class-breaks-lines {
+	position: absolute;
+	top: 0;
+	left: 0;
+	right: 0;
+	height: 72px;
+	pointer-events: none;
+}
+
+.class-breaks-line,
+.class-breaks-pivot {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	width: 0;
+	border-left: 1px solid rgba(0, 0, 0, 0.55);
+}
+
+.class-breaks-pivot,
+.class-breaks-line.fixed {
+	border-left: 1px dashed #000;
+}
+
+.class-breaks-handles {
+	position: relative;
+	height: 12px;
+}
+
+/* a triangle pointing up at its break */
+.class-breaks-handle {
+	position: absolute;
+	top: 1px;
+	width: 0;
+	height: 0;
+	margin-left: -6px;
+	border-left: 6px solid transparent;
+	border-right: 6px solid transparent;
+	border-bottom: 10px solid #444;
+	cursor: ew-resize;
+	touch-action: none;
+}
+
+.class-breaks-handle:hover,
+.class-breaks-handle.dragging {
+	border-bottom-color: #000;
+}
+
+.class-breaks-handle.fixed {
+	border-bottom-color: #aaa;
+	cursor: default;
+}
+
+.class-breaks-handle:focus-visible {
+	outline: 2px solid var(--theme-col);
+	outline-offset: 1px;
+}
+
+.class-breaks-axis {
+	display: flex;
+	justify-content: space-between;
+	font-size: 11px;
+	color: #555;
+}
+
+.label-style-row.class-breaks-log-row {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	margin-top: 4px;
+	font-size: 11px;
+	color: #555;
+}
+
+.class-breaks-log-row input {
+	margin: 0;
+}
+
+/* The classes, stacked with a 3px gap between their tiles. Each break's mark
+   sits on the gap between two classes: a 1px rule in the middle of the gap,
+   from the counts out to the break's field, which is centered on the rule. A
+   row and its gap are taller than a field, so that the fields don't touch. */
+.class-breaks-table {
+	--class-breaks-row-height: 22px;
+	--class-breaks-gap: 3px;
+	--class-breaks-swatch-width: 32px;
+	max-height: 320px;
+	margin-top: 8px;
+	overflow-y: auto;
+}
+
+.class-breaks-list {
+	position: relative;
+	display: flex;
+	flex-direction: column;
+	gap: var(--class-breaks-gap);
+	margin: 4px 0;
+}
+
+.class-breaks-class {
+	display: flex;
+	align-items: center;
+	height: var(--class-breaks-row-height);
+}
+
+/* like the panel's tiles (.color-scheme-tile) */
+.class-breaks-swatch {
+	flex: none;
+	align-self: stretch;
+	width: var(--class-breaks-swatch-width);
+	border-radius: 3px;
+	box-shadow: inset 0 0 0 1px rgba(0,0,0,0.12);
+}
+
+.class-breaks-count {
+	padding-left: 8px;
+	font-size: 11px;
+	color: #555;
+	white-space: nowrap;
+}
+
+/* placed by the script: its top is 11px above the gap's middle pixel, the
+   rule's row */
+.class-breaks-mark {
+	position: absolute;
+	left: 0;
+	right: 0;
+	height: var(--label-field-height, 22px);
+	pointer-events: none;
+}
+
+.class-breaks-rule {
+	position: absolute;
+	top: 11px;
+	left: calc(var(--class-breaks-swatch-width) + 8px);
+	right: 90px;
+	border-top: 1px solid var(--label-field-border);
+}
+
+.class-breaks-rule.fixed {
+	border-top-style: dashed;
+}
+
+.class-breaks-mark input[type="text"] {
+	position: absolute;
+	top: 0;
+	right: 0;
+	box-sizing: border-box;
+	width: 90px;
+	pointer-events: auto;
+	padding-left: 4px;
+}
+
+/* Export, at the bottom of the color scheme panel: a caption and a button
+   for each format */
+.label-style-row.color-scheme-export-row {
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	margin-top: 10px;
+	margin-bottom: 0;
+	padding-top: 5px;
+	border-top: 1px solid #e4e4e4;
+}
+
+.label-style-panel .color-scheme-export-label {
+	margin-left: auto;
+	font-size: 11px;
+	color: #555;
+}
+
+/* Import dialog (gui-color-scheme-import-dialog.mjs): where the class breaks
+   dialog goes, which it replaces */
+.label-style-panel.color-scheme-import-dialog {
+	right: 286px;
+	width: 216px;
+}
+
+.color-scheme-import-drop {
+	margin-top: 8px;
+	padding: 18px 12px;
+	border: 1.5px dashed #c4c4c4;
+	border-radius: 4px;
+	font-size: 11px;
+	line-height: 1.4;
+	color: #666;
+	text-align: center;
+}
+
+.color-scheme-import-drop.over {
+	border-color: #3d8bd4;
+	background: #eef5fc;
+	color: #2a6aa8;
+}
+
+.color-scheme-import-message {
+	margin-top: 8px;
+	font-size: 11px;
+	line-height: 1.4;
+	color: #555;
+}
+
+.color-scheme-import-message.error {
+	color: #b3261e;
+}

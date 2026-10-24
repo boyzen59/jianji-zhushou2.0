@@ -1,0 +1,240 @@
+import type {ForwardRefExoticComponent, RefAttributes} from 'react';
+import React, {
+	forwardRef,
+	useContext,
+	useEffect,
+	useImperativeHandle,
+	useLayoutEffect,
+	useMemo,
+	useRef,
+} from 'react';
+import {getAbsoluteSrc} from '../absolute-src.js';
+import {random} from '../random.js';
+import {
+	RenderAssetManager,
+	type RenderAssetManagerContext,
+} from '../RenderAssetManager.js';
+import {SequenceContext} from '../SequenceContext.js';
+import {useTimelinePosition} from '../timeline-position-state.js';
+import {useCurrentFrame} from '../use-current-frame.js';
+import {useDelayRender} from '../use-delay-render.js';
+import {useAudioEnabled} from '../use-media-enabled.js';
+import {evaluateVolume} from '../volume-prop.js';
+import {warnAboutTooHighVolume} from '../volume-safeguard.js';
+import type {RemotionAudioProps} from './props.js';
+import {
+	Html5MediaTrimContext,
+	useFrameForVolumeProp,
+} from './use-audio-frame.js';
+import {useMediaAudioState} from './use-media-audio-state.js';
+
+type AudioForRenderingProps = RemotionAudioProps & {
+	readonly onDuration: (src: string, durationInSeconds: number) => void;
+	readonly onNativeError: React.ReactEventHandler<HTMLAudioElement>;
+};
+
+const AudioForRenderingRefForwardingFunction: React.ForwardRefRenderFunction<
+	HTMLAudioElement,
+	AudioForRenderingProps &
+		Pick<
+			RenderAssetManagerContext,
+			'registerRenderAsset' | 'unregisterRenderAsset'
+		>
+> = (props, ref) => {
+	const audioRef = useRef<HTMLAudioElement>(null);
+
+	const {
+		registerRenderAsset,
+		unregisterRenderAsset,
+		volume: volumeProp,
+		playbackRate,
+		allowAmplificationDuringRender,
+		onDuration,
+		toneFrequency,
+		_remotionInternalNeedsDurationCalculation,
+		_remotionInternalNativeLoopPassed,
+		acceptableTimeShiftInSeconds,
+		name,
+		onNativeError,
+		delayRenderRetries,
+		delayRenderTimeoutInMilliseconds,
+		loopVolumeCurveBehavior,
+		pauseWhenBuffering,
+		audioStreamIndex,
+		preservePitch,
+		...nativeProps
+	} = props;
+
+	const absoluteFrame = useTimelinePosition();
+	const volumePropFrame = useFrameForVolumeProp(
+		loopVolumeCurveBehavior ?? 'repeat',
+	);
+	const frame = useCurrentFrame();
+	const sequenceContext = useContext(SequenceContext);
+	const sequencePlaybackRate = sequenceContext?.playbackRate ?? 1;
+	const audioStartFrame = useContext(Html5MediaTrimContext);
+
+	const {delayRender, continueRender} = useDelayRender();
+
+	// Generate a string that's as unique as possible for this asset
+	// but at the same time the same on all threads
+	const id = useMemo(
+		() =>
+			`audio-${random(
+				props.src ?? '',
+			)}-${sequenceContext?.relativeFrom}-${sequenceContext?.cumulatedFrom}-${sequenceContext?.durationInFrames}`,
+		[
+			props.src,
+			sequenceContext?.relativeFrom,
+			sequenceContext?.cumulatedFrom,
+			sequenceContext?.durationInFrames,
+		],
+	);
+
+	const volume = evaluateVolume({
+		volume: volumeProp,
+		frame: volumePropFrame,
+		mediaVolume: 1,
+	});
+	warnAboutTooHighVolume(volume);
+	const audioEnabled = useAudioEnabled();
+	const {shouldUseAudio} = useMediaAudioState({
+		muted: props.muted ?? false,
+		volume,
+		audioEnabled,
+	});
+
+	useImperativeHandle(ref, () => {
+		return audioRef.current as HTMLVideoElement;
+	}, []);
+
+	useEffect(() => {
+		if (!props.src) {
+			throw new Error('No src passed');
+		}
+
+		if (!shouldUseAudio) {
+			return;
+		}
+
+		registerRenderAsset({
+			type: 'audio',
+			src: getAbsoluteSrc(props.src),
+			id,
+			frame: absoluteFrame,
+			volume,
+			// Render assets use composition frames; source trimming stays in media frames.
+			mediaFrame:
+				audioStartFrame + (frame - audioStartFrame) / sequencePlaybackRate,
+			playbackRate: (props.playbackRate ?? 1) * sequencePlaybackRate,
+			toneFrequency: toneFrequency ?? 1,
+			audioStartFrame,
+			audioStreamIndex: audioStreamIndex ?? 0,
+			preservePitch: preservePitch ?? true,
+		});
+		return () => unregisterRenderAsset(id);
+	}, [
+		shouldUseAudio,
+		props.src,
+		registerRenderAsset,
+		absoluteFrame,
+		id,
+		unregisterRenderAsset,
+		volume,
+		volumePropFrame,
+		frame,
+		playbackRate,
+		props.playbackRate,
+		toneFrequency,
+		audioStartFrame,
+		sequencePlaybackRate,
+		audioStreamIndex,
+		preservePitch,
+	]);
+
+	const {src} = props;
+
+	// The <audio> tag is only rendered if the duration needs to be calculated for the `loop`
+	// attribute to work, or if the user assigns a ref to it.
+	const needsToRenderAudioTag =
+		ref || _remotionInternalNeedsDurationCalculation;
+
+	// If audio source switches, make new handle
+	useLayoutEffect(() => {
+		if (window.process?.env?.NODE_ENV === 'test') {
+			return;
+		}
+
+		if (!needsToRenderAudioTag) {
+			return;
+		}
+
+		const newHandle = delayRender(
+			'Loading <Html5Audio> duration with src=' + src,
+			{
+				retries: delayRenderRetries ?? undefined,
+				timeoutInMilliseconds: delayRenderTimeoutInMilliseconds ?? undefined,
+			},
+		);
+		const {current} = audioRef;
+
+		const didLoad = () => {
+			if (current?.duration) {
+				onDuration(current.src as string, current.duration);
+			}
+
+			continueRender(newHandle);
+		};
+
+		if (current?.duration) {
+			onDuration(current.src as string, current.duration);
+			continueRender(newHandle);
+		} else {
+			current?.addEventListener('loadedmetadata', didLoad, {once: true});
+		}
+
+		// If tag gets unmounted, clear pending handles because video metadata is not going to load
+		return () => {
+			current?.removeEventListener('loadedmetadata', didLoad);
+			continueRender(newHandle);
+		};
+	}, [
+		src,
+		onDuration,
+		needsToRenderAudioTag,
+		delayRenderRetries,
+		delayRenderTimeoutInMilliseconds,
+		continueRender,
+		delayRender,
+	]);
+
+	if (!needsToRenderAudioTag) {
+		return null;
+	}
+
+	return <audio ref={audioRef} {...nativeProps} onError={onNativeError} />;
+};
+
+// Asset collection updates the context, but the audio component only needs its callbacks.
+const MemoAudioForRendering = React.memo(
+	forwardRef(AudioForRenderingRefForwardingFunction),
+);
+
+export const AudioForRendering = forwardRef<
+	HTMLAudioElement,
+	AudioForRenderingProps
+>((props, ref) => {
+	const {registerRenderAsset, unregisterRenderAsset} =
+		useContext(RenderAssetManager);
+
+	return (
+		<MemoAudioForRendering
+			{...props}
+			ref={ref}
+			registerRenderAsset={registerRenderAsset}
+			unregisterRenderAsset={unregisterRenderAsset}
+		/>
+	);
+}) as ForwardRefExoticComponent<
+	AudioForRenderingProps & RefAttributes<HTMLAudioElement>
+>;

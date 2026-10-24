@@ -1,0 +1,219 @@
+import { importGeoJSON } from '../geojson/geojson-import';
+import { projectDataset } from '../commands/mapshaper-proj';
+import { getDatasetCrsInfo, setDatasetCrsInfo, getCrsInfo, parseCrsString, isLatLngDataset } from '../crs/mapshaper-projections';
+import { isMeridianBounded, getBoundingMeridian } from '../crs/mapshaper-proj-info';
+import { getAntimeridian } from '../geom/mapshaper-latlon';
+import { getOutlineDataset, getPolygonDataset } from '../crs/mapshaper-proj-extents';
+import { densifyPathByInterval } from '../crs/mapshaper-densify';
+import { stop } from '../utils/mapshaper-logging';
+import utils from '../utils/mapshaper-utils';
+import cmd from '../mapshaper-cmd';
+import { mergeDatasets } from '../dataset/mapshaper-merging';
+import { buildTopology } from '../topology/mapshaper-topology';
+import { getDatasetBounds } from '../dataset/mapshaper-dataset-utils';
+import { cleanLayers } from '../commands/mapshaper-clean';
+import { dissolveArcs } from '../paths/mapshaper-arc-dissolve';
+import { isInterruptedProjection } from '../crs/mapshaper-projection-topology';
+
+cmd.graticule = function(dataset, opts) {
+  if (opts.polygon && opts.outline) {
+    stop('The polygon and outline options cannot be used together');
+  }
+  var boundary = opts.polygon || opts.outline;
+  var name = opts.name || opts.outline && 'outline' || opts.polygon && 'polygon' || 'graticule';
+  var graticule, destInfo;
+  if (dataset && !isLatLngDataset(dataset)) {
+    // project graticule to match dataset
+    destInfo = getDatasetCrsInfo(dataset);
+    if (!destInfo.crs) stop("Coordinate system is unknown, unable to create a graticule");
+    graticule = opts.outline ?
+      createProjectedOutline(destInfo.crs, opts) :
+      opts.polygon ?
+        createProjectedPolygon(destInfo.crs, opts) :
+        createProjectedGraticule(destInfo.crs, opts);
+    setDatasetCrsInfo(graticule, destInfo);
+  } else {
+    graticule = boundary ?
+      createUnprojectedPolygon(opts) :
+      createUnprojectedGraticule(opts);
+    setDatasetCrsInfo(graticule, getCrsInfo('wgs84'));
+  }
+  if (opts.outline) {
+    graticule.layers[0].geometry_type = 'polyline';
+  }
+  graticule.layers[0].name = name;
+  return graticule;
+};
+
+function createUnprojectedPolygon(opts) {
+  var crs = parseCrsString('wgs84');
+  return getPolygonDataset(crs, crs, opts);
+}
+
+function createProjectedPolygon(dest, opts) {
+  var src = parseCrsString('wgs84');
+  return getPolygonDataset(src, dest, opts);
+}
+
+function createProjectedOutline(dest, opts) {
+  var src = parseCrsString('wgs84');
+  return getOutlineDataset(src, dest, opts) ||
+    getPolygonDataset(src, dest, opts);
+}
+
+function createUnprojectedGraticule(opts) {
+  var src = parseCrsString('wgs84');
+  var graticule = importGeoJSON(createGraticule(src, false, opts));
+  return graticule;
+}
+
+function createProjectedGraticule(dest, opts) {
+  var src = parseCrsString('wgs84');
+  var outline = getOutlineDataset(src, dest, {});
+  var graticule = importGeoJSON(createGraticule(dest, !!outline, opts));
+  projectDataset(graticule, src, dest, {
+    no_clip: false,
+    densify: isInterruptedProjection(dest)
+  });
+  if (outline) {
+    graticule = addOutlineToGraticule(graticule, outline);
+  }
+  buildTopology(graticule); // needed for cleaning to work
+  cleanLayers(graticule.layers, graticule, {verbose: false});
+  return graticule;
+}
+
+function addOutlineToGraticule(graticule, outline) {
+  var merged = mergeDatasets([graticule, outline]);
+  var src = merged.layers.pop();
+  var dest = merged.layers[0];
+  var records = dest.data.getRecords();
+  src.shapes.forEach(function(shp) {
+    dest.shapes.push(shp);
+    records.push({type: 'outline', value: null});
+  });
+  return merged;
+}
+
+// Create graticule as a polyline dataset
+//
+function createGraticule(P, outlined, opts) {
+  var interval = opts.interval || 10;
+  var base = opts.base || 0;
+  if (Math.round(interval) != interval || interval > 0 === false) {
+    stop('Invalid interval:', interval);
+  }
+  if (!utils.isFiniteNumber(base)) {
+    stop('Invalid base:', opts.base);
+  }
+  var lon0 = P.lam0 * 180 / Math.PI;
+  var precision = interval > 10 ? 1 : 0.5; // degrees between each vertex
+  var xstep = interval;
+  var ystep = interval;
+  var xstepMajor = 90;
+  var yn = Math.round(180 / ystep) + 1;
+  var xx = getGraticuleMeridianLongitudes(interval, base);
+  var yy = utils.range(yn, -90, ystep);
+  var meridians = [];
+  var parallels = [];
+  var edgeMeridians = isMeridianBounded(P) ? getEdgeMeridians(P) : null;
+  xx.forEach(function(x) {
+    if (edgeMeridians && (tooClose(x, edgeMeridians[0]) || tooClose(x, edgeMeridians[1]))) {
+      return;
+    }
+    createMeridian(x, x % xstepMajor === 0);
+  });
+
+  if (edgeMeridians && !outlined) {
+    // add meridian lines that will appear on the left and right sides of the
+    // projected graticule
+    createMeridian(edgeMeridians[0], true);
+    createMeridian(edgeMeridians[1], true);
+  }
+
+  yy.forEach(function(y) {
+    createParallel(y);
+  });
+
+  var geojson = {
+    type: 'FeatureCollection',
+    features: meridians.concat(parallels)
+  };
+  return geojson;
+
+  function tooClose(a, b) {
+    return Math.abs(a - b) < interval / 5;
+  }
+
+  // extended: meridian extends to pole
+  function createMeridian(x, extended) {
+    var y0 = ystep <= 15 ? ystep : 0;
+    // An exact pole can have several images in a polyhedral projection.
+    // The separate outline supplies the missing, negligible end interval.
+    var poleInset = outlined ? 1e-4 : 0;
+    createMeridianPart(x, -90 + y0, 90 - y0);
+    if (extended && y0 > 0) {
+      // adding extensions as separate parts, so if the polar coordinates
+      // fail to project, at least the rest of the meridian line will remain
+      createMeridianPart(x, -90 + poleInset, -90 + y0);
+      createMeridianPart(x, 90 - y0, 90 - poleInset);
+    }
+  }
+
+  function createMeridianPart(x, ymin, ymax) {
+    var coords = densifyPathByInterval([[x, ymin], [x, ymax]], precision);
+    meridians.push(graticuleFeature(coords, {type: 'meridian', value: roundCoord(x)}));
+  }
+
+  function createParallel(y) {
+    // Avoid joining distinct images of the antimeridian (and the degenerate
+    // polar parallels) when a projected outline is generated separately.
+    var edgeInset = outlined ? 1e-4 : 0;
+    if (outlined && Math.abs(y) == 90) return;
+    var coords = densifyPathByInterval([
+      [-180 + edgeInset, y],
+      [180 - edgeInset, y]
+    ], precision);
+    parallels.push(graticuleFeature(coords, {type: 'parallel', value: y}));
+  }
+}
+
+// Longitudes of meridians at interval spacing, aligned so that base (mod
+// interval) is included. Values are wrapped to (-180, 180].
+export function getGraticuleMeridianLongitudes(interval, base) {
+  var offset = ((base % interval) + interval) % interval;
+  var n = Math.round(360 / interval);
+  var longitudes = [];
+  for (var i = 0; i < n; i++) {
+    longitudes.push(wrapMeridianLongitude(offset + i * interval));
+  }
+  return longitudes;
+}
+
+function wrapMeridianLongitude(lon) {
+  lon -= Math.floor((lon + 180) / 360) * 360; // [-180, 180)
+  return lon === -180 ? 180 : lon;
+}
+
+// remove tiny offsets
+function roundCoord(x) {
+  return +x.toFixed(3) || 0;
+}
+
+function getEdgeMeridians(P) {
+  var lon = getBoundingMeridian(P);
+  // offs must be larger than gutter width in mapshaper-spherical-cutting.js
+  var offs = 2e-8;
+  return lon == 180 ? [-180, 180] : [lon - offs, lon + offs];
+}
+
+function graticuleFeature(coords, o) {
+  return {
+    type: 'Feature',
+    properties: o,
+    geometry: {
+      type: 'LineString',
+      coordinates: coords
+    }
+  };
+}

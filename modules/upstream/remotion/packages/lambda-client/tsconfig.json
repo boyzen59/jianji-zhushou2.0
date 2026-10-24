@@ -1,0 +1,14 @@
+{
+	"extends": "../tsconfig.settings.json",
+	"compilerOptions": {
+		"rootDir": "src",
+		"outDir": "dist/cjs",
+		"emitDeclarationOnly": true
+	},
+	"include": ["src"],
+	"references": [
+		{"path": "../core"},
+		{"path": "../renderer"},
+		{"path": "../streaming"}
+	]
+}

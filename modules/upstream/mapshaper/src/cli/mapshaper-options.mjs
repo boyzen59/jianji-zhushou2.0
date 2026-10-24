@@ -1,0 +1,3119 @@
+import * as V from '../cli/mapshaper-option-validation';
+import { error } from '../utils/mapshaper-logging';
+import { CommandParser } from '../cli/mapshaper-command-parser';
+import { applyExamples } from '../cli/mapshaper-examples';
+import { isPotentialCommandFile } from '../io/mapshaper-file-types';
+
+export function getOptionParser() {
+  // definitions of options shared by more than one command
+  var targetOpt = {
+        describe: 'layer(s) to target (comma-sep. list)'
+      },
+      nameOpt = {
+        describe: 'rename the edited layer(s)'
+      },
+      noReplaceOpt = {
+        alias: '+',
+        type: 'flag',
+        label: '+, no-replace', // show alias as primary option
+        describe: 'retain both input and output layer(s)'
+      },
+      nameOpt2 = { // for -calc and -info
+        describe: 'name the output layer'
+      },
+      // label style properties accepted by -labels and -add-label. -style
+      // accepts these too, for backward compatibility, but leaves them out of
+      // its help.
+      labelStyleOpts = {
+        'font-family': {describe: 'CSS font family, e.g. Georgia (default is sans-serif)'},
+        'font-size': {describe: 'font size (default is 12)'},
+        'font-style': {describe: 'normal or italic'},
+        'font-weight': {describe: 'normal, bold or a numeric weight'},
+        'font-stretch': {describe: 'e.g. condensed'},
+        'letter-spacing': {describe: 'extra space between letters'},
+        'line-height': {describe: 'spacing between lines of a multi-line label; a bare number is a multiple of the font size (default is 1.1)'},
+        'text-anchor': {describe: 'start, middle or end'},
+        'label-align': {describe: 'how the lines of a multi-line label align: left, center or right'},
+        'dominant-baseline': {describe: 'vertical alignment, e.g. central'},
+        'label-pos': {describe: 'position relative to the anchor: n s e w ne se nw sw c'},
+        'label-side': {describe: 'which side of its path the text sits on: left or right'},
+        'label-start-offset': {describe: 'where text starts along its path, e.g. 50%'},
+        dx: {describe: 'horizontal offset from the anchor'},
+        dy: {describe: 'vertical offset from the anchor'},
+        fill: {describe: 'text color'},
+        opacity: {describe: 'text opacity'},
+        'halo-width': {describe: 'width of a halo around the text in px (default is 0, no halo)'},
+        'halo-color': {describe: 'halo color (default is white)'},
+        'halo-opacity': {describe: 'halo opacity, 0-1'},
+        'label-width': {describe: 'width of a fixed-width text block in px (lines are wrapped in the web UI)'},
+        'label-padding': {describe: 'space around the text, as in CSS: one to four lengths, e.g. 4 or "2 6"'},
+        'label-background': {describe: 'color of a box drawn behind the text and its padding'},
+        'label-background-opacity': {describe: 'background opacity, 0-1'},
+        callout: {describe: 'line from the anchor to the text: line, elbow or curve'},
+        'callout-end': {describe: 'marker at the anchor end: arrow, wide-arrow, open-arrow, ring or none'},
+        'callout-end-size': {describe: 'length of an arrowhead\'s sides, or a ring\'s diameter, in px'},
+        'callout-via': {describe: 'x,y of an elbow\'s corner or a point on a curve, in px'},
+        'callout-attach': {describe: 'where the callout meets the text, as x,y fractions'},
+        'callout-gap': {describe: 'px between the callout and the anchor'},
+        'callout-padding': {describe: 'px between the callout and the text (default is 3, or 0 with a label background or padding)'},
+        'callout-color': {describe: 'callout color (defaults to the text color)'},
+        'callout-width': {describe: 'callout line width in px (default is 1)'},
+        'callout-opacity': {describe: 'callout opacity, 0-1'},
+        css: {describe: 'inline css style'},
+        class: {describe: 'name of CSS class or classes (space-separated)'}
+      },
+      // a label can carry a symbol at its anchor
+      labelIconOpts = {
+        icon: {describe: 'symbol drawn at the label anchor: circle, square, ring, star, polygon'},
+        'icon-size': {describe: 'size of the anchor symbol in px'},
+        'icon-sides': {describe: '(polygon) number of sides of the anchor symbol'},
+        'icon-fill': {describe: 'fill of the anchor symbol, or none (defaults to the text color; a ring has none)'},
+        'icon-stroke': {describe: 'stroke color of the anchor symbol, or none (a ring\'s defaults to the text color)'},
+        'icon-stroke-width': {describe: 'stroke width of the anchor symbol in px'},
+        'icon-color': {describe: 'color of the anchor symbol: a ring\'s stroke, other shapes\' fill'},
+        'icon-opacity': {describe: 'opacity of the anchor symbol, 0-1'}
+      },
+      // style properties of points, lines and polygons, accepted by -style and
+      // -add-shape
+      featureStyleOpts = {
+        class: {describe: 'name of CSS class or classes (space-separated)'},
+        css: {describe: 'inline css style'},
+        fill: {describe: 'fill color; examples: #eee pink rgba(0, 0, 0, 0.2)'},
+        'fill-pattern': {describe: 'pattern fill, ex: "hatches 2px grey 2px blue"'},
+        'fill-effect': {describe: 'use "sphere" on a circle for a 3d globe effect'},
+        'fill-opacity': {describe: 'fill opacity'},
+        'fill-hatch': {alias_to: 'fill-pattern'},
+        'outer-glow-color': {describe: 'color of a glow outside each polygon (adds the glow)'},
+        'outer-glow-width': {describe: 'how far the outer glow reaches, in px (default is 10)'},
+        'outer-glow-opacity': {describe: 'opacity of the outer glow, 0-1'},
+        'inner-glow-color': {describe: 'color of a glow inside each polygon (adds the glow)'},
+        'inner-glow-width': {describe: 'how far the inner glow reaches, in px (default is 10)'},
+        'inner-glow-opacity': {describe: 'opacity of the inner glow, 0-1'},
+        stroke: {describe: 'stroke color'},
+        'stroke-width': {describe: 'stroke width'},
+        'stroke-dasharray': {describe: 'stroke dashes. Examples: "4" "2 4"'},
+        'stroke-linecap': {describe: 'line caps: round, butt or square (dashed lines default to butt)'},
+        'stroke-opacity': {describe: 'stroke opacity'},
+        'line-start': {describe: 'marker at the start of each line: arrow, wide-arrow, open-arrow, dot or none'},
+        'line-end': {describe: 'marker at the end of each line: arrow, wide-arrow, open-arrow, dot or none'},
+        'line-end-size': {describe: 'length of an arrowhead\'s sides in px (default grows with stroke-width)'},
+        'line-fade': {describe: 'share of a line (0-1) that fades in from its tail'},
+        'line-taper': {describe: 'narrow each line toward its tail (0-1, 1 tapers to a point)'},
+        'casing-color': {describe: 'color of a casing (outline) drawn beneath each line (adds the casing)'},
+        'casing-width': {describe: 'how far the casing extends past each edge of the line, in px (default is 1)'},
+        'casing-opacity': {describe: 'opacity of the casing, 0-1'},
+        opacity: {describe: 'opacity; example: 0.5'},
+        r: {describe: 'symbol radius (set this to export points as circles)'},
+        // Accepted, but left out of the help: from when labels and their icons
+        // were styled with -style. Icons are made by -symbols and -labels.
+        icon: {},
+        'icon-size': {},
+        'icon-color': {},
+        'icon-opacity': {}
+      },
+      noReplaceOpt2 = { // for -calc and -info
+        alias: '+',
+        type: 'flag',
+        label: '+',
+        describe: 'save output to a new layer'
+      },
+      noSnapOpt = {
+        // describe: 'don't snap points before applying command'
+        type: 'flag'
+      },
+      encodingOpt = {
+        describe: 'text encoding (applies to .dbf and delimited text files)'
+      },
+      snapIntervalOpt = {
+        describe: 'snapping distance in source units (default is tiny)',
+        type: 'distance'
+      },
+      minGapAreaOpt = {
+        old_alias: 'min-gap-area',
+        describe: '(deprecated) use gap-width= instead',
+        type: 'area'
+      },
+      gapWidthOpt = {
+        describe: 'fill gaps narrower than this width, e.g. 2m (default is automatic)',
+        type: 'distance'
+      },
+      sliverControlOpt = {
+        describe: '(deprecated) use gap-width= instead',
+        type: 'number'
+      },
+      calcOpt = {
+        describe: 'use a JS expression to aggregate data values'
+      },
+      sumFieldsOpt = {
+        describe: 'fields to sum when dissolving  (comma-sep. list)',
+        type: 'strings'
+      },
+      copyFieldsOpt = {
+        describe: 'fields to copy when dissolving (comma-sep. list)',
+        type: 'strings'
+      },
+      dissolveFieldsOpt = {
+        DEFAULT: true,
+        type: 'strings',
+        describe: '(optional) field(s) to dissolve on (comma-sep. list)'
+      },
+      fieldTypesOpt = {
+        describe: 'type hints for csv source files, e.g. FIPS:str,ZIPCODE:str',
+        type: 'strings'
+      },
+      stringFieldsOpt = {
+        describe: 'csv field(s) to import as strings, e.g. FIPS,ZIPCODE',
+        type: 'strings'
+      },
+      bboxOpt = {
+        type: 'bbox',
+        describe: 'comma-sep. bounding box: xmin,ymin,xmax,ymax'
+      },
+      invertOpt = {
+        type: 'flag',
+        describe: 'retain only features that would have been deleted'
+      },
+      whereOpt = {
+        describe: 'use a JS expression to select a subset of features'
+      },
+      whereOpt2 = {
+        describe: 'filter polygon boundaries using a JS expression (with A and B)'
+      },
+      eachOpt2 = {
+        describe: 'apply a JS expression to each polygon boundary (with A and B)'
+      },
+      aspectRatioOpt = {
+        describe: 'aspect ratio as a number or range (e.g. 2 0.8,1.6 ,2)'
+      },
+      offsetOpt = {
+        describe: 'offset distance or pct of h/w (single value or l,b,r,t list)',
+        type: 'distance'
+      },
+      frameMarginOpt = {
+        describe: 'padding in display units or pct of frame width; 1-4 values in CSS order, e.g. 5% or 10%,2%',
+        type: 'strings'
+      },
+      frameOffsetOpt = {
+        // undocumented: older form of margin=, one value or an l,b,r,t list
+        type: 'strings'
+      };
+
+  // The label options -style used to document, before -labels took them over.
+  // fill, opacity, css and class are left out because -style documents them
+  // for every kind of feature.
+  function getHiddenLabelStyleOpts() {
+    var shared = ['fill', 'opacity', 'css', 'class'];
+    var opts = {'label-text': {}};
+    Object.keys(labelStyleOpts).forEach(function(name) {
+      if (shared.indexOf(name) == -1) opts[name] = {};
+    });
+    return opts;
+  }
+
+  var parser = new CommandParser();
+  parser.usage('Usage:  mapshaper -<command> [options] ...');
+
+  /*
+  parser.example('Fix minor topology errors, simplify to 10%, convert to GeoJSON\n' +
+      '$ mapshaper states.shp snap -simplify 10% -o format=geojson');
+
+  parser.example('Aggregate census tracts to counties\n' +
+      '$ mapshaper tracts.shp -each \'CTY_FIPS=FIPS.substr(0, 5)\' -dissolve CTY_FIPS');
+  */
+
+  parser.note('Enter mapshaper -help <command> to view options for a single command');
+
+  parser.section('I/O commands');
+
+  // When the command line begins with a non-command argument, route .txt files
+  // to "-run <path>" (command files) and everything else to "-i <path>" (data
+  // files). The actual file-or-expression check happens inside cmd.run.
+  parser.default(function(argv) {
+    if (isPotentialCommandFile(argv[0])) {
+      argv.unshift('-run');
+    } else {
+      argv.unshift('-i');
+    }
+  });
+
+  parser.command('i')
+    .describe('input one or more files')
+    .validate(V.validateInputOpts)
+    .option('files', {
+      DEFAULT: {
+        multi_arg: true,
+        type: 'string'
+      },
+      type: 'strings',
+      describe: 'one or more files to import, or - to use stdin'
+    })
+    .option('combine-files', {
+      describe: 'import files to separate layers with shared topology',
+      type: 'flag'
+    })
+    .option('batch-mode', {
+      describe: 'apply subsequent commands separately to each input file',
+      type: 'flag'
+    })
+    .option('merge-files', {
+      // describe: 'merge features from compatible files into the same layer',
+      type: 'flag'
+    })
+    .option('no-topology', {
+      describe: 'treat each shape as topologically independent',
+      type: 'flag'
+    })
+    .option('precision', {
+      describe: 'coordinate precision in source units, e.g. 0.001',
+      type: 'number'
+    })
+    .option('snap', {
+      type: 'flag',
+      describe: 'snap nearly identical points to fix minor topology errors'
+    })
+    .option('auto-snap', {alias_to: 'snap'})
+    .option('snap-interval', snapIntervalOpt)
+    .option('encoding', encodingOpt)
+    /*
+    .option('fields', {
+      describe: 'attribute fields to import (comma-sep.) (default is all fields)',
+      type: 'strings'
+    }) */
+    .option('id-field', {
+      describe: 'import Topo/GeoJSON id property to this field'
+    })
+    .option('string-fields', stringFieldsOpt)
+    .option('field-types', fieldTypesOpt)
+    .option('name', {
+      describe: 'rename the imported layer(s)'
+    })
+    .option('layers', {
+      type: 'strings',
+      describe: '[GPKG] comma-sep. list of layers to import'
+    })
+    .option('scaling', {
+      describe: '[raster] raster display scaling method: none,minmax,percentile'
+    })
+    .option('scale-range', {
+      describe: '[raster] display intensity range in percent, e.g. 0,100'
+    })
+    .option('percentile-range', {
+      describe: '[raster] input percentile range for percentile scaling, e.g. 2,98'
+    })
+    // The user-facing spelling is raster-type=; the parsed option is named
+    // interpretation to keep it distinct from layer.raster_type, which is a
+    // storage tag, not a semantic one.
+    .option('interpretation', {
+      label: 'raster-type=',
+      describe: '[raster] image, categorical or continuous (default is image)'
+    })
+    .option('raster-type', {
+      alias_to: 'interpretation'
+    })
+    .option('rendition', {
+      describe: '[GeoTIFF] import a GeoTIFF rendition: full,overview-1,etc.'
+    })
+    .option('resolution', {
+      describe: '[raster] import width in pixels, or full (default reduces large rasters)'
+    })
+    .option('geometry-type', {
+      // undocumented; GeoJSON import rejects all but one kind of geometry
+      // describe: '[GeoJSON] Import one kind of geometry (point|polygon|polyline)'
+    })
+    .option('json-path', {
+      // describe: path to an array of data values
+    })
+    .option('csv-skip-lines', {
+      type: 'integer',
+      describe: '[CSV] number of lines to skip at the beginning of the file'
+    })
+    .option('csv-lines', {
+      type: 'integer',
+      describe: '[CSV] number of data records to read'
+    })
+    .option('csv-field-names', {
+      type: 'strings',
+      describe: '[CSV] comma-sep. list of field names to assign each column'
+    })
+    .option('csv-dedup-fields', {
+      type: 'flag',
+      describe: '[CSV] rename fields with duplicate names'
+    })
+    .option('csv-filter', {
+      describe: '[CSV] JS expression for filtering records'
+    })
+    .option('csv-fields', {
+      type: 'strings',
+      describe: '[CSV] comma-sep. list of fields to import'
+    })
+    // .option('csv-comment', {
+    //   describe: '[CSV] comment line character(s)'
+    // })
+    .option('decimal-comma', {
+      type: 'flag',
+      describe: '[CSV] import numbers formatted like 1.000,01 or 1 000,01'
+    })
+    .option('json-path', {
+      old_alias: 'json-subtree',
+      describe: '[JSON] path to JSON input data; separator is /'
+    })
+    .option('ndjson', {
+      type: 'flag',
+      describe: '[JSON/GeoJSON] input is newline-delimited JSON objects'
+    })
+    .option('single-part', {
+      type: 'flag',
+      // describe: '[GeoJSON] split multi-part features into single-part features'
+    });
+
+  parser.command('o')
+    .describe('output edited content')
+    .validate(V.validateOutputOpts)
+    .option('_', {
+      label: '<file|directory>',
+      describe: '(optional) name of output file or directory, - for stdout',
+      DEFAULT: {
+        multi_error_msg: 'Command takes one file or directory argument.'
+      }
+    })
+    .option('format', {
+      describe: 'options: shapefile,geojson,topojson,flatgeobuf,geopackage,geoparquet,geotiff,json,dbf,csv,tsv,svg,html'
+    })
+    .option('target', targetOpt)
+    .option('force', {
+      describe: 'allow overwriting input files',
+      type: 'flag'
+    })
+    .option('gzip', {
+      describe: 'apply gzip compression to output files',
+      type: 'flag'
+    })
+   .option('zip', {
+      describe: 'save all output files in a single .zip file',
+      type: 'flag'
+    })
+    .option('dry-run', {
+      // describe: 'do not output any files'
+      type: 'flag'
+    })
+    .option('ldid', {
+      // describe: 'language driver id of dbf file',
+      type: 'number'
+    })
+    .option('precision', {
+      describe: 'coordinate precision in source units, e.g. 0.001',
+      type: 'number'
+    })
+    .option('fix-geometry', {
+      describe: 'remove intersections introduced by rounding or quantization',
+      type: 'flag'
+    })
+    .option('bbox-index', {
+      describe: 'export a .json file with bbox of each layer',
+      type: 'flag'
+    })
+    .option('cut-table', {
+      describe: 'detach data attributes from shapes and save as a JSON file',
+      type: 'flag'
+    })
+    .option('drop-table', {
+      describe: 'remove data attributes from output',
+      type: 'flag'
+    })
+    .option('encoding', {
+      describe: '[Shapefile/CSV] text encoding (default is utf8)'
+    })
+    .option('field-order', {
+      describe: '[Shapefile/CSV] field-order=ascending sorts columns A-Z'
+    })
+    .option('id-field', {
+      describe: '[Topo/GeoJSON/SVG] field to use for id property',
+      type: 'strings'
+    })
+    .option('bbox', {
+      type: 'flag',
+      describe: '[Topo/GeoJSON] add bbox property'
+    })
+    .option('extension', {
+      describe: '[Topo/GeoJSON] set file extension (default is ".json")'
+    })
+    .option('prettify', {
+      type: 'flag',
+      describe: '[Topo/GeoJSON/JSON] format output for readability'
+    })
+    .option('singles', {
+      describe: '[TopoJSON] save each target layer as a separate file',
+      type: 'flag'
+    })
+    .option('quantization', {
+      describe: '[TopoJSON] specify quantization (auto-set by default)',
+      type: 'integer'
+    })
+    .option('no-quantization', {
+      describe: '[TopoJSON] export coordinates without quantization',
+      type: 'flag'
+    })
+    .option('no-point-quantization', {
+      // describe: '[TopoJSON] export point coordinates without quantization',
+      type: 'flag'
+    })
+    .option('presimplify', {
+      describe: '[TopoJSON] add per-vertex data for dynamic simplification',
+      type: 'flag'
+    })
+    .option('topojson-precision', {
+      // describe: 'pct of avg segment length for rounding (0.02 is default)',
+      type: 'number'
+    })
+    // .option('winding', {
+    //   describe: '[GeoJSON] set polygon winding order (use CW with d3-geo)'
+    // })
+    .option('gj2008', {
+      describe: '[GeoJSON] use original GeoJSON spec (not RFC 7946)',
+      type: 'flag'
+    })
+    .option('reverse-winding', {
+      describe: '[GeoJSON] reverse polygon winding order',
+      type: 'flag'
+    })
+    .option('rfc7946', {
+      // dummy option so old commands do not break
+      type: 'flag'
+    })
+    .option('combine-layers', {
+      describe: '[GeoJSON] output layers as a single file',
+      type: 'flag'
+    })
+    .option('geojson-type', {
+      describe: '[GeoJSON] FeatureCollection, GeometryCollection or Feature'
+    })
+    .option('no-null-props', {
+      describe: '[GeoJSON] use "properties":{} when a Feature has no data',
+      type: 'flag'
+    })
+    .option('hoist', {
+      describe: '[GeoJSON] move properties to the root level of each Feature',
+      type: 'strings'
+    })
+    .option('ndjson', {
+      describe: '[GeoJSON/JSON] output newline-delimited features or records',
+      type: 'flag'
+    })
+    .option('metadata', {
+      describe: '[SVG/TopoJSON/GeoJSON] include metadata in output',
+      type: 'flag'
+    })
+    .option('width', {
+      describe: '[SVG/HTML/TopoJSON] pixel width of output (SVG default is 800)',
+      type: 'number'
+    })
+    .option('height', {
+      describe: '[SVG/HTML/TopoJSON] pixel height of output (optional)',
+      type: 'number'
+    })
+    .option('max-height', {
+      describe: '[SVG/TopoJSON] max pixel height of output (optional)',
+      type: 'number'
+    })
+    .option('margin', {
+      describe: '[SVG/TopoJSON] space betw. data and viewport (default is 1)'
+    })
+    .option('pixels', {
+      describe: '[SVG/TopoJSON] output area in pix. (alternative to width=)',
+      type: 'number'
+    })
+    .option('fit-bbox', {
+      type: 'bbox',
+      describe: '[TopoJSON] scale and shift coordinates to fit a bbox'
+    })
+    .option('svg-scale', {
+      describe: '[SVG] source units per pixel (alternative to width= option)',
+      type: 'number'
+    })
+    .option('svg-bbox', {
+      describe: '[SVG] bounding box of SVG map in projected map units',
+      type: 'bbox'
+    })
+    .option('raster-res', {
+      describe: '[SVG] raster pixels per SVG pixel (default is 1)',
+      type: 'number'
+    })
+    .option('linked-images', {
+      describe: '[SVG] link raster images as external files',
+      type: 'flag'
+    })
+    .option('jpeg-quality', {
+      describe: '[SVG/HTML/JPEG] JPEG quality for raster images, 1-100 (default is 85)',
+      type: 'number'
+    })
+    .option('responsiveness', {
+      describe: '[HTML] fixed (shrinks to fit) or dynamic (resizes to fill its container)'
+    })
+    .option('image-format', {
+      describe: '[HTML] format of the map image: png or jpg (default is png)'
+    })
+    .option('html-labels', {
+      describe: '[HTML] draw anchored labels and text blocks as HTML text',
+      type: 'flag'
+    })
+    .option('pixel-ratio', {
+      describe: '[HTML/PNG/JPEG] image pixels per CSS pixel (default is 2)',
+      type: 'number'
+    })
+    .option('fit-extent', {
+      describe: '[SVG] layer to use for the map extent'
+    })
+    .option('point-symbol', {
+      describe: '[SVG] circle or square (default is circle)'
+    })
+    .option('svg-data', {
+      type: 'strings',
+      describe: '[SVG] fields to export as data-* attributes'
+    })
+    .option('id-prefix', {
+      describe: '[SVG] prefix for namespacing layer and feature ids'
+    })
+    .option('scalebar', {
+      type: 'flag',
+      // describe: '[SVG] add a scalebar showing scale at the center of the map'
+    })
+    .option('delimiter', {
+      describe: '[CSV] field delimiter'
+    })
+    .option('decimal-comma', {
+      type: 'flag',
+      describe: '[CSV] export numbers with decimal commas not points'
+    })
+    .option('compression', {
+      describe: '[GeoParquet] snappy,zstd,none (default snappy) [GeoTIFF] deflate,none'
+    })
+    .option('level', {
+      describe: '[GeoParquet] zstd compression level',
+      type: 'integer'
+    })
+    .option('rowgroup', {
+      describe: '[GeoParquet] rows per row group (default: sized by data)',
+      type: 'integer'
+    })
+    .option('show-all', {
+      type: 'flag',
+      describe: '[Snapshot] show all layers in Web UI'
+    })
+    .option('final', {
+      type: 'flag' // for testing
+    })
+    ;
+
+  parser.section('Editing commands');
+
+  parser.command('add-layer')
+    .describe('create an empty layer, to add shapes or labels to')
+    .option('geometry-type', {
+      describe: 'point, polygon or polyline'
+    })
+    .option('name', {
+      describe: 'name of the new layer'
+    })
+    // only the CRS is taken from the target, so that a shape drawn at a
+    // projected coordinate is not read as lat-long
+    .option('target', targetOpt);
+
+  // Used by GUI - leaving undocumented
+  parser.command('add-shape')
+    .describe('add a point, line or polygon, optionally with a style')
+    .option('coordinates', {
+      describe: 'x,y for a point, x,y,x,y,... for a line (a ring makes a polygon)'
+    })
+    .option('closed', {
+      describe: 'close an open path to make a polygon',
+      type: 'flag'
+    })
+    .option('extend', {
+      describe: 'join a line to the line in the target that ends where it starts or ends',
+      type: 'flag'
+    })
+    .option('geojson', {
+      describe: 'a GeoJSON Feature or geometry, instead of coordinates='
+    })
+    .option('properties', {
+      describe: 'attributes as a JSON object, e.g. {"name":"Route 1"}'
+    })
+    .options(featureStyleOpts)
+    .option('name', {
+      describe: 'name of a new layer (with no target, or with +)'
+    })
+    .option('target', {
+      describe: 'layer to add the shape to (default is the current target)'
+    })
+    .option('no-replace', {
+      alias: '+',
+      type: 'flag',
+      label: '+, no-replace',
+      describe: 'add the shape to a new layer instead of the target'
+    });
+
+  parser.command('affine')
+    .describe('transform coordinates by shifting, scaling and rotating')
+    .option('shift', {
+      type: 'strings',
+      describe: 'x,y offsets in source units (e.g. 5000,-5000)'
+    })
+    .option('scale', {
+      type: 'number',
+      describe: 'scale (default is 1)'
+    })
+    .option('rotate', {
+      type: 'number',
+      describe: 'angle of rotation in degrees (default is 0)'
+    })
+    .option('anchor', {
+      type: 'numbers',
+      describe: 'center of rotation/scaling (default is center of selected shapes)'
+    })
+    .option('fit-bbox', {
+      type: 'bbox',
+      describe: 'scale and shift coordinates to fit a bbox'
+    })
+    .option('where', whereOpt)
+    .option('target', targetOpt);
+
+  parser.command('buffer')
+    .describe('buffer points, lines or polygons by a distance parameter')
+    .option('radius', {
+      describe: 'radius of buffer, as an expression or a constant',
+      DEFAULT: true
+    })
+    .option('tolerance', {
+      describe: 'acceptable error when buffering lines and polygons (default is 1%)'
+    })
+    .option('cap-style', {
+      describe: 'flat or round (default is round)'
+    })
+    .option('rhumb', {
+      // undocumented: offset along rhumb lines instead of great circles
+      // (lat-long lines/polygons)
+      type: 'flag'
+    })
+    .option('topological', {
+      describe: '[polygons] buffer unshared boundaries without covering source polygon areas',
+      type: 'flag'
+    })
+    .option('fill-gaps', {
+      describe: '[polygons] fill enclosed holes and inlets whose opening is narrower than the buffer distance',
+      type: 'flag'
+    })
+    .option('max-widening', {
+      describe: '[with fill-gaps] fill interior gaps up to this multiple of the buffer distance wide (default 5)',
+      type: 'number'
+    })
+    .option('merge-islands', {
+      describe: '[with fill-gaps] merge small islands across a narrow gap (off by default)',
+      type: 'flag'
+    })
+    .option('geodesic', {
+      describe: '[projected data] buffer using geodesic distances',
+      type: 'flag'
+    })
+    .option('geodesic2', {
+      // undocumented/experimental: geodesic buffering for projected data done
+      // in-place in the projected plane via per-point scale correction (no
+      // web-Mercator round-trip; avoids pole/antimeridian edge cases). Compare
+      // with the 'geodesic' flag, which reprojects through lng/lat instead.
+      type: 'flag'
+    })
+    .option('polar', {
+      // special polar handling is activated automatically now, so I'm making this an undocumented option.
+      // describe: 'keep lat-long buffers within the valid extent (+/-180, +/-90); for growing polygons sliced at the antimeridian/poles (erode not yet supported)',
+      type: 'flag'
+    })
+    .option('vertices', {
+      describe: 'number of vertices to use when buffering points (default is 72)',
+      type: 'integer'
+    })
+    .option('quad-segs', {
+      describe: 'segments per quarter-circle in joins and caps (default is 8)',
+      type: 'integer'
+    })
+    .option('debug-offset', {
+      // generate initial buffer shapes but don't dissolve them
+      type: 'flag'
+    })
+    .option('debug-mosaic', {
+      type: 'flag'
+    })
+    .option('debug-voronoi', {
+      // output the inter-feature medial-axis (Voronoi) cut-lines used to
+      // partition contested space in a topological polygon buffer
+      type: 'flag'
+    })
+    .option('debug-delaunay', {
+      // output the medial-construction triangles (Delaunay triangles bridging
+      // two features within buffer reach) used to build the medial axis in a
+      // topological polygon buffer
+      type: 'flag'
+    })
+    .option('left', {
+      // undocumented: generate the left-side half of a line buffer
+      // (left is relative to the direction of the path). Undocumented because
+      // one-sided line buffers can leave spurious wrong-side lobes on
+      // self-approaching paths (see docs/development/buffer-line-notes.md).
+      type: 'flag'
+    })
+    .option('right', {
+      // undocumented: generate the right-side half of a line buffer
+      // (see 'left' above)
+      type: 'flag'
+    })
+    .option('offset-left', {
+      // undocumented: output the left-side offset line instead of a buffer
+      // (lines). Built on the same one-sided machinery as 'left'/'right', so it
+      // shares their wrong-side-lobe artifacts.
+      type: 'flag'
+    })
+    .option('offset-right', {
+      // undocumented: output the right-side offset line instead of a buffer
+      // (see 'offset-left' above)
+      type: 'flag'
+    })
+    .option('no-loop-removal', {
+      // Loop removal (collapsing self-overlap loops from two-sided line buffers
+      // before the dissolve) is on by default; this opts out.
+      type: 'flag'
+    })
+    .option('band-method', {
+      // Undocumented escape hatch: build buffers with the older band (sector-
+      // band) construction -- per-segment offset bands + join-sector rings + a
+      // band-coverage audit, unioned by a boundary flood -- instead of the
+      // default construction (the clean-outline construction for polygon grow,
+      // the winding-fill construction otherwise). Applies to line buffers (one-
+      // and two-sided) and all polygon buffers (positive, negative,
+      // topological); where a path's default already is the band construction,
+      // this is a no-op. Kept as a slower-but-conservative fallback and a
+      // debugging aid in case the default construction mishandles some input.
+      type: 'flag'
+    })
+    .option('clean-outline-winding', {
+      // Undocumented: build the polygon-grow outer ring with the constant-winding
+      // concave-join construction used by the open-path two-sided outline (a
+      // reversed arc at the offset radius). This is now the DEFAULT polygon-grow
+      // construction; the flag is retained as an explicit/no-op selector.
+      type: 'flag'
+    })
+    .option('coarse-bridge', {
+      // Undocumented: force the low-resolution concave bridge at EVERY deep
+      // concave bend, bypassing the default's exposure gate and the loop
+      // remover's clip budget. The guarded form is the default (2026-07-02);
+      // this unguarded form is faster still but NOT area-safe: an exposed
+      // bridge can dent the buffer or create spurious holes (see the caution
+      // at makeCoarseConcaveJoin and "coarse-bridge" in buffer-line-notes.md).
+      type: 'flag'
+    })
+    .option('no-gap-patch', {
+      // Undocumented: disable the default geodesic gap-patch stadium union
+      // (see useGapPatch in mapshaper-buffer-common.mjs). Useful for comparing
+      // raw dissolve behavior against the patched outline construction.
+      type: 'flag'
+    })
+    .option('no-cleanup', {
+      type: 'flag'
+    })
+    .option('name', nameOpt)
+    .option('target', targetOpt)
+    .option('no-replace', noReplaceOpt);
+
+  parser.command('blur')
+    .describe('apply a Gaussian-like blur to a projected raster layer')
+    .option('radius', {
+      DEFAULT: true,
+      type: 'distance',
+      describe: 'blur amount as pixels or a distance (e.g. 5px, 20m)'
+    })
+    .option('target', targetOpt);
+
+  parser.command('classify')
+    // .describe('apply sequential or categorical classification')
+    .describe('assign colors or values using one of several methods')
+    .option('field', {
+      describe: 'name of field to classify',
+      DEFAULT: true
+    })
+    .option('save-as', {
+        describe: 'name of output field (default is fill|stroke|class)'
+    })
+    .option('colors', {
+      describe: 'list of CSS colors or color scheme name (see -colors)',
+      type: 'colors'
+    })
+    .option('values', {
+      describe: 'values to assign to classes (alternative to colors=)',
+      type: 'strings'
+    })
+    .option('color-scheme', {
+      // deprecated in favor of colors=
+      // describe: 'name of a predefined color scheme (see -colors command)'
+    })
+    .option('non-adjacent', {
+      describe: 'assign non-adjacent colors to a polygon layer',
+      assign_to: 'method'
+    })
+    .option('stops', {
+      describe: 'a pair of values (0-100) for limiting a color ramp',
+      type: 'numbers'
+    })
+    .option('null-value', {
+      describe: 'value (or color) to use for invalid or missing data'
+    })
+    .option('method', {
+      describe: 'quantile, nice, equal-interval, categorical, etc.'
+    })
+    .option('quantile', {
+      //describe: 'shortcut for method=quantile (the default)',
+      assign_to: 'method'
+    })
+    .option('equal-interval', {
+      //describe: 'short for method=equal-interval',
+      assign_to: 'method'
+    })
+    .option('hybrid', {
+      // describe: 'short for method=hybrid (equal-interval inner breaks + quantile outliers)',
+      assign_to: 'method'
+    })
+    .option('nice', {
+      //describe: 'short for method=nice (rounded, equal inner breaks)',
+      assign_to: 'method'
+    })
+    .option('breaks', {
+      describe: 'user-defined sequential class breaks',
+      type: 'numbers'
+    })
+    .option('outer-breaks', {
+      describe: 'min,max breakpoints, to limit the effect of outliers',
+      old_alias: 'range',
+      type: 'numbers'
+    })
+    .option('classes', {
+      describe: 'number of classes (with pivot=, or below,above the pivot)',
+      type: 'numbers'
+    })
+    .option('pivot', {
+      describe: 'diverging classes: a value, median, mean or auto (0 or median)'
+    })
+    .option('pivot-range', {
+      describe: 'low,high range of the pivot class (diverging classes)',
+      type: 'numbers'
+    })
+    .option('no-pivot-class', {
+      describe: 'diverging classes meet at the pivot (no pivot class)',
+      type: 'flag'
+    })
+    .option('pivot-class', {
+      describe: 'add a pivot class to continuous diverging colors',
+      type: 'flag'
+    })
+    .option('invert', {
+      describe: 'reverse the order of colors/values',
+      type: 'flag'
+    })
+    .option('continuous', {
+      describe: 'interpolate between values at the class breaks (unclassed colors; quantile goes by rank)',
+      type: 'flag'
+    })
+    .option('interpolation', {
+      describe: 'color interpolation: rgb (default) or oklch'
+    })
+    .option('vibrance', {
+      describe: '(oklch) more vivid midtones, 0-1 (default 0)',
+      type: 'number'
+    })
+    .option('index-field', {
+      describe: 'apply pre-calculated classes (0 ... n-1, -1)'
+    })
+    .option('precision', {
+      describe: 'round data values before classification (e.g. 0.1)',
+      type: 'number'
+    })
+    .option('categories', {
+      describe: 'list of data values for categorical color scheme',
+      type: 'strings'
+    })
+    .option('other', {
+      describe: 'default value for categorical scheme'
+    })
+    .option('key', {type: 'flag'})
+    .option('key-style', {
+      describe: 'one of: simple, gradient, dataviz'
+    })
+    .option('key-name', {
+      describe: 'name of output SVG file'
+    })
+    .option('key-width', {
+      describe: 'width of key in pixels',
+      type: 'number'
+    })
+    .option('key-font-size', {
+      describe: 'label size in pixels',
+      type: 'number'
+    })
+    .option('key-tile-height', {
+      describe: 'height of color tiles in pixels',
+      type: 'number'
+    })
+    .option('key-tic-length', {
+      describe: 'length of tic mark in pixels'
+    })
+    .option('key-label-suffix', {
+      describe: 'string to append to each label'
+    })
+    .option('key-last-suffix', {
+      describe: 'string to append to last label'
+    })
+    .option('target', targetOpt);
+
+  parser.command('clean')
+    .describe('fixes geometry issues, such as polygon overlaps and gaps')
+    .option('close-outer-gaps', {
+      describe: 'close cracks that open to the outside of the mosaic',
+      type: 'flag'
+    })
+    .option('gap-width', gapWidthOpt)
+    .option('gap-fill-area', minGapAreaOpt)
+    .option('sliver-control', sliverControlOpt)
+    .option('snap-interval', snapIntervalOpt)
+    .option('no-snap', noSnapOpt)
+    // // not useful in -clean -- clean removes gaps, not slivers
+    // .option('keep-shapes', {
+    //   type: 'flag',
+    //   describe: 'protect sliver polygons from complete removal'
+    // })
+    .option('allow-overlaps', {
+      describe: 'allow polygons to overlap (disables gap fill)',
+      type: 'flag'
+    })
+    .option('overlap-rule', {
+      describe: 'how to resolve overlaps: min-id|max-id|min-area|[max-area]'
+    })
+    .option('allow-empty', {
+      describe: 'keep null geometries (removed by default)',
+      type: 'flag'
+    })
+    .option('rewind', {
+      describe: 'fix errors in the CW/CCW winding order of polygon rings',
+      type: 'flag'
+    })
+    // TODO: consider making this the standard way of removing null geometry
+    // (currently there's -filter remove-empty)
+    // .option('empty', {
+    //   describe: 'remove features with null geometry',
+    //   type: 'flag'
+    // })
+    .option('arcs', { // old name for arcs-only
+      alias_to: 'only-arcs'
+    })
+    .option('only-arcs', {
+      describe: 'delete unused arcs but don\'t remove gaps and overlaps',
+      type: 'flag'
+    })
+    .option('no-arc-dissolve', {
+      type: 'flag' // no description
+    })
+    .option('target', targetOpt);
+
+  parser.command('clip')
+    .describe('use a polygon layer to clip another layer')
+    .option('source', {
+      DEFAULT: true,
+      describe: 'file or layer containing clip polygons'
+    })
+    .option('remove-slivers', {
+      describe: 'remove sliver polygons created by clipping',
+      type: 'flag'
+    })
+    .option('bbox', bboxOpt)
+    .option('bbox2', {
+        type: 'bbox',
+        describe: 'experimental fast bbox clipping'
+      })
+    .option('name', nameOpt)
+    .option('no-snap', noSnapOpt)
+    .option('no-cleanup', {
+      // for debugging - no documentation
+      type: 'flag'
+    })
+    .option('target', targetOpt)
+    .option('no-replace', noReplaceOpt);
+
+  parser.command('colorizer')
+    .describe('define a function to convert data values to color classes')
+    .option('colors', {
+      describe: 'comma-separated list of CSS colors',
+      type: 'colors'
+    })
+    .option('breaks', {
+      describe: 'ascending-order list of breaks for sequential color scheme',
+      type: 'numbers'
+    })
+    .option('categories', {
+      describe: 'comma-sep. list of keys for categorical color scheme',
+      type: 'strings'
+    })
+    .option('random', {
+      describe: 'randomly assign colors',
+      type: 'flag'
+    })
+    .option('other', {
+      describe: 'default color for categorical scheme (default is nodata color)'
+    })
+    .option('nodata', {
+      describe: 'color to use for invalid or missing data (default is white)'
+    })
+    .option('name', {
+      describe: 'function name to use in -each and -svg-style commands'
+    })
+    .option('precision', {
+      describe: 'rounding precision to apply before classification (e.g. 0.1)',
+      type: 'number'
+    });
+
+  parser.command('contours')
+    .describe('convert a raster layer to contour lines or closed bands')
+    .option('interval', {
+      describe: 'spacing between contour levels (default is a round interval)',
+      type: 'number'
+    })
+    .option('levels', {
+      describe: 'explicit contour levels, instead of interval= (e.g. 0,100,500)',
+      type: 'numbers'
+    })
+    .option('base', {
+      describe: 'value to align interval= to (default is 0)',
+      type: 'number'
+    })
+    .option('band', {
+      describe: '[raster] band to read values from (default is 0)',
+      type: 'number'
+    })
+    .option('field', {
+      describe: 'name of field to hold contour values (default is "value")'
+    })
+    .option('closed', {
+      describe: 'create closed contour bands with lower and upper fields',
+      type: 'flag'
+    })
+    .option('no-smoothing', {
+      describe: 'skip smoothing away the one-pixel contour staircase',
+      type: 'flag'
+    })
+    .option('name', nameOpt)
+    .option('target', targetOpt)
+    .option('no-replace', noReplaceOpt);
+
+  parser.command('dashlines')
+    .describe('split lines into sections, with or without a gap')
+    .oldAlias('split-lines')
+    .option('dash-length', {
+      type: 'distance',
+      describe: 'length of split-apart lines (e.g. 200km)'
+    })
+    .option('gap-length', {
+      type: 'distance',
+      describe: 'length of gaps between dashes (default is 0)'
+    })
+    .option('scaled', {
+      type: 'flag',
+      describe: 'scale dashes and gaps to prevent partial dashes'
+    })
+    .option('planar', {
+      type: 'flag',
+      describe: 'use planar geometry'
+    })
+    .option('where', whereOpt)
+    .option('target', targetOpt);
+
+  parser.command('define')
+    // .describe('define expression variables')
+    .option('expression', {
+      DEFAULT: true,
+      describe: 'one or more assignment expressions (comma-sep.)'
+    });
+
+  parser.command('densify')
+    .describe('add vertices along path segments so no segment exceeds an interval')
+    .option('interval', {
+      DEFAULT: true,
+      describe: 'max segment length in distance units or degrees for lat-long data in planar mode'
+    })
+    .option('geodesic', {
+      describe: '[lat-long, default] interpolate along the ellipsoidal shortest path',
+      type: 'flag'
+    })
+    .option('rhumb', {
+      describe: '[lat-long] interpolate along a rhumb line (constant bearing)',
+      type: 'flag'
+    })
+    .option('planar', {
+      describe: '[default for projected data] interpolate along a straight line in coordinate space',
+      type: 'flag'
+    })
+    .option('target', targetOpt);
+
+  parser.command('dissolve')
+    .describe('merge features within a layer (repairs polygon topology)')
+    .option('field', {}) // old arg handled by dissolve function
+    .option('fields', dissolveFieldsOpt)
+    .option('calc', calcOpt)
+    .option('sum-fields', sumFieldsOpt)
+    .option('copy-fields', copyFieldsOpt)
+    .option('multipart', {
+      type: 'flag',
+      describe: 'make multipart features instead of dissolving'
+    })
+    .option('where', whereOpt)
+    .option('group-points', {
+      type: 'flag',
+      describe: '[points] group points instead of converting to centroids'
+    })
+    .option('weight', {
+      describe: '[points] field or expression to use for weighting centroid'
+    })
+    .option('planar', {
+      type: 'flag',
+      describe: '[points] use 2D math to find centroids of latlong points'
+    })
+    .option('gap-width', gapWidthOpt)
+    .option('gap-fill-area', {
+      describe: '[polygons] (deprecated) use gap-width= instead',
+      type: 'area'
+    })
+    .option('sliver-control', sliverControlOpt)
+    .option('allow-overlaps', {
+      describe: '[polygons] allow output polygons to overlap (disables gap fill)',
+      type: 'flag'
+    })
+    .option('no-repair', {
+      describe: '[polygons] skip topology repair (faster; assumes clean input)',
+      type: 'flag'
+    })
+    .option('snap-interval', snapIntervalOpt)
+    .option('no-snap', noSnapOpt)
+    .option('name', nameOpt)
+    .option('target', targetOpt)
+    .option('no-replace', noReplaceOpt);
+
+
+  // -dissolve2 is now an alias for -dissolve (the topology repair behavior of
+  // -dissolve2 is now the default behavior of -dissolve). Kept for backward
+  // compatibility; prints a deprecation notice when used.
+  parser.command('dissolve2')
+    .describe('alias for -dissolve (deprecated)')
+    .option('field', {}) // old arg handled by dissolve function
+    .option('fields', dissolveFieldsOpt)
+    .option('calc', calcOpt)
+    .option('sum-fields', sumFieldsOpt)
+    .option('copy-fields', copyFieldsOpt)
+    .option('gap-width', gapWidthOpt)
+    .option('gap-fill-area', {
+      describe: '(deprecated) use gap-width= instead',
+      type: 'area'
+    })
+    .option('sliver-control', sliverControlOpt)
+    .option('allow-overlaps', {
+      describe: 'allow dissolved polygons to overlap (disables gap fill)',
+      type: 'flag'
+    })
+    .option('name', nameOpt)
+    .option('no-snap', noSnapOpt)
+    .option('target', targetOpt)
+    .option('no-replace', noReplaceOpt);
+
+  parser.command('divide')
+    .describe('divide lines by polygons, copy polygon data to lines')
+    .option('fields', {
+      describe: 'fields to copy (comma-sep.) (default is all but key field)',
+      type: 'strings'
+    })
+    .option('calc', {
+      describe: 'use a JS expression to assign values (for many-to-one joins)'
+    })
+    .option('force', {
+      describe: 'replace values from same-named fields',
+      type: 'flag'
+    })
+    .option('source', {
+      DEFAULT: true,
+      describe: 'file or layer containing polygons'
+    })
+    .option('target', targetOpt);
+    // .option('no-replace', noReplaceOpt);
+
+  parser.command('dots')
+    .describe('fill polygons with dots of one or more colors')
+    .option('fields', {
+      DEFAULT: true,
+      describe: 'one or more fields containing numbers of dots',
+      type: 'strings'
+    })
+    .option('colors', {
+      describe: 'one or more colors',
+      type: 'strings'
+    })
+    .option('values', {
+      describe: 'values to assign to dot classes (alternative to colors=)',
+      type: 'strings'
+    })
+    .option('save-as', {
+      describe: 'name of color/value output field (default is fill)'
+    })
+    .option('progressive', {
+      // describe: 'fill in points progressively',
+      type: 'flag'
+    })
+    .option('r', {
+      describe: 'radius of each dot in pixels',
+      type: 'number'
+    })
+    .option('evenness', {
+      describe: '(0-1) dot spacing, from random to even (default is 1)',
+      type: 'number'
+    })
+    .option('per-dot', {
+      describe: 'number for scaling data values (e.g. 10 per dot)',
+      type: 'number'
+    })
+    .option('copy-fields', {
+      describe: 'list of fields to copy from polygons to dots',
+      type: 'strings'
+    })
+    .option('multipart', {
+      describe: 'combine groups of same-color dots into multi-part features',
+      type: 'flag'
+    })
+    .option('target', targetOpt)
+    .option('name', nameOpt)
+    .option('no-replace', noReplaceOpt);
+
+  parser.command('drop')
+    .describe('delete layer(s) or elements within the target layer(s)')
+    .option('geometry', {
+      describe: 'delete all geometry from the target layer(s)',
+      type: 'flag'
+    })
+    .option('holes', {
+      describe: 'delete holes from polygons',
+      type: 'flag'
+    })
+    .option('fields', {
+      type: 'strings',
+      describe: 'delete a list of attribute data fields, e.g. \'id,name\' \'*\''
+    })
+    .option('target', targetOpt);
+
+  parser.command('each')
+    .describe('create/update/delete data fields using a JS expression')
+    .option('expression', {
+      DEFAULT: true,
+      describe: 'JS expression to apply to each target feature'
+    })
+    .option('ids', { // undocumented, used by GUI
+      type: 'numbers'
+    })
+    .option('where', whereOpt)
+    .option('target', targetOpt);
+
+  parser.command('erase')
+    .describe('use a polygon layer to erase another layer')
+    .option('source', {
+      DEFAULT: true,
+      describe: 'file or layer containing erase polygons'
+    })
+    .option('remove-slivers', {
+      describe: 'remove sliver polygons created by erasing',
+      type: 'flag'
+    })
+    .option('bbox', bboxOpt)
+    .option('name', nameOpt)
+    .option('no-snap', noSnapOpt)
+    .option('no-cleanup', {
+      // for debugging - no documentation
+      type: 'flag'
+    })
+    .option('target', targetOpt)
+    .option('no-replace', noReplaceOpt);
+
+  parser.command('explode')
+    .describe('divide multi-part features into single-part features')
+    .option('naive', {type: 'flag'}) // testing
+    .option('target', targetOpt);
+
+  parser.command('filter')
+    .describe('delete features using a JS expression')
+    .option('expression', {
+      DEFAULT: true,
+      describe: 'delete features that evaluate to false'
+    })
+    .option('bbox', {
+      describe: 'delete features outside bbox (xmin,ymin,xmax,ymax)',
+      type: 'bbox'
+    })
+    .option('invert', invertOpt)
+    .option('remove-empty', {
+      type: 'flag',
+      describe: 'delete features with null geometry'
+    })
+    .option('keep-shapes', {
+      type: 'flag'
+    })
+    .option('ids', {
+      // describe: 'filter on a list of feature ids',
+      type: 'numbers'
+    })
+    .option('cleanup', {type: 'flag'}) // TODO: document
+    .option('name', nameOpt)
+    .option('target', targetOpt)
+    .option('no-replace', noReplaceOpt);
+
+  parser.command('filter-fields')
+    .describe('retain a subset of data fields')
+    .option('fields', {
+      DEFAULT: true,
+      type: 'strings',
+      describe: 'fields to retain (comma-sep.), e.g. \'fips,name\''
+    })
+    .option('invert', {
+      type: 'flag',
+      describe: 'retain only fields that would have been deleted'
+    })
+    .option('target', targetOpt);
+
+  parser.command('filter-geom')
+    .describe('')
+    .option('bbox', {
+      type: 'bbox',
+      describe: 'remove non-intersecting geometry (xmin,ymin,xmax,ymax)'
+    })
+    .option('target', targetOpt);
+
+  parser.command('filter-islands2')
+    // .describe('remove small detached polygon rings (islands)')
+    .option('min-area', {
+      type: 'area',
+      describe: 'remove small-area islands (e.g. 10km2)'
+    })
+    .option('min-vertices', {
+      type: 'integer',
+      describe: 'remove low-vertex-count islands'
+    })
+    .option('keep-shapes', {
+      type: 'flag',
+      describe: 'only filter smaller parts of multipart polygons',
+    })
+    .option('remove-empty', {
+      type: 'flag',
+      describe: 'delete features with null geometry'
+    })
+    .option('target', targetOpt);
+
+  parser.command('filter-islands')
+    .describe('remove small detached polygon rings (islands)')
+    .option('min-area', {
+      type: 'area',
+      describe: 'remove small-area islands (e.g. 10km2)'
+    })
+    .option('min-vertices', {
+      type: 'integer',
+      describe: 'remove low-vertex-count islands'
+    })
+    .option('remove-empty', {
+      type: 'flag',
+      describe: 'delete features with null geometry'
+    })
+    .option('target', targetOpt);
+
+  parser.command('filter-detail')
+    // undocumented feature
+    // .describe('remove intricate sub-scale detail that smoothing cannot generalize')
+    .option('distance', {
+      DEFAULT: true,
+      type: 'distance',
+      describe: 'detail size threshold as a distance (e.g. 1km)'
+    })
+    .option('tortuosity', {
+      type: 'number',
+      describe: 'min original-length / chord ratio for a run to be cut (default 2); higher only cuts more convoluted detail'
+    })
+    .option('weighting', {
+      type: 'number',
+      describe: 'Visvalingam angle-weight coefficient (default 0.7); higher removes spiky detail more eagerly'
+    })
+    .option('roundness', {
+      type: 'number',
+      describe: 'protect rounded loops: min enclosed-area / loop-perimeter as a fraction of the distance (default 0.2); higher removes more, 0 disables'
+    })
+    .option('min-area', {
+      type: 'number',
+      describe: 'drop a closed ring (island/hole) when the filter leaves less than this fraction of its original area (default 0.6); 0 disables'
+    })
+    .option('planar', {
+      describe: 'treat decimal degree coords as planar x,y (default is spherical)',
+      type: 'flag'
+    })
+    .option('target', targetOpt);
+
+  parser.command('filter-slivers')
+    .describe('remove small polygon rings')
+    .option('gap-width', gapWidthOpt)
+    .option('min-area', {
+      type: 'area',
+      describe: '(deprecated) use gap-width= instead'
+    })
+    .option('sliver-control', {
+      describe: '(deprecated) use gap-width= instead',
+      type: 'number'
+    })
+    .option('weighted', {
+      // describe: 'multiply min-area by Polsby-Popper compactness (0-1)'
+      type: 'flag',
+    })
+    .option('remove-empty', {
+      type: 'flag',
+      describe: 'delete features with null geometry'
+    })
+    .option('keep-shapes', {
+      type: 'flag',
+      describe: 'protect sliver polygons from complete removal'
+    })
+    .option('target', targetOpt);
+
+  parser.command('graticule')
+    .describe('create a graticule layer')
+    .option('interval', {
+      describe: 'size of grid cells in degrees (default is 10)',
+      type: 'number'
+    })
+    .option('base', {
+      describe: 'longitude to align meridians to (default is 0)',
+      type: 'number'
+    })
+    .option('polygon', {
+      describe: 'create a polygon to match the outline of the graticule',
+      type: 'flag'
+    })
+    .option('outline', {
+      describe: 'create a polyline matching the outline of the graticule',
+      type: 'flag'
+    })
+    .option('name', nameOpt)
+    .option('target', targetOpt)
+    .option('no-replace', {
+      alias: '+',
+      type: 'flag',
+      label: '+, no-replace',
+      describe: 'add the graticule as a new layer (the default; never replaces the target)'
+    });
+
+
+  // for testing grid update
+  parser.command('grid2')
+    .option('type', {
+      describe: 'square, hex or hex2 (default is square)'
+    })
+    .option('interval', {
+      describe: 'side length (e.g. 500m, 12km)',
+      type: 'distance'
+    })
+    .option('name', nameOpt)
+    .option('target', targetOpt)
+    .option('no-replace', noReplaceOpt);
+
+  parser.command('grid')
+    .describe('create a grid of square, hexagonal, rhombus, triangle or cairo polygons')
+    .option('type', {
+      describe: 'square, square2, hex, hex2, rhombus, rhombus2, triangle, triangle2 or cairo (default is square)'
+    })
+    .option('interval', {
+      describe: 'side length (e.g. 500m, 12km)',
+      type: 'distance'
+    })
+    .option('cols', {
+      describe: 'target number of grid columns',
+      type: 'integer'
+    })
+    .option('rows', {
+      describe: 'target number of grid rows',
+      type: 'integer'
+    })
+    .option('cells', {
+      describe: 'target number of grid cells',
+      type: 'integer'
+    })
+    .option('cell-scale', {
+      describe: 'scale factor for cells, between 0 and 2',
+      type: 'number'
+    })
+    .option('rotate', {
+      describe: 'rotation angle in degrees (default is 0)',
+      type: 'number'
+    })
+    // .option('bbox', {
+    //   type: 'bbox',
+    //   describe: 'xmin,ymin,xmax,ymax (default is bbox of data)'
+    // })
+    .option('name', nameOpt)
+    .option('target', targetOpt)
+    .option('no-replace', noReplaceOpt);
+
+  parser.command('include')
+    .describe('import JS data and functions for use in JS expressions')
+    .option('file', {
+      DEFAULT: true,
+      describe: 'file containing a JS object with key:value pairs to import'
+    });
+
+  parser.command('inlay')
+    .describe('inscribe a polygon layer inside another polygon layer')
+    .option('source', {
+      DEFAULT: true,
+      describe: 'file or layer containing polygons to inlay'
+    })
+    .option('target', targetOpt);
+
+  parser.command('innerlines')
+    .describe('convert polygons to polylines along shared edges')
+    .option('where', whereOpt2)
+    // .option('each', eachOpt2)
+    .option('name', nameOpt)
+    .option('target', targetOpt)
+    .option('no-replace', noReplaceOpt);
+
+  parser.command('join')
+    .describe('join data records from a file or layer to a layer')
+    .validate(function(cmd) {
+      if (!cmd.options.source) {
+        error('Command requires the name of a layer or file to join');
+      }
+    })
+    .option('source', {
+      DEFAULT: true,
+      describe: 'file or layer containing data records'
+    })
+    .option('keys', {
+      describe: 'join by matching target,source key fields, e.g. keys=FID,id',
+      type: 'strings'
+    })
+    .option('calc', {
+      describe: 'use a JS expression to assign values (for many-to-one joins)'
+    })
+    .option('where', {
+      describe: 'use a JS expression to filter source records'
+    })
+    .option('fields', {
+      describe: 'fields to copy (comma-sep.) (default is all but key field)',
+      type: 'strings'
+    })
+    .option('prefix', {
+      describe: 'prefix for renaming fields joined from the source table'
+    })
+    .option('interpolate', {
+      describe: '(polygon-polygon join) list of area-interpolated fields',
+      type: 'strings'
+    })
+    .option('point-method', {
+      describe: '(polygon-polygon join) join polygons via inner points',
+      type: 'flag'
+    })
+    .option('largest-overlap', {
+      describe: '(polygon-polygon join) use max overlap to join one polygon',
+      type: 'flag'
+    })
+    .option('min-overlap-pct', {
+      describe: '(polygon-polygon join) min overlap as pct of target polygon',
+      type: 'percent'
+    })
+    .option('min-overlap-area', {
+      describe: '(polygon-polygon join) minimum area of overlap',
+      type: 'area'
+    })
+    // .option('nearest-point', {
+    //   describe: '(point-point join)',
+    //   type: 'flag'
+    // })
+    .option('max-distance', {
+      describe: '(point-point join) join source points within this radius',
+      type: 'distance'
+    })
+    .option('planar', {
+      // describe: 'use planar geometry when interpolating by area' // useful for testing
+      type: 'flag'
+    })
+    .option('duplication', {
+      describe: 'duplicate target features on many-to-one joins',
+      type: 'flag'
+    })
+    .option('string-fields', stringFieldsOpt)
+    .option('field-types', fieldTypesOpt)
+    .option('sum-fields', {
+      describe: 'fields to sum in a many-to-one join (or use calc= for this)',
+      type: 'strings'
+    })
+    .option('force', {
+      describe: 'replace values from same-named fields',
+      type: 'flag'
+    })
+    .option('unjoined', {
+      describe: 'copy unjoined records from source table to "unjoined" layer',
+      type: 'flag'
+    })
+    .option('unmatched', {
+      describe: 'copy unmatched records in target table to "unmatched" layer',
+      type: 'flag'
+    })
+    .option('encoding', encodingOpt)
+    .option('target', targetOpt);
+
+  parser.command('labels')
+    .describe('style labels, convert points to labels or add a label')
+    .validate(V.validateLabelsOpts)
+    .option('text', {
+      describe: 'label text (a field, JS expression or literal value)'
+    })
+    .option('label-text', {
+      alias_to: 'text'
+    })
+    .option('coordinates', {
+      describe: 'add a label at x,y, or a path label along x,y,x,y,...'
+    })
+    .option('where', whereOpt)
+    .option('ids', {
+      describe: 'comma-sep. list of ids of the labels to style',
+      type: 'numbers'
+    })
+    .options(labelStyleOpts)
+    .options(labelIconOpts)
+    .option('properties', {
+      describe: 'with coordinates=, other attributes as a JSON object'
+    })
+    .option('name', nameOpt)
+    .option('no-replace', noReplaceOpt)
+    .option('target', targetOpt);
+
+  parser.command('lines')
+    .describe('convert a polygon or point layer to a polyline layer')
+    .option('fields', {
+      DEFAULT: true,
+      describe: 'field(s) to create a hierarchy of boundary lines',
+      type: 'strings'
+    })
+    .option('where', whereOpt2)
+    .option('each', eachOpt2)
+    .option('segments', {
+      describe: 'convert paths to segments, for debugging',
+      type: 'flag'
+    })
+    .option('callouts', {
+      // describe: 'convert points to lines for editing in the GUI',
+      type: 'flag'
+    })
+    .option('arcs', {
+      describe: 'convert paths to arcs, for debugging',
+      type: 'flag'
+    })
+    .option('groupby', {
+      describe: 'field for grouping point input into multiple lines'
+    })
+    .option('name', nameOpt)
+    .option('target', targetOpt)
+    .option('no-replace', noReplaceOpt);
+
+  parser.command('merge-layers')
+    .describe('merge multiple layers into as few layers as possible')
+    .option('force', {
+      type: 'flag',
+      describe: 'merge layers with inconsistent data fields'
+    })
+    .option('flatten', {
+      describe: 'remove polygon overlaps; higher-id polygons take priority',
+      type: 'flag'
+    })
+    .option('name', nameOpt)
+    .option('target', targetOpt);
+
+  parser.command('mosaic')
+    .describe('convert a polygon layer with overlaps into a flat mosaic')
+    .option('calc', calcOpt)
+    .option('name', nameOpt)
+    .option('target', targetOpt)
+    .option('snap-interval', snapIntervalOpt)
+    .option('no-snap', noSnapOpt)
+    .option('no-replace', noReplaceOpt);
+
+  parser.command('point-grid')
+    .describe('create a rectangular grid of points')
+    .validate(V.validateGridOpts)
+    .option('_', {
+      label: '<cols,rows>',
+      describe: 'size of the grid, e.g. -point-grid 100,100',
+      DEFAULT: true
+    })
+    .option('interval', {
+      describe: 'distance between adjacent points, in source units',
+      type: 'distance'
+    })
+    .option('cols', {
+      type: 'integer'
+    })
+    .option('rows', {
+      type: 'integer'
+    })
+    .option('bbox', {
+      type: 'bbox',
+      describe: 'xmin,ymin,xmax,ymax (default is bbox of data)'
+    })
+    .option('name', nameOpt)
+    .option('target', targetOpt)
+    .option('no-replace', noReplaceOpt);
+
+  parser.command('points')
+    .describe('create a point layer from a different layer type')
+    .option('x', {
+      describe: 'field containing x coordinate'
+    })
+    .option('y', {
+      describe: 'field containing y coordinate'
+    })
+    .option('inner', {
+      describe: 'create an interior point for each polygon\'s largest ring',
+      type: 'flag'
+    })
+    .option('inner-method', {
+      // describe: 'centroid2, pole, centroid, weighted or legacy (default is centroid2)'
+    })
+    .option('inner-tolerance', {
+      // describe: 'clearance loss allowed by centroid methods (default is 10%)',
+      type: 'percent'
+    })
+    .option('inner-weight', {
+      // describe: 'centroid weight used by inner-method=weighted (default is 0.6)',
+      type: 'number'
+    })
+    .option('centroid', {
+      describe: 'create a centroid point for each polygon\'s largest ring',
+      type: 'flag'
+    })
+    .option('vertices', {
+      describe: 'capture unique vertices of polygons and polylines',
+      type: 'flag'
+    })
+    .option('vertices2', {
+      describe: 'like vertices, but without removal of duplicate coordinates',
+      type: 'flag'
+    })
+    .option('endpoints', {
+      describe: 'capture unique endpoints of polygons and polylines',
+      type: 'flag'
+    })
+    .option('midpoints', {
+      describe: 'find the (planar) midpoint of each polyline',
+      type: 'flag'
+    })
+    // WORK IN PROGRESS todo: create a point layer containing segment intersections
+    .option('intersections', {
+     // describe: 'capture line segment intersections of polygons and polylines',
+     type: 'flag'
+    })
+    .option('interpolated', {
+      describe: 'interpolate points along polylines; requires interval=',
+      type: 'flag'
+    })
+    .option('interval', {
+      describe: 'distance between interpolated points (meters or projected units)',
+      type: 'distance'
+    })
+    .option('name', nameOpt)
+    .option('target', targetOpt)
+    .option('no-replace', noReplaceOpt);
+
+  parser.command('polygons')
+    .describe('convert polylines to polygons')
+    .option('gap-tolerance', {
+      describe: 'specify gap tolerance in source units',
+      type: 'distance'
+    })
+    .option('from-rings', {
+      describe: 'do simple conversion from a layer of closed paths',
+      type: 'flag'
+    })
+    .option('target', targetOpt);
+
+  parser.command('proj')
+    .describe('project your data (using Proj.4)')
+    .option('crs', {
+      DEFAULT: {
+        multi_arg: true,
+        join: ' '
+      },
+      describe: 'set destination CRS using a Proj.4 definition or alias'
+    })
+    .option('projection', {
+      alias_to: 'crs'
+    })
+    .option('match', {
+      describe: 'set destination CRS using a .prj file or layer id'
+    })
+    .option('source', {
+      // describe: '(deprecated) alias for match',
+      alias_to: 'match'
+    })
+    .option('from', {
+      alias_to: 'init',
+      describe: '(deprecated) alias for init='
+    })
+    .option('init', {
+      describe: 'set source CRS (if unset) using a string, .prj or layer id'
+    })
+    .option('densify', {
+      type: 'flag',
+      describe: 'add points along straight segments to approximate curves'
+    })
+    .option('clip-angle', {
+      describe: 'use a custom clipping radius (for azimuthal projections)',
+      type: 'number'
+    })
+    .option('clip-bbox', {
+      describe: 'clip to a lat-long bounding box before projecting',
+      type: 'bbox'
+    })
+    .option('nodata-color', {
+      describe: '[raster] color for uncovered pixels after reprojection'
+    })
+    .option('background', {
+      describe: '[raster] alias for nodata-color',
+      alias_to: 'nodata-color'
+    })
+    .option('resampling', {
+      describe: '[raster] nearest or bilinear (default is bilinear)'
+    })
+    .option('target', targetOpt)
+    .validate(V.validateProjOpts);
+
+  parser.command('rectangle')
+    .describe('create a rectangle from a bbox or target layer')
+    .option('bbox', {
+      describe: 'rectangle coordinates (xmin,ymin,xmax,ymax)',
+      type: 'bbox'
+    })
+    .option('offset', offsetOpt)
+    .option('width', {
+      describe: 'set width of map in pixels, use rectangle as frame'
+      // type: 'number' // use string, to allow units (e.g. in, px, pt)
+    })
+    .option('aspect-ratio', aspectRatioOpt)
+    .option('source', {
+      describe: 'name of layer to enclose'
+    })
+    .option('name', nameOpt)
+    .option('target', targetOpt)
+    .option('no-replace', noReplaceOpt);
+
+  parser.command('rectangles')
+    .describe('create a rectangle for each feature in a layer')
+    .option('offset', offsetOpt)
+    .option('bbox', {
+      describe: 'Use an expression to generate a rectangle for each feature'
+    })
+    .option('aspect-ratio', aspectRatioOpt)
+    .option('name', nameOpt)
+    .option('target', targetOpt)
+    .option('no-replace', noReplaceOpt);
+
+  parser.command('rename-fields')
+    .describe('rename data fields')
+    .option('fields', {
+      DEFAULT: true,
+      type: 'strings',
+      describe: 'list of replacements (comma-sep.), e.g. \'fips=STATE_FIPS,st=state\''
+    })
+    .option('target', targetOpt);
+
+  parser.command('rename-layers')
+    .describe('assign new names to layers')
+    .option('names', {
+      DEFAULT: true,
+      type: 'strings',
+      describe: 'list of replacements (comma-sep.)'
+    })
+    .option('target', targetOpt);
+
+  parser.command('simplify')
+    .validate(V.validateSimplifyOpts)
+    .describe('simplify the geometry of polygon and polyline features')
+    .option('percentage', {
+      DEFAULT: true,
+      alias: 'p',
+      type: 'percent',
+      describe: 'percentage of removable points to retain, e.g. 10%'
+    })
+    .option('dp', {
+      alias: 'rdp',
+      describe: 'use Ramer-Douglas-Peucker simplification',
+      assign_to: 'method'
+    })
+    .option('visvalingam', {
+      describe: 'use Visvalingam simplification with "effective area" metric',
+      assign_to: 'method'
+    })
+    .option('weighted', {
+      describe: 'use weighted Visvalingam simplification (default)',
+      assign_to: 'method'
+    })
+    .option('method', {
+      // hidden option
+    })
+    .option('weighting', {
+      type: 'number',
+      describe: 'weighted Visvalingam coefficient (default is 0.7)'
+    })
+    .option('resolution', {
+      describe: 'output resolution as a grid (e.g. 1000x500)'
+    })
+    .option('interval', {
+      // alias: 'i',
+      describe: 'output resolution as a distance (e.g. 100m)',
+      type: 'distance'
+    })
+    /*
+    .option('value', {
+      // for testing
+      // describe: 'raw value of simplification threshold',
+      type: 'number'
+    })
+    */
+    .option('variable', {
+      // describe: 'expect an expression with interval=, percentage= or resolution=',
+      describe: 'JS expr. assigning to one of: interval= percentage= resolution=',
+      type: 'flag'
+    })
+    .option('planar', {
+      describe: 'simplify decimal degree coords in 2D space (default is 3D)',
+      type: 'flag'
+    })
+    .option('cartesian', {
+      // describe: '(deprecated) alias for planar',
+      alias_to: 'planar'
+    })
+    .option('keep-shapes', {
+      describe: 'prevent small polygon features from disappearing',
+      type: 'flag'
+    })
+    .option('lock-box', {
+      // describe: 'don't remove vertices along bbox edges'
+      type: 'flag'
+    })
+    .option('no-repair', {
+      describe: 'don\'t remove intersections introduced by simplification',
+      type: 'flag'
+    })
+    .option('stats', {
+      describe: 'display simplification statistics',
+      type: 'flag'
+    })
+    .option('target', targetOpt);
+
+  parser.command('smooth')
+    .validate(V.validateSmoothOpts)
+    .describe('scale-aware smoothing of polygon and polyline features')
+    .option('distance', {
+      DEFAULT: true,
+      type: 'distance',
+      describe: 'smoothing tolerance as a distance (e.g. 2km)'
+    })
+    // Gaussian (Savitzky-Golay) is the default and only documented smoother.
+    // 'paek' (exponential kernel) is kept as an undocumented alternative, so
+    // neither flag is given a describe (they stay out of the command help).
+    .option('paek', {
+      assign_to: 'method'
+    })
+    .option('gaussian', {
+      assign_to: 'method'
+    })
+    .option('method', {
+      // hidden option (set by the paek/gaussian flags)
+    })
+    .option('gain', {
+      describe: 'shrinkage-correction (default 1; 0 = none, >1 exaggerates bends)',
+      type: 'number'
+    })
+    .option('strength', {
+      // undocumented: multiplier on the smoothing kernel scale relative to the
+      // distance (default 1; >1 smooths more strongly with larger divergence from
+      // the original, <1 more gently). Scales only the low-pass kernel -- corner
+      // detection, prefiltering and island dropping stay keyed to the raw distance.
+      type: 'number'
+    })
+    .option('max-bend-angle', {
+      describe: 'max bend between output segments in degrees (default is 8)',
+      type: 'number'
+    })
+    .option('no-corners', {
+      describe: 'round sharp corners instead of preserving them (on by default)',
+      type: 'flag'
+    })
+    .option('corner-bias', {
+      // Sensitivity of corner detection, RELATIVE to an automatic baseline
+      // (default 0 = the automatic setting). Detection is auto-coarsened on
+      // geometry that is sparse relative to the smoothing distance (long segments
+      // read ordinary coarse bends as corners); this option adds to that base.
+      // Positive keeps more corners, negative fewer; it scales only the distance-
+      // proportional detection parameters (not angles), detecting corners as if
+      // the distance were divided by k, where k = bias+1 for bias >= 0 and
+      // 1/(1-bias) for bias < 0, and the smoothing kernel keeps using the real
+      // distance. So on fine data (no auto adjustment) corner-bias=-1 finds the
+      // corners a 2x distance would; on coarse data a positive value counteracts
+      // the automatic coarsening. Use no-corners to turn preservation off entirely.
+      describe: 'corner-detection sensitivity relative to auto (default 0; + more, - fewer)',
+      type: 'number'
+    })
+    .option('prefilter-gate', {
+      // undocumented: prefilter sinuosity (path/chord) threshold for cutting
+      // intricate detail (default 4; higher removes less)
+      type: 'number'
+    })
+    .option('prefilter-roundness', {
+      // undocumented: prefilter roundness protection -- min enclosed-area /
+      // loop-perimeter (as a fraction of the smoothing distance) for a loop
+      // (e.g. an island) to be protected from the prefilter (default 0.2;
+      // higher removes more, 0 disables and lets rounded islands collapse)
+      type: 'number'
+    })
+    .option('prefilter-min-area', {
+      // undocumented: drop a closed ring (island/hole) when the prefilter would
+      // leave less than this fraction of its original area (default 0.6), rather
+      // than smoothing a distorted remnant; 0 disables the drop
+      type: 'number'
+    })
+    .option('planar', {
+      // describe: 'smooth decimal degree coords in 2D space (default is spherical)',
+      type: 'flag'
+    })
+    .option('no-prefilter', {
+      describe: 'skip the detail-filtering preprocessing step',
+      type: 'flag'
+    })
+    .option('target', targetOpt);
+
+  parser.command('slice')
+    // .describe('slice a layer using polygons in another layer')
+    .option('source', {
+      DEFAULT: true,
+      describe: 'file or layer containing clip polygons'
+    })
+    /*
+    .option('remove-slivers', {
+      describe: 'remove sliver polygons created by clipping',
+      type: 'flag'
+    }) */
+    .option('id-field', {
+      describe: 'slice id field (from source layer)'
+    })
+    .option('name', nameOpt)
+    .option('no-snap', noSnapOpt)
+    .option('target', targetOpt)
+    .option('no-replace', noReplaceOpt);
+
+  parser.command('snap')
+    .describe('snap together nearby vertices')
+    .option('interval', {
+      describe: 'snap together vertices within a tolerance (default is small)',
+      DEFAULT: true,
+      type: 'distance'
+    })
+    .option('endpoints', {
+      describe: 'only snap together the endpoints of lines',
+      type: 'flag'
+    })
+    .option('precision', {
+      describe: 'round all coordinates to a given decimal precision (e.g. 0.000001)',
+      type: 'number'
+    })
+    .option('fix-geometry', {
+      describe: 'remove intersections introduced by rounding and snapping',
+      type: 'flag'
+    })
+    .option('target', targetOpt);
+
+  parser.command('sort')
+    .describe('sort features using a JS expression')
+    .option('expression', {
+      DEFAULT: true,
+      describe: 'JS expression to generate a sort key for each feature'
+    })
+    .option('ascending', {
+      describe: 'sort in ascending order (default)',
+      type: 'flag'
+    })
+    .option('descending', {
+      describe: 'sort in descending order',
+      type: 'flag'
+    })
+    .option('target', targetOpt);
+
+  parser.command('split')
+    .describe('split a layer into single-feature or multi-feature layers')
+    .option('field', {
+      // former name
+      alias_to: 'expression'
+    })
+    .option('expression', {
+      DEFAULT: true,
+      describe: 'expression or field for grouping features and naming split layers'
+    })
+    .option('ids', {
+      // used by gui history to split on selected features
+      // describe: 'split on a list of feature ids',
+      type: 'numbers'
+    })
+    .option('apart', {
+      describe: 'save output layers to independent datasets',
+      type: 'flag'
+    })
+    .option('target', targetOpt)
+    .option('no-replace', noReplaceOpt);
+
+  parser.command('split-on-grid')
+    .describe('split features into separate layers using a grid')
+    .validate(V.validateGridOpts)
+    .option('_', {
+      DEFAULT: true,
+      label: '<cols,rows>',
+      describe: 'size of the grid, e.g. -split-on-grid 12,10'
+    })
+    .option('cols', {
+      type: 'integer'
+    })
+    .option('rows', {
+      type: 'integer'
+    })
+    .option('id-field', {
+      describe: 'assign each feature a cell id instead of splitting layer'
+    })
+    // .option('no-replace', noReplaceOpt)
+    .option('target', targetOpt);
+
+  parser.command('style')
+    .oldAlias('svg-style')
+    .describe('set SVG style properties using JS or literal values')
+    .option('clear', {
+      describe: 'remove all style properties from a layer',
+      type: 'flag'
+    })
+    .option('where', whereOpt)
+    .option('ids', {
+      describe: 'comma-sep. list of feature ids to style',
+      type: 'numbers'
+    })
+    .options(featureStyleOpts)
+    // deprecated in favor of -labels; accepted, but left out of the help
+    .options(getHiddenLabelStyleOpts())
+    .option('target', targetOpt);
+
+  parser.command('repel')
+    .describe('move overlapping point symbols apart')
+    .option('width', {
+      describe: 'display width of the layer in pixels (required if no frame)',
+      type: 'number'
+    })
+    .option('max-shift', {
+      describe: 'max displacement in pixels; may vary by symbol (default is 20)'
+    })
+    .option('padding', {
+      describe: 'pixels of clearance around each symbol; may vary (default is 0)'
+    })
+    .option('margin', {
+      describe: 'pixels of clearance between two symbols; may vary (default is 0)'
+    })
+    .option('ticks', {
+      describe: 'number of solver passes (default is 100)',
+      type: 'number'
+    })
+    .option('strength', {
+      describe: 'portion of each overlap resolved per pass, 0-1 (default is 0.4)',
+      type: 'number'
+    })
+    .option('radius', {
+      describe: 'field or expression giving symbol radius in pixels',
+    })
+    .option('polygons', {
+      describe: 'layer or file of polygons that symbols must stay inside'
+    })
+    .option('target', targetOpt);
+
+  parser.command('symbols')
+    .describe('symbolize points as arrows, circles, stars, etc. (as icon= fields)')
+    .option('ids', {
+      describe: 'comma-sep. list of ids of the points to symbolize (default is all)',
+      type: 'numbers'
+    })
+    .option('type', {
+      describe: 'types: arrow, circle, square, star, polygon, ring, pie, curve'
+    })
+    .option('fill', {
+      describe: 'symbol fill color, or none (a ring with no stroke= is drawn in it)'
+    })
+    .option('stroke', {
+      describe: 'symbol outline color, or a stick arrow\'s line color'
+    })
+    .option('stroke-width', {
+      describe: 'symbol outline width, or a stick arrow\'s line width'
+    })
+    .option('opacity', {
+      describe: 'symbol opacity'
+    })
+    .option('geographic', {
+      old_alias: 'polygons',
+       describe: 'replace points with polygon shapes instead of symbol fields',
+      type: 'flag'
+    })
+    .option('pixel-scale', {
+      describe: 'set symbol scale in meters per pixel (geographic option)',
+      type: 'number',
+    })
+    // .option('flipped', {
+    //   type: 'flag',
+    //   describe: 'symbol is vertically flipped'
+    // })
+    .option('rotated', {
+      type: 'flag',
+      describe: 'symbol is rotated to an alternate orientation'
+    })
+    .option('rotation', {
+      describe: 'rotation of symbol in degrees'
+    })
+    .option('scale', {
+      describe: 'scale symbols by a multiplier',
+      type: 'number'
+    })
+    .option('radius', {
+      describe: 'distance from center to farthest point on the symbol',
+      type: 'distance'
+    })
+    .option('sides', {
+      describe: '(polygon) number of sides of a (regular) polygon symbol',
+      type: 'number'
+    })
+    .option('points', {
+      describe: '(star) number of points'
+    })
+    .option('point-ratio', {
+      old_alias: 'star-ratio',
+      // not implemented
+      type: 'number'
+    })
+    .option('radii', {
+      describe: '(ring) comma-sep. list of concentric radii, ascending order (default is one ring of radius=)'
+    })
+    .option('hole', {
+      describe: '(pie) radius of the hole in a donut symbol'
+    })
+    .option('values', {
+      describe: '(pie) comma-sep. list of wedge values (numbers or fields)'
+    })
+    .option('fills', {
+      describe: '(pie) comma-sep. list of wedge fill colors'
+    })
+    .option('arrow-style', {
+      describe: '(arrow) options: stick, standard (default is standard)'
+    })
+    .option('length', {
+      old_alias: 'arrow-length',
+      describe: '(arrow) length of arrow in pixels'
+    })
+    .option('direction', {
+      old_alias: 'arrow-direction',
+      describe: '(arrow) angle off of vertical (-90 = left-pointing)'
+    })
+    .option('head-angle', {
+      old_alias: 'arrow-head-angle',
+      describe: '(arrow) angle of tip of arrow (default is 40 degrees)'
+    })
+    .option('head-width', {
+      old_alias: 'arrow-head-width',
+      describe: '(arrow) width of arrow head from side to side'
+    })
+    .option('head-length', {
+      old_alias: 'arrow-head-width',
+      describe: '(arrow) length of head (alternative to head-angle)'
+    })
+    .option('head-shape', {
+      // describe: 'options: a b c'
+    })
+    .option('stem-width', {
+      old_alias: 'arrow-stem-width',
+      describe: '(arrow) width of stem at its widest point'
+    })
+    .option('stem-length', {
+      old_alias: 'arrow-stem-length',
+      describe: '(arrow) alternative to length'
+    })
+    .option('stem-taper', {
+      old_alias: 'arrow-stem-taper',
+      describe: '(arrow) factor for tapering the width of the stem (0-1)'
+    })
+    .option('stem-curve', {
+      old_alias: 'arrow-stem-curve',
+      describe: '(arrow) curvature in degrees (default is 0)'
+    })
+    .option('min-stem-ratio', {
+      old_alias: 'arrow-min-stem',
+      describe: '(arrow) minimum ratio of stem to total length',
+      type: 'number'
+    })
+    .option('anchor', {
+      describe: '(arrow) takes one of: start, middle, end (default is start)'
+    })
+    .option('stroke-dasharray', {
+      describe: '(curve) dashes, e.g. "4 2"'
+    })
+    .option('line-start', {
+      describe: '(curve) marker at the start: arrow, wide-arrow, open-arrow, dot or none'
+    })
+    .option('line-end', {
+      describe: '(curve) marker at the end: arrow, wide-arrow, open-arrow, dot or none'
+    })
+    .option('line-end-size', {
+      describe: '(curve) size of the end markers in pixels'
+    })
+    .option('line-fade', {
+      describe: '(curve) share of the curve that fades in from its tail, 0-1'
+    })
+    .option('line-taper', {
+      describe: '(curve) narrow the curve toward its tail (0-1, 1 tapers to a point)'
+    })
+    .option('coordinates', {
+      describe: 'add a symbol at x,y (or x,y,x,y,... for a curve)'
+    })
+    .option('properties', {
+      describe: 'with coordinates=, other attributes as a JSON object'
+    })
+    .option('effect', {})
+    // .option('where', whereOpt)
+    .option('name', nameOpt)
+    .option('target', targetOpt)
+    .option('no-replace', noReplaceOpt);
+    // .option('name', nameOpt);
+
+  parser.command('target')
+    .describe('set active layer (or layers)')
+    .option('target', {
+      DEFAULT: true,
+      describe: 'name or index of layer to target'
+    })
+    .option('type', {
+      describe: 'type of layer to target (polygon|polyline|point)'
+    })
+    // .option('combine', {
+    //   type: 'flag',
+    //   describe: 'place all targeted layers in one dataset together with any  associated layers'
+    // })
+    // .option('isolate', {
+    //   type: 'flag',
+    //   describe: 'place all targeted layers in one dataset exclusive of associated layers'
+    // })
+    .option('name', {
+      describe: 'rename the target layer'
+    });
+
+  parser.command('union')
+    .describe('create a flat mosaic from two or more polygon layers')
+    // .option('add-fid', {
+    //   describe: 'add FID_A, FID_B, ... fields to output layer',
+    //   type: 'flag'
+    // })
+    .option('fields', {
+      type: 'strings',
+      describe: 'fields to retain (comma-sep.) (default is all fields)',
+    })
+    .option('name', nameOpt)
+    .option('target', {
+      describe: 'specify layers to target (comma-sep. list)'
+    })
+    .option('no-replace', noReplaceOpt);
+
+  parser.command('uniq')
+    .describe('delete features with the same id as a previous feature')
+    .option('expression', {
+      DEFAULT: true,
+      describe: 'JS expression to obtain the id of a feature'
+    })
+    .option('max-count', {
+      type: 'number',
+      describe: 'max features with the same id (default is 1)'
+    })
+    .option('index', {
+      // describe: 'add an index instead of filtering'
+      type: 'flag'
+    })
+    .option('invert', invertOpt)
+    .option('verbose', {
+      describe: 'print each removed feature',
+      type: 'flag'
+    })
+    .option('target', targetOpt);
+
+  // Experimental commands
+  parser.section('Experimental commands (may give unexpected results)');
+
+  // used by GUI
+  parser.command('add-label')
+    // .describe('add a map label to a point layer')
+    .option('coordinates', {
+      describe: 'x,y of the label anchor, or x,y,x,y,... of a curve\'s knots'
+    })
+    .option('text', {
+      describe: 'label text'
+    })
+    // superseded by -labels coordinates=; kept so that older session
+    // histories still run
+    .options(labelStyleOpts)
+    .options(labelIconOpts)
+    .option('properties', {
+      describe: 'other attributes, as a JSON object'
+    })
+    .option('name', nameOpt)
+    .option('target', targetOpt)
+    .option('no-replace', noReplaceOpt);
+
+  // used by GUI
+  parser.command('update-frame')
+    // .describe('update an existing map frame layer')
+    .option('bbox', {
+      describe: 'frame coordinates (xmin,ymin,xmax,ymax)',
+      type: 'bbox'
+    })
+    .option('fit', {
+      describe: 'layer(s) to fit the frame to, including their symbols and labels'
+    })
+    .option('ignore-symbols', {
+      describe: 'with fit=, fit to coordinates, not the extent of symbols, labels and strokes',
+      type: 'flag'
+    })
+    .option('width', {
+      describe: 'nominal frame width (e.g. 5in, 10cm, 600px)'
+    })
+    .option('height', {
+      describe: 'nominal frame height'
+    })
+    .option('aspect-ratio', {
+      describe: 'fixed page aspect ratio',
+      type: 'number'
+    })
+    .option('auto-aspect', {
+      describe: 'derive page height from the frame extent',
+      type: 'flag'
+    })
+    .option('fix-scale', {
+      describe: 'hold the map scale; derive the size from the new extent',
+      type: 'flag'
+    })
+    .option('margin', frameMarginOpt)
+    .option('offset', frameOffsetOpt)
+    .option('offsets', frameOffsetOpt)
+    .option('remove', {
+      describe: 'demote the frame to an ordinary rectangle layer',
+      type: 'flag'
+    })
+    .option('target', targetOpt);
+
+  // used by GUI
+  parser.command('update-label')
+    // .describe('move the anchor or curve knots of an existing label')
+    .option('ids', {
+      describe: 'feature id of the label to update',
+      type: 'numbers'
+    })
+    .option('coordinates', {
+      describe: 'x,y of the label anchor, or x,y,x,y,... of a curve\'s knots'
+    })
+    .option('target', targetOpt);
+
+  parser.command('update-symbol')
+    // .describe('move an existing symbol, or the knots of a curve symbol')
+    .option('ids', {
+      describe: 'feature id of the symbol to update',
+      type: 'numbers'
+    })
+    .option('coordinates', {
+      describe: 'x,y of the symbol, or x,y,x,y,... of a curve\'s knots'
+    })
+    .option('target', targetOpt);
+
+  parser.command('update-point')
+    // .describe('move an existing point')
+    .option('ids', {
+      describe: 'feature id of the point to update',
+      type: 'numbers'
+    })
+    .option('coordinates', {
+      describe: 'x,y of the point'
+    })
+    .option('target', targetOpt);
+
+  parser.command('update-line')
+    // .describe('replace the path of an existing line')
+    .option('ids', {
+      describe: 'feature id of the line to update',
+      type: 'numbers'
+    })
+    .option('coordinates', {
+      describe: 'x,y,x,y,... of the new path'
+    })
+    .option('target', targetOpt);
+
+  parser.command('alpha-shapes')
+    // .describe('convert points to alpha shapes (aka concave hulls)')
+    .option('interval', {
+      describe: 'alpha parameter',
+      type: 'number'
+    })
+    .option('keep-points', {
+      // describe: 'replace single points with tiny triangles',
+      type: 'flag'
+    })
+    .option('name', nameOpt)
+    .option('target', targetOpt)
+    .option('no-replace', noReplaceOpt);
+
+  parser.command('check-geometry')
+    // .describe()
+    .option('strict', {
+      describe: 'stops the program if any errors are found',
+      type: 'flag'
+    });
+
+  parser.command('cluster')
+    .describe('group polygons into compact clusters')
+    .option('id-field', {
+      describe: 'field name of cluster id (default is "cluster")'
+    })
+    .option('pct', {
+      alias: 'p',
+      type: 'percent',
+      describe: 'percentage of shapes to retain, e.g. 50%'
+    })
+    .option('max-width', {
+      describe: 'max width of cluster bounding box',
+      type: 'number'
+    })
+    .option('max-height', {
+      describe: 'max height of cluster bounding box',
+      type: 'number'
+    })
+    .option('max-area', {
+      describe: 'max area of a cluster',
+      type: 'number'
+    })
+    .option('group-by', {
+      describe: 'field name; only same-value shapes will be grouped'
+    })
+    .option('target', targetOpt);
+
+  parser.command('data-fill')
+    .describe('fill in missing values in a polygon layer')
+    .option('field', {
+      describe: 'name of field to fill in'
+    })
+    .option('postprocess', {alias_to: 'contiguous'})
+    .option('contiguous', {
+      describe: 'remove non-contiguous data islands',
+      type: 'flag'
+    })
+    // .option('min-weight-pct', {
+    //   describe: 'retain data islands weighted more than this pct'
+    // })
+    .option('weight-field', {
+      describe: 'use field values to calculate data island weights'
+    });
+
+  // replaced by -require
+  // parser.command('external')
+  //   .option('module', {
+  //     DEFAULT: true,
+  //     describe: 'name of Node module containing the command'
+  //   });
+
+  parser.command('filter-points')
+    // .describe('remove points that are not part of a group')
+    // .option('min-group-size', {
+    //   // describe: 'drop points with fewer points in the vicinity',
+    //   type: 'number'
+    // })
+    .option('group-interval', {
+      // describe: max interval separating a point from other points
+      type: 'number'
+    });
+
+  parser.command('frame')
+    .describe('create a map frame for some layers, or change a frame')
+    .option('target', {
+      describe: 'layers to frame, or the name of a frame to change'
+    })
+    .option('name', {
+      describe: 'name of a new frame, or a new name for a frame'
+    })
+    .group('Page and extent')
+    .option('width', {
+      describe: 'width of frame (e.g. 5in, 10cm, 600px; default is 800px)'
+    })
+    .option('height', {
+      describe: '(optional) height of frame; similar to width= option'
+    })
+    .option('aspect-ratio', {
+      describe: '(optional) aspect ratio of frame, if height= or width= is omitted',
+      type: 'number'
+    })
+    .option('bbox', {
+      describe: 'frame coordinates (xmin,ymin,xmax,ymax)',
+      type: 'bbox'
+    })
+    .option('fit', {
+      describe: '(changing a frame) layer(s) to fit the frame to'
+    })
+    .option('margin', frameMarginOpt)
+    .option('offset', frameOffsetOpt)
+    .option('offsets', frameOffsetOpt)
+    .option('ignore-symbols', {
+      describe: 'fit to coordinates, not the extent of symbols, labels and strokes',
+      type: 'flag'
+    })
+    .option('auto-aspect', {
+      describe: '(changing a frame) derive page height from the frame extent',
+      type: 'flag'
+    })
+    .option('fix-scale', {
+      describe: '(changing a frame) hold the map scale; derive the size from the new extent',
+      type: 'flag'
+    })
+    .group('Layers in a frame (target= names the frame)')
+    .option('add-layers', {
+      describe: 'move layers from outside into the frame (on top, in list order)'
+    })
+    .option('order-layers', {
+      describe: 'restack layers in the frame, in list order (first at bottom)'
+    })
+    .option('above', {
+      describe: 'with add-layers= or order-layers=, stack the layers above this one'
+    })
+    .option('below', {
+      describe: 'with add-layers= or order-layers=, stack the layers below this one'
+    })
+    .option('top', {
+      describe: 'with add-layers= or order-layers=, stack the layers on top',
+      type: 'flag'
+    })
+    .option('bottom', {
+      describe: 'with add-layers= or order-layers=, stack the layers at the bottom',
+      type: 'flag'
+    })
+    .option('reproject', {
+      describe: 'with add-layers=, reproject layers into the frame\'s coordinate system',
+      type: 'flag'
+    })
+    .option('remove-layers', {
+      describe: 'move layers out of the frame'
+    })
+    .option('hide-layers', {
+      describe: 'keep layers in the frame, but leave them off the map'
+    })
+    .option('show-layers', {
+      describe: 'show hidden layers in the frame'
+    })
+    .group('Overlays (target= names the host frame)')
+    .option('overlay', {
+      describe: 'draw another frame on this frame\'s page (e.g. an inset map)'
+    })
+    .option('overlay-position', {
+      describe: 'with overlay=, corner of the page: top-left, top-right, bottom-left, bottom-right'
+    })
+    .option('overlay-margin', {
+      describe: 'with overlay=, distance from the corner\'s edges (e.g. 10 or 10,20)'
+    })
+    .option('remove-overlay', {
+      describe: 'remove an overlay frame from this frame\'s page'
+    })
+    .group('Other')
+    .option('no-replace', {
+      alias: '+',
+      type: 'flag',
+      label: '+, no-replace',
+      describe: '(changing a frame) copy the frame and its layers; name= names the copy'
+    })
+    .option('replace', {
+      describe: '(creating a frame) replace the frame of the targets',
+      type: 'flag'
+    })
+    .option('remove', {
+      describe: '(changing a frame) demote the frame to an ordinary rectangle layer',
+      type: 'flag'
+    });
+
+    // .option('height', {
+    //   describe: 'pixel height of output (may be a range)'
+    // })
+    // .option('pixels', {
+    //   describe: 'area of output in pixels (alternative to width and height)',
+    //   type: 'number'
+    // })
+    // .option('source', {
+    //   describe: 'name of layer to enclose'
+    // })
+
+  parser.command('fuzzy-join')
+    .describe('join points to polygons, with data fill and fuzzy match')
+    .option('source', {
+      DEFAULT: true,
+      describe: 'file or layer containing data records'
+    })
+    .option('field', {
+      describe: 'field to join'
+    })
+    .option('dedup-points', {
+      describe: 'uniqify points with the same location and field value',
+      type: 'flag'
+    })
+    .option('no-dropouts', {
+      describe: 'try to retain all values from the point layer',
+      type: 'flag'
+    })
+    .option('postprocess', {alias_to: 'contiguous'})
+    .option('contiguous', {
+      describe: 'remove non-contiguous data islands',
+      type: 'flag'
+    })
+    .option('target', targetOpt);
+
+  parser.command('point-to-grid')
+    .option('interval', {
+      // describe: size of grid in projected units
+      type: 'number'
+    })
+    .option('radius', {
+      // describe: radius to assign each point
+      type: 'number'
+    })
+    .option('circles', {
+      // describe: create a grid of circles instead of squares
+      type: 'flag'
+    })
+    .option('cell-margin', {
+      // describe: (0-1) inset grid shapes by a percentage
+      type: 'number'
+    })
+    .option('aligned', {
+      // describe: all grids of a given cell size will be aligned
+      type: 'flag'
+    })
+    .option('calc', calcOpt)
+    .option('target', targetOpt)
+    .option('name', nameOpt)
+    .option('no-replace', noReplaceOpt);
+
+  parser.command('require')
+    .describe('require a Node module or ES module to use in JS expressions')
+    .option('module', {
+      DEFAULT: true,
+      describe: 'name of installed module or path to module file'
+    })
+    .option('alias', {
+      describe: 'Set the module name to an alias'
+    });
+    // .option('init', {
+    //   describe: 'JS expression to run after the module loads'
+    // });
+
+  parser.command('rotate')
+    // .describe('apply d3-style 3-axis rotation to a lat-long dataset')
+    .option('rotation', {
+      // describe: 'two or three angles of rotation',
+      DEFAULT: true,
+      type: 'numbers'
+    })
+    .option('invert', {
+      type: 'flag'
+    });
+
+  parser.command('run')
+    .describe('run commands from a command file or JS expression')
+    .option('expression', {
+      DEFAULT: true,
+      label: '<file|expression>',
+      describe: 'path to a .txt command file, or a JS expression/template'
+    })
+    // deprecated
+    .option('commands', {alias_to: 'expression'})
+    .option('target', targetOpt);
+
+  parser.command('scalebar')
+    .describe('add a scale bar to the map frame and SVG output')
+    .option('label', {
+      DEFAULT: true,
+      describe: 'distance label, e.g. "35 miles" (default is automatic)'
+    })
+    .option('units', {
+      describe: 'units of a bare-number or automatic label: km, meters, miles or feet (default is miles)'
+    })
+    .option('style', {
+      describe: 'a (bar), b (ticks) or c (segments of alternating fill)'
+    })
+    .option('font-size', {
+      type: 'number'
+    })
+    .option('font-family', {
+      describe: 'font family of labels'
+    })
+    .option('font-style', {
+      describe: 'font style of labels, e.g. italic'
+    })
+    .option('font-weight', {
+      describe: 'font weight of labels, e.g. bold'
+    })
+    .option('color', {
+      describe: 'color of bar and labels (default is black)'
+    })
+    .option('tic-length', {
+      describe: 'length of tic marks (style b)',
+      type: 'number'
+    })
+    .option('bar-width', {
+      describe: 'line width of bar (height of bar in style c)',
+      type: 'number'
+    })
+    .option('label-offset', {
+      type: 'number'
+    })
+    .option('position', {
+      describe: 'top-left (default), top-center, top-right, bottom-left, bottom-center or bottom-right'
+    })
+    .option('label-position', {
+      describe: 'top, bottom, top-center (style a), etc'
+    })
+    .option('dual-units', {
+      describe: 'show both metric and imperial units (default style is b)',
+      type: 'flag'
+    })
+    .option('align', {
+      describe: 'alignment of the two bars of style c: left, center (default) or right'
+    })
+    .option('label-case', {
+      describe: 'case of units in labels: upper or lower (default follows the label)'
+    })
+    .option('margin', {
+      describe: 'offset in pixels from edge of map',
+      type: 'number'
+    })
+    .option('remove', {
+      describe: 'remove the scale bar from the map frame',
+      type: 'flag'
+    });
+
+  parser.command('shape')
+    .describe('create a polyline or polygon from coordinates')
+    .option('coordinates', {
+      describe: 'list of vertices as x,y,x,y...',
+      type: 'numbers'
+    })
+    .option('offsets', {
+      describe: 'list of vertices as offsets from coordinates list',
+      type: 'numbers'
+    })
+    .option('closed', {
+      describe: 'close an open path to create a polygon',
+      type: 'flag'
+    })
+    .option('type', {
+      // describe: 'circle or ???'
+      DEFAULT: true,
+    })
+    .option('center', {
+      //describe: 'center of the circle (default is 0,0)',
+      type: 'numbers'
+    })
+    .option('radius', {
+      //describe: 'radius of the circle in meters',
+      type: 'number'
+    })
+    .option('radius-angle', {
+      //describe: 'radius of the circle in degrees',
+      type: 'number'
+    })
+    .option('bbox', {
+      // describe: 'rectangle bounding box',
+      type: 'numbers'
+    })
+    .option('geometry', {
+      //describe: 'polygon or polyline'
+    })
+    .option('rotation', {
+      // describe: 'two or three angles of rotation',
+      type: 'numbers'
+    })
+    .option('name', nameOpt)
+    .option('no-replace', {
+      alias: '+',
+      type: 'flag',
+      label: '+, no-replace',
+      describe: 'add the shape as a new layer (the default; never replaces the target)'
+    });
+
+  parser.command('subdivide')
+    .describe('recursively split a layer using a JS expression')
+    .validate(V.validateExpressionOpt)
+    .option('expression', {
+      DEFAULT: true,
+      describe: 'boolean JS expression'
+    })
+    .option('target', targetOpt);
+
+  parser.section('Control flow commands');
+
+  var ifOpts = {
+    expression: {
+      DEFAULT: true,
+      describe: 'JS expression'
+    },
+    // empty: {
+    //   describe: 'run if layer is empty',
+    //   type: 'flag'
+    // },
+    // 'not-empty': {
+    //   describe: 'run if layer is not empty',
+    //   type: 'flag'
+    // },
+    layer: {
+      describe: 'name or id of layer to test (default is current target)'
+    },
+    target: targetOpt
+  };
+
+  parser.command('if')
+    .describe('run the following commands if a condition is met')
+    .options(ifOpts);
+
+  parser.command('elif')
+    .describe('test an alternate condition; used after -if')
+    .options(ifOpts);
+
+  parser.command('else')
+    .describe('run commands if all preceding -if/-elif conditions are false');
+
+  parser.command('endif')
+    .describe('mark the end of an -if sequence');
+
+  parser.command('ignore')
+    // .describe('stop processing if a condition is met')
+    .option('empty', {
+      describe: 'ignore empty files',
+      type: 'flag'
+    })
+    .option('target', targetOpt);
+
+  parser.command('stop')
+    .describe('stop processing (skip remaining commands)');
+
+  parser.section('Informational commands');
+
+  parser.command('calc')
+    .describe('calculate statistics about the features in a layer')
+    .validate(V.validateExpressionOpt)
+    .option('expression', {
+      DEFAULT: true,
+      describe: 'functions: sum() average() median() max() min() count()'
+    })
+    .option('where', whereOpt)
+    .option('target', targetOpt)
+    .option('to-layer', noReplaceOpt2)
+    .option('name', nameOpt2);
+
+  parser.command('colors')
+    .describe('print list of color scheme names');
+
+  parser.command('comment')
+    .describe('add a comment to the sequence of commands')
+    .option('message', {
+      DEFAULT: {
+        multi_arg: true,
+        join: ' '
+      }
+    });
+
+  parser.command('defaults')
+    .describe('set {{VAR}} interpolation variables only if not already set')
+    .option('values', {
+      DEFAULT: {
+        multi_arg: true
+      }
+    });
+
+  parser.command('encodings')
+    .describe('print list of supported text encodings (for .dbf import)');
+
+  parser.command('help')
+    .alias('h')
+    .describe('print help; takes optional command name')
+    .option('command', {
+      DEFAULT: true,
+      describe: 'view detailed information about a command'
+    });
+
+  parser.command('info')
+    .describe('print information about data layers')
+    .option('save-to', {
+      describe: 'name of file to save info in JSON format'
+    })
+    .option('target', targetOpt)
+    .option('to-layer', noReplaceOpt2)
+    .option('name', nameOpt2);
+
+  parser.command('inspect')
+    .describe('print information about a feature')
+    .option('expression', {
+      DEFAULT: true,
+      describe: 'boolean JS expression for selecting a feature'
+    })
+    .option('target', targetOpt)
+    .validate(V.validateExpressionOpt);
+
+  parser.command('print')
+    .describe('print a message to stdout')
+    .option('message', {
+      DEFAULT: {
+        multi_arg: true,
+        join: ' '
+      }
+    });
+
+  parser.command('projections')
+    .describe('print list of supported projections');
+
+  parser.command('quiet')
+    .describe('inhibit console messages');
+
+  parser.command('vars')
+    .describe('define variables for {{VAR}} interpolation (overwrites)')
+    .option('values', {
+      DEFAULT: {
+        multi_arg: true
+      }
+    });
+
+  parser.command('verbose')
+    .describe('print verbose processing messages');
+
+  parser.command('version')
+    .alias('v')
+    .describe('print mapshaper version');
+
+  parser.command('debug');
+
+  // Per-command usage examples live in a separate file so they're easy to
+  // browse and curate without scrolling past 2300 lines of option defs.
+  applyExamples(parser);
+
+  return parser;
+}

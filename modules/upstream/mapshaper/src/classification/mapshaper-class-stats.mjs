@@ -1,0 +1,127 @@
+// Pure stats helpers used by the sequential classifier and its sister
+// modules (-nice-breaks, -key). Extracted so that nice-breaks.mjs and
+// furniture/key.mjs can compute breaks/distributions without importing
+// from the classifier (which would otherwise create a cycle).
+
+import utils from '../utils/mapshaper-utils';
+import { error } from '../utils/mapshaper-logging';
+
+export function getEqualIntervalBreaks(ascending, numBreaks) {
+  var numRanges = numBreaks + 1,
+      minVal = ascending[0],
+      maxVal = ascending[ascending.length - 1],
+      interval = (maxVal - minVal) / numRanges,
+      breaks = [],
+      i;
+  for (i = 1; i<numRanges; i++) {
+    breaks.push(minVal + i * interval);
+  }
+  return breaks;
+}
+
+// A break falling inside a run of tied values is moved to whichever end of the
+// run is closer to the target rank (values equal to a break go in the upper
+// class), so that a large run of ties at the minimum value doesn't leave the
+// first class empty.
+export function getQuantileBreaks(ascending, numBreaks) {
+  var numRanges = numBreaks + 1;
+  var len = ascending.length;
+  var n = len / numRanges;
+  var breaks = [];
+  var i, j, lo, hi, target;
+  for (i = 1; i<numRanges; i++) {
+    target = i * n;
+    j = Math.floor(target);
+    lo = j;
+    hi = j + 1;
+    while (lo > 0 && ascending[lo - 1] == ascending[j]) lo--;
+    while (hi < len && ascending[hi] == ascending[j]) hi++;
+    if (hi < len && (lo === 0 || hi - target < target - lo)) {
+      j = hi;
+    }
+    breaks.push(ascending[j]);
+  }
+  return breaks;
+}
+
+// Continuous quantile output places each value by its rank: 0 for the
+// lowest value, 1 for the highest. Tied values share their average rank, and
+// a value between two data values is interpolated between their ranks.
+// Returns a function, val -> 0-1 (clamped to the data).
+export function getRankPositionFunction(ascending) {
+  var n = ascending.length;
+  return function(val) {
+    var a, b;
+    if (n < 2) return 0.5;
+    if (val < ascending[0]) return 0;
+    if (val > ascending[n - 1]) return 1;
+    a = countBelow(val, false); // the first index of a value >= val
+    b = countBelow(val, true);  // the first index of a value > val
+    if (b > a) return (a + b - 1) / 2 / (n - 1);
+    return (a - 1 + (val - ascending[a - 1]) / (ascending[a] - ascending[a - 1])) / (n - 1);
+  };
+
+  function countBelow(val, orEqual) {
+    var lo = 0, hi = n, mid;
+    while (lo < hi) {
+      mid = (lo + hi) >> 1;
+      if (ascending[mid] < val || orEqual && ascending[mid] == val) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+  }
+}
+
+// The values at evenly spaced ranks, for the inner color stops of
+// continuous quantile output (see getRankPositionFunction())
+export function getRankBreaks(ascending, numBreaks) {
+  var n = ascending.length;
+  var breaks = [];
+  var r, i, j;
+  for (i = 1; i <= numBreaks; i++) {
+    r = i / (numBreaks + 1) * (n - 1);
+    j = Math.floor(r);
+    breaks.push(j + 1 < n ? ascending[j] + (ascending[j + 1] - ascending[j]) * (r - j) : ascending[j]);
+  }
+  return breaks;
+}
+
+// inner breaks have equal-interval spacing
+// first and last bucket are sized like quantiles (they are sized to contain
+// a proportional share of the data)
+export function getHybridBreaks(ascending, numBreaks) {
+  var quantileBreaks = getQuantileBreaks(ascending, numBreaks);
+  if (numBreaks < 3) return quantileBreaks;
+  var lowerBreak = quantileBreaks[0];
+  var upperBreak = quantileBreaks[quantileBreaks.length-1];
+  var innerValues = ascending.filter(function(val) {
+    return val >= lowerBreak && val < upperBreak;
+  });
+  var innerBreaks = getEqualIntervalBreaks(innerValues, numBreaks - 2);
+  var breaks = [lowerBreak].concat(innerBreaks).concat(upperBreak);
+  return breaks;
+}
+
+export function getDistributionData(breaks, ascending) {
+  var arr = utils.initializeArray(new Array(breaks.length + 1), 0);
+  var nulls = 0;
+  ascending.forEach(function(val) {
+    var i = getClassId(val, breaks);
+    if (i == -1) {
+      error('Indexing error');
+    } else {
+      arr[i]++;
+    }
+  });
+  return arr;
+}
+
+// breaks: threshold values between ranges (ascending order)
+// Returns array index of a sequential range, or -1 if @val not numeric
+export function getClassId(val, breaks) {
+  var i = 0;
+  if (!utils.isValidNumber(val)) {
+    return -1;
+  }
+  while (i < breaks.length && val >= breaks[i]) i++;
+  return i;
+}

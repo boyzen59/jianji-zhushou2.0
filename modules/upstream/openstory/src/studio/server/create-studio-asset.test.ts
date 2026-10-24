@@ -1,0 +1,1046 @@
+/**
+ * Tests for the prompt-only studio create flow (#1274).
+ *
+ * Pins: sequence-model validation, one run envelope per requested asset
+ * before insert, one workflow per image, trigger-failure marks the reserved
+ * row failed and drops unused holds.
+ */
+
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { eq } from 'drizzle-orm';
+import { micros } from '@/billing/money';
+import { createClient } from '@libsql/client';
+import { drizzle } from 'drizzle-orm/libsql';
+import { migrate } from 'drizzle-orm/libsql/migrator';
+import { generateId } from '@/platform/id';
+import type { Database } from '@/platform/server/db/client';
+import {
+  generatedAssets,
+  teams,
+  uploadAttestations,
+  user,
+} from '@/platform/server/db/schema';
+import { relations } from '@/platform/server/db/schema/relations';
+import { InsufficientCreditsError } from '@/platform/errors';
+import { studioCreateInputSchema } from '@/studio/schema';
+
+let db: Database;
+
+const mockReserveRunCredits = vi.fn();
+const mockTriggerWorkflow = vi.fn();
+const mockRequireGenerationAllowed = vi.fn();
+const mockGetEffectiveFalPricing = vi.fn();
+const mockCaptureProductEvent = vi.fn();
+const mockMeasureStoredMediaDuration = vi.fn();
+
+vi.doMock('#db-client', () => ({ getDb: () => db }));
+vi.doMock('@/billing/server/preflight', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/billing/server/preflight')>();
+  return {
+    ...actual,
+    reserveRunCredits: mockReserveRunCredits,
+  };
+});
+vi.doMock('@/platform/realtime', () => ({
+  getBillingChannel: () => ({
+    emit: vi.fn().mockResolvedValue(undefined),
+    history: async () => [],
+  }),
+  billingChannelId: (teamId: string) => `billing:${teamId}`,
+}));
+vi.doMock('@/platform/server/workflow/client', () => ({
+  triggerWorkflow: mockTriggerWorkflow,
+}));
+vi.doMock('@/platform/server/compliance/generation-gate', () => ({
+  requireGenerationAllowed: mockRequireGenerationAllowed,
+}));
+vi.doMock('@/platform/server/observability/product-events', () => ({
+  captureProductEvent: mockCaptureProductEvent,
+}));
+vi.doMock('@/cast/server/sequence-elements/media-duration', () => ({
+  measureOwnMediaDuration: mockMeasureStoredMediaDuration,
+}));
+vi.doMock('@/billing/server/fal-pricing-live', () => ({
+  getEffectiveFalPricing: mockGetEffectiveFalPricing,
+}));
+// Ark is not configured in this harness; flip this to make the via claim
+// answer 'byteplus' the way a production team on the platform key sees it.
+let bytePlusLive = false;
+vi.doMock('@/models/server/byteplus-config', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/models/server/byteplus-config')>();
+  return {
+    ...actual,
+    claimBytePlusVia: (
+      options: Parameters<typeof actual.claimBytePlusVia>[0]
+    ) => (bytePlusLive ? 'byteplus' : actual.claimBytePlusVia(options)),
+  };
+});
+
+const { createStudioAssets, renderStudioAssetAtQuality } =
+  await import('./create-studio-asset');
+const { createScopedDb } = await import('@/platform/server/db/scoped');
+
+const TEAM_ID = generateId();
+const USER_ID = 'user-1';
+
+beforeAll(async () => {
+  const client = createClient({ url: ':memory:' });
+  db = drizzle({ client, relations });
+  await migrate(db, { migrationsFolder: './drizzle/migrations' });
+  await db.insert(user).values([{ id: USER_ID, name: 'U', email: 'u@e.com' }]);
+  await db.insert(teams).values([{ id: TEAM_ID, name: 'T', slug: 't' }]);
+});
+
+beforeEach(async () => {
+  await db.delete(generatedAssets);
+  await db.delete(uploadAttestations);
+  vi.clearAllMocks();
+  bytePlusLive = false;
+  mockReserveRunCredits.mockResolvedValue('res-studio-1');
+  mockTriggerWorkflow.mockResolvedValue('wf-studio-1');
+  mockRequireGenerationAllowed.mockResolvedValue(undefined);
+  mockGetEffectiveFalPricing.mockResolvedValue({});
+  mockMeasureStoredMediaDuration.mockResolvedValue(null);
+});
+
+describe('studioCreateInputSchema', () => {
+  it('accepts a prompt-only image request', () => {
+    const parsed = studioCreateInputSchema.parse({
+      activity: 'image',
+      prompt: 'a red fox in fog',
+      imageModel: 'gpt_image_2',
+      aspectRatio: '16:9',
+      resolution: '720p' as const,
+    });
+    expect(parsed).toMatchObject({
+      activity: 'image',
+      count: 1,
+      imageModel: 'gpt_image_2',
+    });
+  });
+
+  it('rejects a hidden image model', () => {
+    const result = studioCreateInputSchema.safeParse({
+      activity: 'image',
+      prompt: 'a red fox',
+      imageModel: 'krea_2_turbo',
+      aspectRatio: '16:9',
+      resolution: '720p' as const,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('accepts unhidden turbo image models that take references', () => {
+    for (const imageModel of [
+      'nano_banana_2_lite',
+      'flux_2_flash',
+      'flux_2_turbo',
+    ] as const) {
+      const parsed = studioCreateInputSchema.parse({
+        activity: 'image',
+        prompt: 'a red fox',
+        imageModel,
+        aspectRatio: '16:9',
+        resolution: '720p' as const,
+        referenceImages: ['https://example.com/ref.png'],
+      });
+      expect(parsed).toMatchObject({ activity: 'image', imageModel });
+    }
+  });
+
+  it('rejects a catalog-only endpoint that is not a sequence model', () => {
+    const result = studioCreateInputSchema.safeParse({
+      activity: 'image',
+      prompt: 'a red fox',
+      imageModel: 'fal-ai/flux-1/dev',
+      aspectRatio: '16:9',
+      resolution: '720p' as const,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('lets Seedance 2.5 through the static schema — the via gate is per team', () => {
+    const result = studioCreateInputSchema.safeParse({
+      activity: 'video',
+      prompt: 'the fox turns toward camera',
+      videoModel: 'seedance_v2_5',
+      aspectRatio: '9:16',
+      resolution: '720p' as const,
+      duration: 5,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects H3 Max reference lists that exceed the combined 12-file cap', () => {
+    const urls = (n: number, kind: string) =>
+      Array.from(
+        { length: n },
+        (_, i) => `https://example.com/${kind}-${i}.bin`
+      );
+    const over = studioCreateInputSchema.safeParse({
+      activity: 'video',
+      prompt: 'the fox turns toward camera',
+      videoModel: 'minimax_h3_max',
+      aspectRatio: '16:9',
+      resolution: '720p' as const,
+      duration: 5,
+      mode: 'reference',
+      referenceImages: urls(9, 'img'),
+      referenceVideos: urls(3, 'vid'),
+      referenceAudio: urls(1, 'aud'),
+    });
+    expect(over.success).toBe(false);
+
+    const exact = studioCreateInputSchema.safeParse({
+      activity: 'video',
+      prompt: 'the fox turns toward camera',
+      videoModel: 'minimax_h3_max',
+      aspectRatio: '16:9',
+      resolution: '720p' as const,
+      duration: 5,
+      mode: 'reference',
+      referenceImages: urls(9, 'img'),
+      referenceVideos: urls(3, 'vid'),
+      referenceAudio: [],
+    });
+    expect(exact.success).toBe(true);
+  });
+
+  it('accepts a prompt-only video request without an image model', () => {
+    const parsed = studioCreateInputSchema.parse({
+      activity: 'video',
+      prompt: 'the fox turns toward camera',
+      videoModel: 'seedance_v2',
+      aspectRatio: '9:16',
+      resolution: '720p' as const,
+      duration: 5,
+    });
+    expect(parsed.activity).toBe('video');
+    if (parsed.activity === 'video') {
+      expect(parsed.videoModel).toBe('seedance_v2');
+      expect(parsed).not.toHaveProperty('imageModel');
+    }
+  });
+});
+
+describe('createStudioAssets', () => {
+  it('refuses Seedance 2.5 where BytePlus is not live — public fal 2.5 is not a studio option', async () => {
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+
+    await expect(
+      createStudioAssets(scopedDb, {
+        activity: 'video',
+        prompt: 'the fox turns toward camera',
+        videoModel: 'seedance_v2_5',
+        aspectRatio: '9:16',
+        resolution: '720p' as const,
+        duration: 5,
+        count: 1,
+        mode: 'text',
+        referenceImages: [],
+        referenceVideos: [],
+        referenceAudio: [],
+      })
+    ).rejects.toThrow('Unknown video model');
+
+    expect(mockReserveRunCredits).not.toHaveBeenCalled();
+    expect(await db.select().from(generatedAssets)).toEqual([]);
+  });
+
+  it('rejects a restricted account BEFORE the credit gate, leaving no row', async () => {
+    const { AccountRestrictedError } = await import('@/platform/errors');
+    mockRequireGenerationAllowed.mockRejectedValue(
+      new AccountRestrictedError('paused')
+    );
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+
+    await expect(
+      createStudioAssets(scopedDb, {
+        activity: 'image',
+        prompt: 'a red fox',
+        imageModel: 'gpt_image_2',
+        aspectRatio: '16:9',
+        resolution: '720p' as const,
+        count: 1,
+        referenceImages: [],
+      })
+    ).rejects.toBeInstanceOf(AccountRestrictedError);
+
+    expect(mockReserveRunCredits).not.toHaveBeenCalled();
+    expect(await db.select().from(generatedAssets)).toEqual([]);
+  });
+
+  it('stops at the credit gate without inserting a row', async () => {
+    mockReserveRunCredits.mockRejectedValueOnce(
+      new InsufficientCreditsError('Insufficient credits for image generation')
+    );
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+
+    await expect(
+      createStudioAssets(scopedDb, {
+        activity: 'image',
+        prompt: 'a red fox',
+        imageModel: 'gpt_image_2',
+        aspectRatio: '16:9',
+        resolution: '720p' as const,
+        count: 1,
+        referenceImages: [],
+      })
+    ).rejects.toThrow('Insufficient credits');
+
+    expect(mockTriggerWorkflow).not.toHaveBeenCalled();
+    expect(await db.select().from(generatedAssets)).toEqual([]);
+  });
+
+  it('reserves one studio row per count and triggers /studio for each', async () => {
+    mockTriggerWorkflow
+      .mockResolvedValueOnce('wf-a')
+      .mockResolvedValueOnce('wf-b');
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+
+    const result = await createStudioAssets(scopedDb, {
+      activity: 'image',
+      prompt: 'a red fox in fog',
+      imageModel: 'gpt_image_2',
+      aspectRatio: '16:9',
+      resolution: '720p' as const,
+      count: 2,
+      referenceImages: [],
+    });
+
+    expect(result.assets).toHaveLength(2);
+    expect(result.assets.map((a) => a.workflowRunId)).toEqual(['wf-a', 'wf-b']);
+
+    const rows = await db.select().from(generatedAssets);
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.source === 'studio')).toBe(true);
+    expect(rows.every((row) => row.activity === 'image')).toBe(true);
+    expect(rows.every((row) => row.status === 'queued')).toBe(true);
+    expect(rows[0]?.input).toMatchObject({
+      prompt: 'a red fox in fog',
+      aspectRatio: '16:9',
+      resolution: '720p' as const,
+      imageModel: 'gpt_image_2',
+    });
+
+    expect(mockReserveRunCredits).toHaveBeenCalledTimes(2);
+    expect(mockTriggerWorkflow).toHaveBeenCalledTimes(2);
+    expect(mockTriggerWorkflow).toHaveBeenCalledWith(
+      '/studio',
+      expect.objectContaining({
+        userId: USER_ID,
+        teamId: TEAM_ID,
+        reservationId: 'res-studio-1',
+        ownsReservation: true,
+        input: expect.objectContaining({
+          activity: 'image',
+          prompt: 'a red fox in fog',
+          imageModel: 'gpt_image_2',
+          aspectRatio: '16:9',
+          resolution: '720p' as const,
+        }),
+      }),
+      expect.objectContaining({
+        deduplicationId: expect.stringMatching(/^studio-/),
+      })
+    );
+
+    expect(mockCaptureProductEvent).toHaveBeenCalledTimes(1);
+    expect(mockCaptureProductEvent).toHaveBeenCalledWith({
+      distinctId: USER_ID,
+      event: 'studio_generation_started',
+      properties: expect.objectContaining({
+        team_id: TEAM_ID,
+        activity: 'image',
+        model: 'gpt_image_2',
+        count: 2,
+        asset_ids: result.assets.map((a) => a.id),
+        reference_image_count: 0,
+      }),
+    });
+  });
+
+  it('zeros earlier holds if a later reserve fails, leaving no row', async () => {
+    mockReserveRunCredits
+      .mockResolvedValueOnce('res-1')
+      .mockRejectedValueOnce(
+        new InsufficientCreditsError(
+          'Insufficient credits for image generation'
+        )
+      );
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    const zero = vi
+      .spyOn(scopedDb.billing, 'zeroReservation')
+      .mockResolvedValue(undefined);
+
+    await expect(
+      createStudioAssets(scopedDb, {
+        activity: 'image',
+        prompt: 'a red fox',
+        imageModel: 'gpt_image_2',
+        aspectRatio: '16:9',
+        resolution: '720p' as const,
+        count: 2,
+        referenceImages: [],
+      })
+    ).rejects.toBeInstanceOf(InsufficientCreditsError);
+
+    expect(zero).toHaveBeenCalledWith('res-1');
+    expect(mockTriggerWorkflow).not.toHaveBeenCalled();
+    expect(await db.select().from(generatedAssets)).toEqual([]);
+  });
+
+  it('marks the reserved row failed when the workflow trigger throws', async () => {
+    mockTriggerWorkflow.mockRejectedValueOnce(new Error('binding exploded'));
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+
+    await expect(
+      createStudioAssets(scopedDb, {
+        activity: 'image',
+        prompt: 'a red fox',
+        imageModel: 'gpt_image_2',
+        aspectRatio: '16:9',
+        resolution: '720p' as const,
+        count: 1,
+        referenceImages: [],
+      })
+    ).rejects.toThrow('binding exploded');
+
+    const rows = await db.select().from(generatedAssets);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.status).toBe('failed');
+    expect(rows[0]?.error).toBe(
+      "This image couldn't start. You weren't charged. Try again."
+    );
+    expect(rows[0]?.workflowRunId).toBeNull();
+  });
+
+  it('keeps the started hold and zeros unused ones when a later trigger fails', async () => {
+    mockReserveRunCredits
+      .mockResolvedValueOnce('res-a')
+      .mockResolvedValueOnce('res-b')
+      .mockResolvedValueOnce('res-c');
+    mockTriggerWorkflow
+      .mockResolvedValueOnce('wf-a')
+      .mockRejectedValueOnce(new Error('binding exploded'));
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    const zero = vi.spyOn(scopedDb.billing, 'zeroReservation');
+
+    await expect(
+      createStudioAssets(scopedDb, {
+        activity: 'image',
+        prompt: 'a red fox',
+        imageModel: 'gpt_image_2',
+        aspectRatio: '16:9',
+        resolution: '720p' as const,
+        count: 3,
+        referenceImages: [],
+      })
+    ).rejects.toThrow('binding exploded');
+
+    expect(zero).toHaveBeenCalledWith('res-b');
+    expect(zero).toHaveBeenCalledWith('res-c');
+    expect(zero).not.toHaveBeenCalledWith('res-a');
+    expect(mockTriggerWorkflow).toHaveBeenCalledTimes(2);
+
+    const rows = await db.select().from(generatedAssets);
+    expect(rows).toHaveLength(2);
+    expect(rows.filter((row) => row.status === 'queued')).toHaveLength(1);
+    expect(rows.filter((row) => row.status === 'failed')).toHaveLength(1);
+  });
+
+  it('lists studio assets newest-first and can filter favorites', async () => {
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    const first = await createStudioAssets(scopedDb, {
+      activity: 'image',
+      prompt: 'first',
+      imageModel: 'gpt_image_2',
+      aspectRatio: '16:9',
+      resolution: '720p' as const,
+      count: 1,
+      referenceImages: [],
+    });
+    const second = await createStudioAssets(scopedDb, {
+      activity: 'image',
+      prompt: 'second',
+      imageModel: 'gpt_image_2',
+      aspectRatio: '1:1',
+      resolution: '720p' as const,
+      count: 1,
+      referenceImages: [],
+    });
+
+    const newest = await scopedDb.generatedAssets.list({
+      source: 'studio',
+      order: 'newest',
+    });
+    expect(newest.assets.map((row) => row.id)).toEqual([
+      second.assets[0]?.id,
+      first.assets[0]?.id,
+    ]);
+
+    const oldest = await scopedDb.generatedAssets.list({
+      source: 'studio',
+      order: 'oldest',
+    });
+    expect(oldest.assets.map((row) => row.id)).toEqual([
+      first.assets[0]?.id,
+      second.assets[0]?.id,
+    ]);
+
+    const firstId = first.assets[0]?.id;
+    if (!firstId) throw new Error('expected first asset');
+    await scopedDb.generatedAssets.setFavorite(firstId, true);
+    const favorites = await scopedDb.generatedAssets.list({
+      source: 'studio',
+      favoritesOnly: true,
+    });
+    expect(favorites.assets.map((row) => row.id)).toEqual([firstId]);
+  });
+
+  it('keeps a short Seedance 2.5 reference clip when the prompt does not say edit (#2036)', async () => {
+    bytePlusLive = true;
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    const { recordLikenessFinding } =
+      await import('@/cast/server/upload-rights');
+    await recordLikenessFinding(
+      scopedDb,
+      ['/r2/uploads/short.mp4'],
+      'other',
+      {}
+    );
+
+    await createStudioAssets(scopedDb, {
+      activity: 'video',
+      prompt: 'the fox turns toward camera',
+      videoModel: 'seedance_v2_5',
+      aspectRatio: '16:9',
+      resolution: '720p',
+      duration: 5,
+      count: 1,
+      mode: 'reference',
+      referenceImages: [],
+      referenceVideos: ['/r2/uploads/short.mp4'],
+      referenceAudio: [],
+    });
+
+    expect(mockMeasureStoredMediaDuration).not.toHaveBeenCalled();
+    expect(mockTriggerWorkflow).toHaveBeenCalledWith(
+      '/studio',
+      expect.objectContaining({
+        input: expect.objectContaining({ duration: 5 }),
+      }),
+      expect.anything()
+    );
+  });
+
+  it('refuses a Seedance 2.5 edit outside 4–30s before any hold (#2036)', async () => {
+    bytePlusLive = true;
+    // The length comes from the stored file, not the request.
+    mockMeasureStoredMediaDuration.mockResolvedValue(2);
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+
+    await expect(
+      createStudioAssets(scopedDb, {
+        activity: 'video',
+        prompt: 'edit the fox turn',
+        videoModel: 'seedance_v2_5',
+        aspectRatio: '16:9',
+        resolution: '720p',
+        duration: 5,
+        count: 1,
+        mode: 'reference',
+        referenceImages: [],
+        referenceVideos: ['/r2/uploads/short.mp4'],
+        referenceAudio: [],
+      })
+    ).rejects.toThrow(/between 4 and 30 seconds/);
+    expect(mockMeasureStoredMediaDuration).toHaveBeenCalledWith(
+      'uploads/short.mp4'
+    );
+
+    expect(mockReserveRunCredits).not.toHaveBeenCalled();
+    expect(await db.select().from(generatedAssets)).toEqual([]);
+  });
+
+  it('refuses when our own reference video cannot be read (#2036)', async () => {
+    bytePlusLive = true;
+    mockMeasureStoredMediaDuration.mockRejectedValue(new Error('R2 is down'));
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+
+    await expect(
+      createStudioAssets(scopedDb, {
+        activity: 'video',
+        prompt: 'edit the fox turn',
+        videoModel: 'seedance_v2_5',
+        aspectRatio: '16:9',
+        resolution: '720p',
+        duration: 5,
+        count: 1,
+        mode: 'reference',
+        referenceImages: [],
+        referenceVideos: ['/r2/uploads/clip.mp4'],
+        referenceAudio: [],
+      })
+    ).rejects.toThrow(/Couldn't read that reference video/);
+    expect(mockReserveRunCredits).not.toHaveBeenCalled();
+  });
+
+  it('prices a Seedance 2.5 edit as auto length (#2036)', async () => {
+    bytePlusLive = true;
+    const rate = { unitPrice: micros(10_000), unit: 'units' };
+    mockGetEffectiveFalPricing.mockResolvedValue({
+      'bytedance/seedance-2.5/image-to-video': rate,
+      'bytedance/seedance-2.5/reference-to-video': rate,
+      'bytedance/seedance-2.5/text-to-video': rate,
+    });
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+
+    const { recordLikenessFinding } =
+      await import('@/cast/server/upload-rights');
+    await recordLikenessFinding(
+      scopedDb,
+      ['https://example.com/walk.mp4'],
+      'other',
+      {}
+    );
+
+    await createStudioAssets(scopedDb, {
+      activity: 'video',
+      prompt: 'edit the fox turn',
+      videoModel: 'seedance_v2_5',
+      aspectRatio: '16:9',
+      resolution: '720p',
+      duration: 5,
+      count: 1,
+      mode: 'reference',
+      referenceImages: [],
+      referenceVideos: ['https://example.com/walk.mp4'],
+      referenceAudio: [],
+    });
+
+    expect(mockTriggerWorkflow).toHaveBeenCalledWith(
+      '/studio',
+      expect.objectContaining({
+        input: expect.objectContaining({ duration: 'auto' }),
+      }),
+      expect.anything()
+    );
+
+    // The hold covers the longest clip, not the 5s that was picked.
+    const editHold = mockReserveRunCredits.mock.calls[0]?.[1];
+    mockReserveRunCredits.mockClear();
+    await createStudioAssets(scopedDb, {
+      activity: 'video',
+      prompt: 'the fox turns',
+      videoModel: 'seedance_v2_5',
+      aspectRatio: '16:9',
+      resolution: '720p',
+      duration: 5,
+      count: 1,
+      mode: 'reference',
+      referenceImages: [],
+      referenceVideos: ['https://example.com/walk.mp4'],
+      referenceAudio: [],
+    });
+    const referenceHold = mockReserveRunCredits.mock.calls[0]?.[1];
+    expect(Number(editHold)).toBeGreaterThan(Number(referenceHold));
+  });
+
+  it('reserves a video row against the T2V endpoint with no image model', async () => {
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    const result = await createStudioAssets(scopedDb, {
+      activity: 'video',
+      prompt: 'the fox turns toward camera',
+      videoModel: 'seedance_v2',
+      aspectRatio: '9:16',
+      resolution: '720p' as const,
+      duration: 5,
+      count: 1,
+      mode: 'text',
+      referenceImages: [],
+      referenceVideos: [],
+      referenceAudio: [],
+    });
+
+    expect(result.assets).toHaveLength(1);
+    const rows = await db.select().from(generatedAssets);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.activity).toBe('video');
+    expect(rows[0]?.endpointId).toBe(
+      'bytedance/seedance-2.0/enterprise/v2/text-to-video'
+    );
+    expect(rows[0]?.input).toMatchObject({
+      prompt: 'the fox turns toward camera',
+      videoModel: 'seedance_v2',
+      aspectRatio: '9:16',
+      resolution: '720p' as const,
+    });
+    expect(rows[0]?.input).not.toHaveProperty('imageModel');
+
+    expect(mockTriggerWorkflow).toHaveBeenCalledWith(
+      '/studio',
+      expect.objectContaining({
+        reservationId: 'res-studio-1',
+        ownsReservation: true,
+        input: expect.objectContaining({
+          activity: 'video',
+          prompt: 'the fox turns toward camera',
+          videoModel: 'seedance_v2',
+          aspectRatio: '9:16',
+          resolution: '720p' as const,
+        }),
+      }),
+      expect.objectContaining({
+        deduplicationId: expect.stringMatching(/^studio-/),
+      })
+    );
+    expect(mockTriggerWorkflow.mock.calls[0]?.[1].input).not.toHaveProperty(
+      'imageModel'
+    );
+  });
+});
+
+describe('renderStudioAssetAtQuality (#1756)', () => {
+  const draftInput = studioCreateInputSchema.parse({
+    activity: 'video',
+    prompt: 'the fox turns toward camera',
+    videoModel: 'seedance_v2_5',
+    aspectRatio: '9:16',
+    resolution: '720p',
+    duration: 5,
+    count: 3,
+    mode: 'text',
+    referenceImages: [],
+    referenceVideos: [],
+    referenceAudio: [],
+    draft: true,
+  });
+
+  async function seedDraft(
+    extra: Partial<typeof generatedAssets.$inferInsert> = {}
+  ) {
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    const row = await scopedDb.generatedAssets.insert({
+      provider: 'byteplus',
+      endpointId: 'dreamina-seedance-2-5-260628',
+      activity: 'video',
+      modelName: 'Seedance 2.5',
+      source: 'studio',
+      input: draftInput,
+      status: 'completed',
+      draftTaskId: 'cgt-1',
+      ...extra,
+    });
+    return { scopedDb, row };
+  }
+
+  beforeEach(() => {
+    bytePlusLive = true;
+  });
+
+  it('opens a NEW row from the draft input at 1080p and runs it from the task id alone', async () => {
+    const { scopedDb, row } = await seedDraft();
+
+    const result = await renderStudioAssetAtQuality(scopedDb, row.id);
+
+    expect(result.assets).toHaveLength(1);
+    const rows = await db.select().from(generatedAssets);
+    expect(rows).toHaveLength(2);
+    const original = rows.find((r) => r.id === row.id);
+    const final = rows.find((r) => r.id !== row.id);
+    expect(original).toMatchObject({
+      status: 'completed',
+      draftTaskId: 'cgt-1',
+    });
+    expect(final).toMatchObject({ status: 'queued', draftTaskId: null });
+    expect(final?.input).toMatchObject({
+      videoModel: 'seedance_v2_5',
+      resolution: '1080p',
+    });
+    expect(mockTriggerWorkflow).toHaveBeenCalledWith(
+      '/studio',
+      expect.objectContaining({
+        assetId: final?.id,
+        finalFromDraftTaskId: 'cgt-1',
+        input: expect.objectContaining({
+          draft: false,
+          resolution: '1080p',
+          count: 1,
+        }),
+      }),
+      expect.objectContaining({ deduplicationId: `studio-${final?.id}` })
+    );
+  });
+
+  it('refuses a row that is not a finished draft, an expired one, and a non-studio one', async () => {
+    const notDraft = await seedDraft({ draftTaskId: null });
+    await expect(
+      renderStudioAssetAtQuality(notDraft.scopedDb, notDraft.row.id)
+    ).rejects.toThrow('not a finished draft');
+
+    const unfinished = await seedDraft({ status: 'running' });
+    await expect(
+      renderStudioAssetAtQuality(unfinished.scopedDb, unfinished.row.id)
+    ).rejects.toThrow('not a finished draft');
+
+    const expired = await seedDraft();
+    await db
+      .update(generatedAssets)
+      .set({ createdAt: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000) })
+      .where(eq(generatedAssets.id, expired.row.id));
+    await expect(
+      renderStudioAssetAtQuality(expired.scopedDb, expired.row.id)
+    ).rejects.toThrow('seven days');
+
+    const catalog = await seedDraft({ source: 'catalog' });
+    await expect(
+      renderStudioAssetAtQuality(catalog.scopedDb, catalog.row.id)
+    ).rejects.toThrow('not found');
+
+    expect(mockReserveRunCredits).not.toHaveBeenCalled();
+    expect(mockTriggerWorkflow).not.toHaveBeenCalled();
+  });
+});
+
+describe('upload rights gate (#1581)', () => {
+  const uploadUrl = `/r2/talent/${TEAM_ID}/temp/01ABC.png`;
+  const request = { ipAddress: '203.0.113.9', userAgent: 'vitest' };
+  const base = {
+    activity: 'image' as const,
+    prompt: 'a red fox',
+    imageModel: 'gpt_image_2' as const,
+    aspectRatio: '16:9' as const,
+    resolution: '720p' as const,
+    count: 1,
+  };
+  const video = {
+    activity: 'video' as const,
+    prompt: 'the fox turns toward camera',
+    videoModel: 'seedance_v2' as const,
+    aspectRatio: '16:9' as const,
+    resolution: '720p' as const,
+    duration: 5,
+    count: 1,
+    referenceImages: [],
+    referenceVideos: [],
+    referenceAudio: [],
+  };
+
+  it('refuses an unchecked upload before any credit hold', async () => {
+    const { AttestationRequiredError } = await import('@/platform/errors');
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+
+    await expect(
+      createStudioAssets(scopedDb, { ...base, referenceImages: [uploadUrl] })
+    ).rejects.toBeInstanceOf(AttestationRequiredError);
+
+    expect(mockReserveRunCredits).not.toHaveBeenCalled();
+    expect(await db.select().from(generatedAssets)).toEqual([]);
+  });
+
+  it('refuses a detected person until signed, then generates', async () => {
+    const { AttestationRequiredError } = await import('@/platform/errors');
+    const { attestUploads, recordLikenessFinding } =
+      await import('@/cast/server/upload-rights');
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+
+    await recordLikenessFinding(scopedDb, [uploadUrl], 'human', request);
+    await expect(
+      createStudioAssets(scopedDb, { ...base, referenceImages: [uploadUrl] })
+    ).rejects.toBeInstanceOf(AttestationRequiredError);
+    expect(mockReserveRunCredits).not.toHaveBeenCalled();
+
+    await attestUploads(
+      scopedDb,
+      [
+        {
+          url: uploadUrl,
+          statementVersion: 'portrait-rights-v1',
+          authorizationBasis: 'this is me',
+        },
+      ],
+      request
+    );
+    await createStudioAssets(scopedDb, {
+      ...base,
+      referenceImages: [uploadUrl],
+    });
+    expect(mockTriggerWorkflow).toHaveBeenCalledTimes(1);
+  });
+
+  it('a still the check cleared generates with nothing signed', async () => {
+    const { recordLikenessFinding } =
+      await import('@/cast/server/upload-rights');
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    const logoUrl = `/r2/talent/${TEAM_ID}/temp/01LOGO.png`;
+
+    await recordLikenessFinding(scopedDb, [logoUrl], 'other', request);
+    await createStudioAssets(scopedDb, {
+      ...base,
+      referenceImages: [logoUrl],
+    });
+    expect(mockTriggerWorkflow).toHaveBeenCalledTimes(1);
+  });
+
+  it('gates the video paths too: reference mode and frames', async () => {
+    const { AttestationRequiredError } = await import('@/platform/errors');
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+
+    await expect(
+      createStudioAssets(scopedDb, {
+        ...video,
+        mode: 'reference',
+        referenceImages: [uploadUrl],
+      })
+    ).rejects.toBeInstanceOf(AttestationRequiredError);
+    await expect(
+      createStudioAssets(scopedDb, {
+        ...video,
+        mode: 'frames',
+        startImageUrl: uploadUrl,
+      })
+    ).rejects.toBeInstanceOf(AttestationRequiredError);
+    // An uploaded reference clip is checked like a still (#1930).
+    await expect(
+      createStudioAssets(scopedDb, {
+        ...video,
+        mode: 'reference',
+        referenceVideos: [`/r2/talent/${TEAM_ID}/uploads/01WALK.mp4`],
+      })
+    ).rejects.toBeInstanceOf(AttestationRequiredError);
+    expect(mockReserveRunCredits).not.toHaveBeenCalled();
+  });
+
+  it('refuses a Studio clip whose chain began at an unchecked upload (#1930)', async () => {
+    const { AttestationRequiredError, ValidationError } =
+      await import('@/platform/errors');
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    const oldId = generateId();
+    const oldClip = `/r2/teams/${TEAM_ID}/studio/${oldId}/video.mp4`;
+    const old = await scopedDb.generatedAssets.insert({
+      id: oldId,
+      provider: 'byteplus',
+      endpointId: 'dreamina-seedance-2-5-260628',
+      activity: 'video',
+      modelName: 'Seedance 2.5',
+      source: 'studio',
+      input: {
+        mode: 'reference',
+        referenceVideos: [`/r2/talent/${TEAM_ID}/uploads/01OLD.mp4`],
+      },
+      status: 'completed',
+      outputs: [{ url: oldClip, contentType: 'video/mp4' }],
+    });
+
+    await expect(
+      createStudioAssets(scopedDb, {
+        ...video,
+        mode: 'reference',
+        referenceVideos: [`/r2/teams/${TEAM_ID}/studio/${old.id}/video.mp4`],
+      })
+    ).rejects.toBeInstanceOf(AttestationRequiredError);
+    // Any other stored clip, ours or not, needs its own ledger row.
+    for (const clip of [
+      `/r2/teams/${generateId()}/studio/${old.id}/video.mp4`,
+      `/r2/elements/${TEAM_ID}/seq-1/01COPY.mp4`,
+    ]) {
+      await expect(
+        createStudioAssets(scopedDb, {
+          ...video,
+          mode: 'reference',
+          referenceVideos: [clip],
+        })
+      ).rejects.toBeInstanceOf(AttestationRequiredError);
+    }
+    // A clip stored as a still was judged as a still.
+    await expect(
+      createStudioAssets(scopedDb, {
+        ...video,
+        mode: 'reference',
+        referenceVideos: [`/r2/teams/${TEAM_ID}/studio/${old.id}/image.png`],
+      })
+    ).rejects.toBeInstanceOf(ValidationError);
+    expect(mockReserveRunCredits).not.toHaveBeenCalled();
+  });
+
+  it('refuses a dot-segment URL under a passing clip’s prefix (#2153)', async () => {
+    const { AttestationRequiredError, ValidationError } =
+      await import('@/platform/errors');
+    const { recordLikenessFinding } =
+      await import('@/cast/server/upload-rights');
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    const clip = `/r2/teams/${TEAM_ID}/studio/${generateId()}/video.mp4`;
+    const passed = await scopedDb.generatedAssets.insert({
+      provider: 'byteplus',
+      endpointId: 'dreamina-seedance-2-5-260628',
+      activity: 'video',
+      modelName: 'Seedance 2.5',
+      source: 'studio',
+      input: { mode: 'reference', referenceVideos: [] },
+      status: 'completed',
+      outputs: [{ url: clip, contentType: 'video/mp4' }],
+    });
+    // The stored output itself has nothing behind it to check.
+    await recordLikenessFinding(scopedDb, [clip], 'other', request);
+    const prefix = `/r2/teams/${TEAM_ID}/studio/${passed.id}`;
+    for (const forged of [
+      `${prefix}/video.mp4/../../unchecked.mp4`,
+      `${prefix}/%2e%2e/unchecked.mp4`,
+      `${prefix}/video.mp4?download`,
+      `${prefix}/video.mp4#clip`,
+    ]) {
+      await expect(
+        createStudioAssets(scopedDb, {
+          ...video,
+          mode: 'reference',
+          referenceVideos: [forged],
+        })
+      ).rejects.toBeInstanceOf(ValidationError);
+    }
+    // Same id, different file: not that clip's stored output.
+    await expect(
+      createStudioAssets(scopedDb, {
+        ...video,
+        mode: 'reference',
+        referenceVideos: [`${prefix}/other.mp4`],
+      })
+    ).rejects.toBeInstanceOf(AttestationRequiredError);
+    expect(mockTriggerWorkflow).not.toHaveBeenCalled();
+  });
+
+  it('lets library stills through untouched', async () => {
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    await createStudioAssets(scopedDb, {
+      ...video,
+      mode: 'frames',
+      startImageUrl: `/r2/talent/${TEAM_ID}/tal1/headshot.png`,
+    });
+    expect(await db.select().from(uploadAttestations)).toEqual([]);
+    expect(mockTriggerWorkflow).toHaveBeenCalledTimes(1);
+  });
+
+  it("another team's clearance does not cover this team", async () => {
+    const { AttestationRequiredError } = await import('@/platform/errors');
+    const { recordLikenessFinding } =
+      await import('@/cast/server/upload-rights');
+    const otherTeam = generateId();
+    await db.insert(teams).values([{ id: otherTeam, name: 'O', slug: 'o' }]);
+    const url = 'https://example.com/anyone.jpg';
+
+    await recordLikenessFinding(
+      createScopedDb(otherTeam, USER_ID),
+      [url],
+      'other',
+      request
+    );
+    await expect(
+      createStudioAssets(createScopedDb(TEAM_ID, USER_ID), {
+        ...base,
+        referenceImages: [url],
+      })
+    ).rejects.toBeInstanceOf(AttestationRequiredError);
+  });
+});

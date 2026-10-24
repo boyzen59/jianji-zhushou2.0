@@ -1,0 +1,453 @@
+import { describe, expect, it } from 'vitest';
+import { DIALOGUE_CLIP_TOKEN, VIDEO_MODEL_VOICE_TOKEN } from './dialogue-tts';
+import {
+  assertReferencesUsable,
+  missingVoiceLines,
+  motionReferenceSupport,
+  referenceUsability,
+  unusableReferenceLines,
+  unusableShotReferenceLines,
+} from './reference-support';
+
+describe('motionReferenceSupport', () => {
+  it('reports clips and audio on the Seedance / H3 Max reference endpoints', () => {
+    expect(motionReferenceSupport('seedance_v2_5')).toEqual({
+      image: true,
+      video: true,
+      audio: true,
+    });
+    expect(motionReferenceSupport('minimax_h3_max')).toEqual({
+      image: true,
+      video: true,
+      audio: true,
+    });
+  });
+
+  it('reports images only where the model binds stills but no media', () => {
+    // Kling carries stills inline on its image-to-video endpoint.
+    expect(motionReferenceSupport('kling_v3_pro')).toMatchObject({
+      image: true,
+      video: false,
+      audio: false,
+    });
+  });
+
+  it('reports clips but not audio on Omni Flash', () => {
+    // Google: "Video references support a maximum of 3 clips, up to 3 seconds
+    // each", but "Uploading audio references is unsupported in the current
+    // version of the API" — so this split is the provider's, on both vias.
+    expect(motionReferenceSupport('gemini_omni_flash')).toEqual({
+      image: true,
+      video: true,
+      audio: false,
+    });
+  });
+});
+
+// #1559: no fallback. A clip or voice line the selected model cannot use
+// refuses the shot, so every surface asks the same question and says why.
+describe('unusableReferenceLines', () => {
+  const el = (
+    token: string,
+    kind: 'image' | 'video' | 'audio',
+    durationSeconds: number | null
+  ) => ({ token, kind, durationSeconds });
+
+  it('is silent when the model can use everything attached', () => {
+    expect(
+      unusableReferenceLines('seedance_v2_5', [
+        el('SHEET', 'image', null),
+        el('VOICE', 'audio', 4),
+        el('CLIP', 'video', 10),
+      ])
+    ).toEqual([]);
+  });
+
+  it('names a kind the model takes no reference of, and who does', () => {
+    const [line] = unusableReferenceLines('kling_v3_pro', [
+      el('SMOKE_INK', 'video', 10),
+    ]);
+    expect(line).toContain("can't use SMOKE_INK");
+    expect(line).toContain('takes no reference clips');
+    expect(line).toContain('Seedance 2.5');
+  });
+
+  it('names a clip past the ceiling, with its real length', () => {
+    // The 15.05s clip that failed at fal: 0.05s over, which "15s" hid.
+    const [line] = unusableReferenceLines('minimax_h3_max', [
+      el('SMOKE_INK', 'video', 15.0465),
+    ]);
+    expect(line).toContain('15.05s, over its 15s limit');
+    expect(line).toContain('Trim it, or use Seedance 2.5');
+  });
+
+  it('never refuses a still, or a clip of unknown length', () => {
+    expect(
+      unusableReferenceLines('kling_v3_pro', [el('SHEET', 'image', null)])
+    ).toEqual([]);
+    expect(
+      unusableReferenceLines('gemini_omni_flash', [
+        el('MYSTERY', 'video', null),
+      ])
+    ).toEqual([]);
+  });
+
+  it('refuses a stored format no model takes, and says what to use', () => {
+    // The M4A voice memo Ark rejected after Generate ("audio format … not
+    // valid for model dreamina-seedance-2-5 in r2v").
+    const [line] = unusableReferenceLines('seedance_v2_5', [
+      {
+        token: 'MATEO_SHOT_1',
+        kind: 'audio',
+        durationSeconds: 3.75,
+        imageUrl: '/r2/elements/t/s/el.m4a',
+      },
+    ]);
+    expect(line).toContain("can't use MATEO_SHOT_1 — it is M4A");
+    expect(line).toContain('MP3 or WAV');
+    expect(
+      unusableReferenceLines('seedance_v2_5', [
+        {
+          token: 'OK',
+          kind: 'audio',
+          durationSeconds: 3,
+          imageUrl: '/r2/x.wav',
+        },
+        {
+          token: 'CLIP',
+          kind: 'video',
+          durationSeconds: 5,
+          referenceImageUrl: 'https://cdn.example/c.mov?v=1',
+        },
+      ])
+    ).toEqual([]);
+  });
+
+  it('refuses at submit with the same words', () => {
+    expect(() =>
+      assertReferencesUsable('kling_v3_pro', [el('VOICE', 'audio', 3)], {
+        hasStartFrame: true,
+        prompt: null,
+        onArk: true,
+      })
+    ).toThrow("can't use VOICE — it takes no reference audio");
+    expect(() =>
+      assertReferencesUsable('seedance_v2_5', [el('VOICE', 'audio', 3)], {
+        hasStartFrame: true,
+        prompt: null,
+        onArk: true,
+      })
+    ).not.toThrow();
+  });
+
+  it('refuses a clip under the model minimum', () => {
+    // H3 Max takes clips of 2–15s; Seedance 2.5 takes 1.8–30.2s.
+    const [line] = unusableReferenceLines('minimax_h3_max', [
+      el('BLINK', 'video', 1.9),
+    ]);
+    expect(line).toContain('1.9s, under its 2s minimum');
+    expect(line).toContain('Seedance 2.5');
+    expect(
+      unusableReferenceLines('seedance_v2_5', [el('BLINK', 'video', 1.9)])
+    ).toEqual([]);
+  });
+});
+
+// Every reference endpoint that takes audio refuses it as the only reference
+// ("At least one reference image or video is required"). It used to be
+// described in the prompt instead; now it refuses like any other misfit.
+describe('unusableShotReferenceLines — a voice line with nothing to ride on', () => {
+  const voice = {
+    token: 'NARRATOR',
+    kind: 'audio' as const,
+    durationSeconds: 4,
+  };
+  const sheet = {
+    token: 'SARAH',
+    kind: 'image' as const,
+    durationSeconds: null,
+  };
+
+  it('refuses a voice line with no start frame and no sheet or clip', () => {
+    const [line] = unusableShotReferenceLines('seedance_v2_5', [voice], {
+      hasStartFrame: false,
+      prompt: null,
+      onArk: true,
+    });
+    expect(line).toContain("can't send NARRATOR on its own");
+    expect(line).toContain('or use a start frame');
+  });
+
+  it('refuses a Seedance 2.5 edit clip outside 4–30s, whoever asks (#2036)', () => {
+    const short = { token: 'CLIP', kind: 'video' as const, durationSeconds: 2 };
+    // Inside the 1.8–30.2s reference window, so only the word makes it fail.
+    expect(
+      unusableShotReferenceLines('seedance_v2_5', [short], {
+        hasStartFrame: true,
+        prompt: 'the fox runs',
+        onArk: true,
+      })
+    ).toEqual([]);
+    expect(
+      unusableShotReferenceLines('seedance_v2_5', [short], {
+        hasStartFrame: true,
+        prompt: 'Edit the run',
+        onArk: true,
+      })
+    ).toEqual([
+      'Seedance can only edit a video between 4 and 30 seconds. This one is 2s.',
+    ]);
+    // fal never sends an edit, so the reference window is all that applies.
+    expect(
+      unusableShotReferenceLines('seedance_v2_5', [short], {
+        hasStartFrame: true,
+        prompt: 'Edit the run',
+        onArk: false,
+      })
+    ).toEqual([]);
+    // The submit is the last word for every trigger.
+    expect(() =>
+      assertReferencesUsable('seedance_v2_5', [short], {
+        hasStartFrame: true,
+        prompt: 'Edit the run',
+        onArk: true,
+      })
+    ).toThrow(/between 4 and 30 seconds/);
+  });
+
+  it('lets it ride with a start frame, a sheet or a clip', () => {
+    expect(
+      unusableShotReferenceLines('seedance_v2_5', [voice], {
+        hasStartFrame: true,
+        prompt: null,
+        onArk: true,
+      })
+    ).toEqual([]);
+    expect(
+      unusableShotReferenceLines('seedance_v2_5', [voice, sheet], {
+        hasStartFrame: false,
+        prompt: null,
+        onArk: true,
+      })
+    ).toEqual([]);
+    expect(
+      unusableShotReferenceLines(
+        'seedance_v2_5',
+        [voice, { token: 'CLIP', kind: 'video', durationSeconds: 5 }],
+        { hasStartFrame: false, prompt: null, onArk: true }
+      )
+    ).toEqual([]);
+  });
+
+  it('does not count a clip the model refuses as something to ride with', () => {
+    const lines = unusableShotReferenceLines(
+      'minimax_h3_max',
+      [voice, { token: 'LONG', kind: 'video', durationSeconds: 40 }],
+      { hasStartFrame: false, prompt: null, onArk: true }
+    );
+    expect(lines.some((line) => line.includes('over its 15s limit'))).toBe(
+      true
+    );
+    expect(lines.some((line) => line.includes('on its own'))).toBe(true);
+  });
+});
+
+describe('referenceUsability', () => {
+  it('is silent for a still — every model takes one', () => {
+    expect(
+      referenceUsability({ kind: 'image', durationSeconds: null })
+    ).toEqual({ level: 'ok' });
+  });
+
+  it('warns for a clip, naming the models that will carry it', () => {
+    const usability = referenceUsability({ kind: 'video', durationSeconds: 5 });
+    expect(usability.level).toBe('limited');
+    if (usability.level !== 'limited') return;
+    // Omni Flash caps clips at 3s, so a 5s clip is past it.
+    expect(usability.models).not.toContain('gemini_omni_flash');
+    expect(usability.models).toContain('seedance_v2_5');
+    expect(usability.models).toContain('minimax_h3_max');
+    // Never a model that takes no reference clip at all.
+    expect(usability.models).not.toContain('kling_v3_pro');
+  });
+
+  it('names the models a clip is too long for, apart from those it fits', () => {
+    // The 15.05s clip that surfaced this: four models take clips but cap them
+    // at 15s or less, so the list of models it FITS is only Seedance 2.5 —
+    // which read as "only Seedance 2.5 takes clips".
+    const usability = referenceUsability({
+      kind: 'video',
+      durationSeconds: 15.05,
+    });
+    expect(usability.level).toBe('limited');
+    if (usability.level !== 'limited') return;
+    expect(usability.models).toEqual(['seedance_v2_5']);
+    const tooLong = Object.fromEntries(
+      usability.tooLong.map(({ model, maxSeconds }) => [model, maxSeconds])
+    );
+    expect(tooLong.minimax_h3_max).toBe(15);
+    expect(tooLong.gemini_omni_flash).toBe(3);
+    // A model with no clip slot is not "too long" — it describes it instead.
+    expect(tooLong.kling_v3_pro).toBeUndefined();
+  });
+
+  it('errors when no model in the catalog is long enough', () => {
+    // Seedance 2.5 is the roomiest at 30.2s.
+    const usability = referenceUsability({
+      kind: 'video',
+      durationSeconds: 120,
+    });
+    expect(usability.level).toBe('unusable');
+    if (usability.level !== 'unusable') return;
+    expect(usability.problem).toEqual({ reason: 'too-long', maxSeconds: 30.2 });
+  });
+
+  it('warns rather than errors when the length is unknown', () => {
+    // Unknown is accepted everywhere, so it can never be "unusable".
+    expect(
+      referenceUsability({ kind: 'audio', durationSeconds: null }).level
+    ).toBe('limited');
+  });
+});
+
+describe('missingVoiceLines', () => {
+  const gone = {
+    character: 'SARAH',
+    voiceToken: 'GONE_VOICE',
+  };
+
+  it('flags a deleted element token on an audio-capable model', () => {
+    expect(missingVoiceLines('seedance_v2_5', { lines: [gone] }, [])).toEqual([
+      "GONE_VOICE, the voice on SARAH's line, was deleted — pick another voice.",
+    ]);
+  });
+
+  it('ignores conversation-clip and video-model sentinels', () => {
+    expect(
+      missingVoiceLines(
+        'seedance_v2_5',
+        {
+          lines: [
+            { character: 'SARAH', voiceToken: DIALOGUE_CLIP_TOKEN },
+            { character: 'Al', voiceToken: VIDEO_MODEL_VOICE_TOKEN },
+          ],
+        },
+        []
+      )
+    ).toEqual([]);
+  });
+
+  it('is empty when the model takes no audio', () => {
+    expect(missingVoiceLines('kling_v3_pro', { lines: [gone] }, [])).toEqual(
+      []
+    );
+  });
+});
+
+describe('combined reference length (#1651)', () => {
+  const audio = (token: string, durationSeconds: number) => ({
+    token,
+    kind: 'audio' as const,
+    durationSeconds,
+    referenceImageUrl: `https://example.test/${token}.wav`,
+  });
+  const still = {
+    token: 'LENA',
+    kind: 'image' as const,
+    referenceImageUrl: 'https://example.test/lena.png',
+  };
+
+  it('refuses two audio files each inside the per-file limit but over the sum', () => {
+    // H3 Max: "2-15 seconds each", 15s combined. 10 + 10 passes per file.
+    const [line, ...rest] = unusableShotReferenceLines(
+      'minimax_h3_max',
+      [still, audio('DIALOGUE', 10), audio('SIREN', 10)],
+      { hasStartFrame: true, prompt: null, onArk: true }
+    );
+    expect(rest).toEqual([]);
+    expect(line).toContain('DIALOGUE and SIREN');
+    expect(line).toContain('20s of audio files');
+    expect(line).toContain('15s combined limit');
+  });
+
+  it('allows two audio files whose sum is inside the combined budget', () => {
+    expect(
+      unusableShotReferenceLines(
+        'minimax_h3_max',
+        [still, audio('DIALOGUE', 7), audio('SIREN', 6)],
+        { hasStartFrame: true, prompt: null, onArk: true }
+      )
+    ).toEqual([]);
+  });
+
+  it('checks reference clips the same way', () => {
+    const clip = (token: string, durationSeconds: number) => ({
+      token,
+      kind: 'video' as const,
+      durationSeconds,
+      referenceImageUrl: `https://example.test/${token}.mp4`,
+    });
+    const [line] = unusableShotReferenceLines(
+      'minimax_h3_max',
+      [still, clip('DOLLY', 9), clip('CRANE', 9)],
+      { hasStartFrame: true, prompt: null, onArk: true }
+    );
+    expect(line).toContain('18s of clips');
+    expect(line).toContain('15s combined limit');
+  });
+
+  it('never double-reports a file already refused on its own length', () => {
+    // A 20s voice busts the per-file limit; it is named once, and does not
+    // count toward the sum it would never be sent as part of.
+    const lines = unusableShotReferenceLines(
+      'minimax_h3_max',
+      [still, audio('DIALOGUE', 20), audio('SIREN', 6)],
+      { hasStartFrame: true, prompt: null, onArk: true }
+    );
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('over its 15s limit');
+  });
+
+  it('says nothing about a lone file — that is the per-file question', () => {
+    expect(
+      unusableShotReferenceLines(
+        'minimax_h3_max',
+        [still, audio('DIALOGUE', 14.8)],
+        { hasStartFrame: true, prompt: null, onArk: true }
+      )
+    ).toEqual([]);
+  });
+
+  it('counts an unmeasured file as zero rather than guessing it over', () => {
+    expect(
+      unusableShotReferenceLines(
+        'minimax_h3_max',
+        [
+          still,
+          audio('DIALOGUE', 14),
+          { ...audio('SIREN', 0), durationSeconds: null },
+        ],
+        { hasStartFrame: true, prompt: null, onArk: true }
+      )
+    ).toEqual([]);
+  });
+
+  it('refuses a dialogue take at submit rather than sending it to the provider', () => {
+    // The acceptance case: an oversized generated take never reaches MiniMax.
+    expect(() =>
+      assertReferencesUsable(
+        'minimax_h3_max',
+        [
+          still,
+          {
+            token: DIALOGUE_CLIP_TOKEN,
+            kind: 'audio',
+            durationSeconds: 16.2,
+            referenceImageUrl: 'https://example.test/dialogue.wav',
+          },
+        ],
+        { hasStartFrame: true, prompt: null, onArk: true }
+      )
+    ).toThrow(/16\.2s, over its 15s limit/);
+  });
+});

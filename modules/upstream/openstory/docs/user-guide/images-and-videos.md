@@ -1,0 +1,52 @@
+---
+title: Images and Clips
+description: Generate a single still or clip from a prompt, without a sequence
+section: User Guide
+order: 13
+---
+
+**Images** and **Clips** are for one-off stills and clips. You type a prompt, pick the same models used in sequences, and the results land in a library you can sort and favorite.
+
+They are not a sequence: there is no script, scene list, or Theatre cut. Use **Sequences** when you want a full film.
+
+## Open a library
+
+- **Images** in the sidebar, or `/images`
+- **Clips** in the sidebar, or `/clips`
+
+The gallery is the library. The prompt bar stays at the bottom so you can generate without losing the grid.
+
+## Generate an image
+
+1. Open **Images**
+2. Write a prompt, or click **Shuffle** for a sample still
+3. On models with an edit endpoint (Flux 2, Nano Banana, GPT Image, Grok Imagine, Seedream…) attach reference stills with the dashed tile — they become `@Image1`… in the prompt
+4. Open the settings chip to pick an image model, aspect ratio, and count (1, 2, or 4)
+5. Press the arrow (or Ctrl/Cmd+Enter)
+
+Each still is stored as its own item. Sign in first — generate is gated behind login, same as sequences.
+
+## Generate a clip
+
+1. Open **Clips**
+2. Pick a mode from the dropdown on the left (**Reference to video** is the default):
+   - **Text to video** — prompt only
+   - **Reference to video** — attach stills (Seedance 9 + 3 clips + 3 audio, Grok Imagine 7, Kling 4). Each becomes `@Image1`… / `@Video1`… / `@Audio1`… Type `@` in the prompt to point at one, or at anything in your library — a cast headshot, a location, a generation — and it is attached for you.
+   - **Image to video** — a start frame, plus an optional end frame on models that take one (Kling, Seedance)
+3. Add references with the dashed tile. The picker lists your **Generations** (stills and clips), **Uploads**, **Sequences** — open one to pick its shots, elements, cast, or locations — **Characters**, **Locations**, and **Audio**, or **Draw** a sketch. Or drag images onto the prompt bar.
+4. Write the prompt, **Shuffle** a sample, or **Draft prompt** — which looks at what you attached and writes a prompt that uses the tokens. Open the settings chip for model, aspect ratio, every duration the model accepts, and native audio.
+5. Press the arrow
+
+The library card plays the clip.
+
+**Draft first (Seedance 2.5, on by default).** Turn **Draft first** off in the settings chip to render at full quality straight away. A draft tile carries a **Draft** pill with the days left; when it looks right, press **Render final** on its card: the 1080p final is rendered from the draft itself — same seed, prompt and references — so what you approved is what you get. A draft can be rendered as a final for seven days.
+
+## Paste a scene's request
+
+Open a scene's **Optimised prompt** panel in a sequence, switch to **JSON**, copy, and paste into the Clips prompt bar. The composer rebuilds the references (stills, clips, audio, or start/end frame) and the prompt instead of pasting JSON.
+
+## Sort and keep
+
+- **Newest** and **Oldest** change recency order
+- **Favorites** pins items you star on a card
+- Open a card to see it full-size. Beside the clip: the prompt as readable text (line breaks instead of `\n` and other backslash escapes), the reference stills, clips, and audio that were attached, and the model settings. **Copy** takes the prompt. **Use again** loads that prompt, those references, and those settings back into the prompt bar. **Download** saves the file. The trash icon deletes it.

@@ -1,0 +1,378 @@
+import { ColorPicker, layerColorPresetRows, toSixDigitHex } from './gui-color-picker';
+import { El } from './gui-el';
+import { parseOpacityValue } from './gui-style-values';
+
+// The parts the style panels are built from. They were the label panel's, and
+// three panels drawing the same control three ways is how they came to look
+// like three programs: a colour was a swatch inside a field in one and a
+// button beside a box in the others, and a size was a field with a stepper in
+// one and a value between a − and a + in the others.
+//
+// The look is in page.css, keyed on .label-style-panel, which every style
+// panel carries.
+
+// A section of a panel: a heading and the rows under it. Whitespace and the
+// heading separate one from the next -- a rule as well would be a third
+// answer to a question already settled twice.
+//
+// opts.minor: a heading in the smaller grey of a row caption rather than the
+// bold of a section name, for a section that is a single control.
+export function makePanelSection(parent, title, opts) {
+  var section = El('div').addClass('label-style-section').appendTo(parent);
+  // The heading's type is on the name rather than on the row, because the row
+  // also holds things that are not headings -- a switch, or a caption over a
+  // column of the row below.
+  var row = El('div').addClass('label-style-section-title')
+    .classed('label-style-section-minor', !!(opts && opts.minor))
+    .appendTo(section);
+  El('span').addClass('label-style-section-name').appendTo(row).text(title);
+  return section;
+}
+
+// A section that opens and closes from its heading, so that a long panel can
+// be cut down to the sections in use. Open or closed is the panel's state and
+// not the data's: closing a section changes no style, and selecting other
+// features never opens or closes one.
+//
+// A section for a style a feature can have or not -- a halo, an icon, a
+// pattern -- also says in its heading whether the features being styled have
+// it, which a closed section would otherwise hide: a dot for all of them, a
+// half-filled one for some, nothing for none. Its × takes the style off; the
+// controls in the section are how it is put on.
+//
+// opts.open           start open (default closed)
+// opts.onToggle(open) the section was opened or closed from its heading
+// opts.onRemove()     give the heading a × that removes the style, shown
+//                     while setPresence() says the style is there
+// opts.removeTitle    the ×'s accessible name
+//
+// Returns {section, setOpen(open), isOpen(), setPresence(state)}, where state
+// is 'on', 'off' or 'mixed'.
+export function makeCollapsibleSection(parent, title, opts) {
+  var o = opts || {};
+  var section = makePanelSection(parent, title);
+  var row = section.findChild('.label-style-section-title')
+    .addClass('label-section-heading')
+    .attr('role', 'button');
+  var open = !!o.open;
+  var arrow = El('span').addClass('label-section-arrow').attr('aria-hidden', 'true');
+  var marker, removeBtn;
+  row.node().insertBefore(arrow.node(), row.node().firstChild);
+  marker = El('span').addClass('label-section-marker').attr('role', 'img').appendTo(row);
+  if (o.onRemove) {
+    removeBtn = El('div').addClass('label-section-remove').attr('role', 'button')
+      .attr('aria-label', o.removeTitle || 'Remove')
+      .appendTo(row).html('&times;')
+      .on('click', function(e) {
+        // the heading's own click would open or close the section
+        e.stopPropagation();
+        o.onRemove();
+      });
+  }
+  row.on('click', function() {
+    setOpen(!open);
+    if (o.onToggle) o.onToggle(open);
+  });
+  setOpen(open);
+  setPresence('off');
+
+  function setOpen(val) {
+    open = !!val;
+    section.classed('collapsed', !open);
+    row.attr('aria-expanded', open ? 'true' : 'false');
+  }
+
+  function setPresence(state) {
+    var s = state == 'on' || state == 'mixed' ? state : 'off';
+    marker.classed('on', s == 'on').classed('mixed', s == 'mixed')
+      .attr('aria-label', s == 'on' ? 'Applied' :
+        s == 'mixed' ? 'Applied to some of the selection' : 'Not applied');
+    if (removeBtn) removeBtn.classed('hidden', s == 'off');
+  }
+
+  return {
+    section: section,
+    setOpen: setOpen,
+    isOpen: function() { return open; },
+    setPresence: setPresence
+  };
+}
+
+// A switch: a track with a knob that sits left when off and right when on,
+// which is the direction users expect and the only thing that says which
+// state is which without a label for each. A third state says that the
+// features it is asking about disagree -- the knob sits over the join of a
+// half-and-half track, which is the only control that has to show "some of
+// them" rather than a value.
+//
+// role=checkbox rather than switch, which is what it looks like: 'mixed' is a
+// legal aria-checked value for a checkbox and not for a switch, and a switch
+// reporting a mixed selection as unchecked would be telling a screen reader
+// the one thing the third state exists to avoid saying.
+//
+// opts.onChange(on)  the switch was clicked
+// opts.title          the switch's accessible name (not a tooltip)
+// opts.className
+export function makePanelToggle(parent, opts) {
+  var track = El('div').addClass('label-toggle').attr('role', 'checkbox').appendTo(parent);
+  var state = 'off';
+  if (opts.className) track.addClass(opts.className);
+  var disabled = false;
+  El('div').addClass('label-toggle-knob').appendTo(track);
+  if (opts.title) track.attr('aria-label', opts.title);
+  // A click on a mixed switch turns everything on. It is the convention, and
+  // it is the reading that reaches a state the switch can describe: the next
+  // click then turns everything off, so both are one click away.
+  track.on('click', function() {
+    if (disabled) return;
+    opts.onChange(state != 'on');
+  });
+  return {
+    // val: 'on', 'off' or 'mixed'; anything else reads as off
+    setState: function(val) {
+      state = val == 'on' || val == 'mixed' ? val : 'off';
+      track.classed('on', state == 'on')
+        .classed('mixed', state == 'mixed')
+        .attr('aria-checked', state == 'mixed' ? 'mixed' :
+          state == 'on' ? 'true' : 'false');
+    },
+    setDisabled: function(off) {
+      disabled = !!off;
+      track.classed('disabled', disabled)
+        .attr('aria-disabled', disabled ? 'true' : 'false');
+    }
+  };
+}
+
+// Deliberately not focusable: the GUI is pointer-only, so a tab stop here
+// would lead into a control the keyboard cannot then operate. See the focus
+// note in page.css.
+export function makePanelButton(parent, label, action) {
+  return El('div')
+    .addClass('label-panel-btn')
+    .attr('role', 'button')
+    .appendTo(parent)
+    .text(label)
+    .on('click', function(e) {
+      if (this.classList.contains('disabled')) return;
+      action(e);
+    });
+}
+
+// A button with a word on it rather than a glyph: Clear style, Random fill,
+// Create. Shaped like the panel's fields rather than like its 19px icon
+// buttons, because what it does is named rather than drawn, and it is as wide
+// as the name.
+export function makePanelActionButton(parent, label, action) {
+  var btn = El('div')
+    .addClass('label-panel-action-btn')
+    .attr('role', 'button')
+    .appendTo(parent)
+    .on('click', function(e) {
+      if (this.classList.contains('disabled')) return;
+      action(e);
+    });
+  El('span').appendTo(btn).text(label);
+  return btn;
+}
+
+// The "?" the rest of the app uses for field help (see .tip-button in
+// elements.css and the static ones in index.html). The bubble is white-space:
+// pre, so the line breaks in the text are the ones it gets.
+export function makeFieldTip(parent, text) {
+  var btn = El('div').addClass('tip-button').appendTo(parent).text('?');
+  var anchor = El('div').addClass('tip-anchor').appendTo(btn);
+  var tip = El('div').addClass('tip').appendTo(anchor).text(text);
+  btn.on('mouseenter', function() {
+    fitTipToPage(tip.node());
+  });
+  return btn;
+}
+
+// A tip is centred on its "?", so one near the edge of the page -- the style
+// panels sit at the right of the map -- would run off it. This slides the
+// bubble back onto the page and its tail the other way, so that the tail
+// still points at the "?" (see .tip in elements.css).
+export function fitTipToPage(el) {
+  var margin = 8;
+  var pageWidth = document.documentElement.clientWidth;
+  var rect, shift, maxShift;
+  el.style.transform = '';
+  el.style.removeProperty('--tip-tail-shift');
+  rect = el.getBoundingClientRect();
+  shift = 0;
+  if (rect.right > pageWidth - margin) {
+    shift = pageWidth - margin - rect.right;
+  }
+  if (rect.left + shift < margin) {
+    shift = margin - rect.left;
+  }
+  // keep the tail on the bubble, clear of its rounded corners
+  maxShift = Math.max(rect.width / 2 - 16, 0);
+  shift = Math.max(-maxShift, Math.min(maxShift, shift));
+  if (shift !== 0) {
+    el.style.transform = 'translateX(' + shift + 'px)';
+    el.style.setProperty('--tip-tail-shift', -shift + 'px');
+  }
+}
+
+export function setPanelButtonDisabled(el, disabled) {
+  el.classed('disabled', !!disabled)
+    .attr('aria-disabled', disabled ? 'true' : 'false');
+}
+
+// A colour swatch and its hex value inside one border, so that the pair reads
+// as one field rather than as a button beside a text box.
+export function makeColorField(parent, chit, input) {
+  var box = El('div').addClass('label-color-field').appendTo(parent);
+  chit.appendTo(box);
+  input.addClass('label-color-input').appendTo(box);
+  return box;
+}
+
+// A colour field with its opacity at the right-hand end, behind a divider:
+// opacity qualifies the colour, and one border says so where two fields side
+// by side said they were separate settings. It also leaves the narrow column
+// of the row free for a field that needs it. The opacity has no caption; its
+// percent sign says what it is.
+//
+// Returns the field's box; the opacity input is made by makeOpacityInput().
+export function makeColorOpacityField(parent, chit, input, opacityOpts) {
+  var box = makeColorField(parent, chit, input).addClass('label-color-opacity-field');
+  var opacity = makeOpacityInput(box, opacityOpts);
+  return {box: box, opacity: opacity};
+}
+
+// A colour and its opacity in one field, captioned, in the wide column of a
+// split row. Fill and Stroke are each one of these.
+//
+// opts.label            the caption over the field
+// opts.onColor(hex)     a colour was typed, picked or previewed to a finish;
+//                       '' when the field was emptied, which unsets a colour
+//                       that can be unset and restores the default of one
+//                       that cannot
+// opts.onOpacity(frac)  a usable percentage was typed
+// opts.revert()         one that was not, so put the row back as it was
+// opts.ariaLabel        the field's accessible name, if "<label> color" isn't one
+// opts.noOpacity        a colour with no opacity of its own, like a pattern's,
+//                       which fill-opacity fades along with its background
+//
+// control.aside is the row's narrow column, empty, for a field that belongs
+// beside the colour -- a stroke's width, say.
+export function makeColorRow(parent, opts) {
+  var row = El('div').addClass('label-style-row label-split-row').appendTo(parent);
+  var colorCell = El('div').addClass('label-split-cell label-color-row').appendTo(row);
+  var aside = El('div').addClass('label-split-cell').appendTo(row);
+  var control = {row: row, aside: aside, chit: null, input: null, opacity: null, picker: null};
+
+  // A color from the data can be any CSS color -- short hex, or a name, from
+  // the command line -- and the swatch shows it, though only hex can be
+  // opened in the picker.
+  control.setColor = function(color) {
+    control.input.node().value = color || '';
+    control.chit.css('background-color', getSwatchColor(color));
+  };
+
+  // What a panel calls when it refreshes from the data: the picker has to start
+  // from the colour that is set, not from wherever it was left. A picker that
+  // has never been opened is still on its default, so without this it opens on
+  // black rather than on the colour beside it. Kept apart from setColor(),
+  // which is also the picker's own preview callback and must not feed back into
+  // it mid-drag. A field with no hex color opens the picker with nothing
+  // picked, so that closing it leaves the field as it was.
+  control.showColor = function(color) {
+    // the picker previews what it is set to, so it goes first, and the field
+    // then shows the color as the data has it ("#334", not "#333344")
+    showInPicker(color);
+    control.setColor(color);
+  };
+
+  function showInPicker(color) {
+    var hex = toSixDigitHex(color);
+    if (hex) control.picker.setColor(hex);
+    else control.picker.clearColor();
+  }
+
+  El('span').appendTo(colorCell).text(opts.label);
+  control.chit = El('div').addClass('label-color-chit').attr('role', 'button')
+    .on('click', function() {
+      control.picker.toggle();
+    });
+  control.input = El('input').attr('type', 'text')
+    .attr('aria-label', opts.ariaLabel || opts.label + ' color')
+    .on('change', function() {
+      var color = control.input.node().value.trim();
+      showInPicker(color);
+      opts.onColor(color);
+    });
+  if (opts.noOpacity) {
+    makeColorField(colorCell, control.chit, control.input);
+  } else {
+    control.opacity = makeColorOpacityField(colorCell, control.chit, control.input, {
+      onSet: opts.onOpacity,
+      revert: opts.revert
+    }).opacity;
+  }
+  control.picker = new ColorPicker(colorCell, {
+    presetRows: layerColorPresetRows,
+    opacityInput: control.opacity,
+    // A drag in the picker shows on the map's own terms -- the swatch and the
+    // hex value -- and only the colour the drag ends on is applied.
+    onPreview: control.setColor,
+    onChange: function(hex) {
+      control.setColor(hex);
+      opts.onColor(hex);
+    }
+  });
+  return control;
+}
+
+// What a swatch shows for @color: the color itself if the browser takes it
+// as one, otherwise nothing
+function getSwatchColor(color) {
+  var hex = toSixDigitHex(color);
+  if (hex) return hex;
+  if (color && typeof CSS != 'undefined' && CSS.supports && CSS.supports('color', color)) {
+    return color;
+  }
+  return 'transparent';
+}
+
+// Opacity is shown as a percentage and stored as a fraction. It is a plain
+// field rather than a swatch or a slider: a swatch beside a colour reads as a
+// second colour, and a slider gives up the exact value for a drag that a
+// zoomable map makes risky.
+//
+// opts.onSet(fraction) a usable percentage was typed
+// opts.revert()        it was not, so put back what the field was showing
+export function makeOpacityInput(parent, opts) {
+  var input = El('input').attr('type', 'text').addClass('label-opacity-input')
+    .attr('aria-label', 'Opacity, 0-100%')
+    .appendTo(parent)
+    .on('change', function() {
+      var val = parseOpacityValue(input.node().value);
+      if (val === null) {
+        if (opts.revert) opts.revert();
+        return;
+      }
+      opts.onSet(val);
+    });
+  selectOnFocus(input);
+  return input;
+}
+
+// For a field that always holds a value -- a panel shows a default rather
+// than a blank -- so a click selects it, and what is typed replaces it rather
+// than being added to it: 3 into 0 is 3, not 03. The mouseup that ends the
+// click would otherwise drop the selection for a caret.
+export function selectOnFocus(input) {
+  var focusing = false;
+  input.on('focus', function() {
+    input.node().select();
+    focusing = true;
+  });
+  input.on('mouseup', function(e) {
+    if (focusing) e.preventDefault();
+    focusing = false;
+  });
+}

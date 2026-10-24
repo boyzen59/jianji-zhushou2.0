@@ -1,0 +1,2043 @@
+{
+  "source": "https://github.com/Vincentwei1021/video-talkcraft",
+  "commit": "a7c29edfb2404612dde6a5a1c8aa94232e85625b",
+  "license": "PolyForm Noncommercial 1.0.0; commercial use requires author permission",
+  "indexed_on": "2026-10-24",
+  "cards": [
+    {
+      "id": "keyword-pop-highlight",
+      "name": "关键词弹出强调",
+      "category": "字幕花字",
+      "energy": "高",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "数据",
+        "强调"
+      ],
+      "purpose": "关键词弹出强调",
+      "card_path": "references/cards/keyword-pop-highlight.md",
+      "code_path": "template/cards/keyword-pop-highlight.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/keyword-pop-highlight.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "typewriter-reveal",
+      "name": "打字机档案戳",
+      "category": "字幕花字",
+      "energy": "低",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "时间地点"
+      ],
+      "purpose": "打字机档案戳",
+      "card_path": "references/cards/typewriter-reveal.md",
+      "code_path": "template/cards/typewriter-reveal.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/typewriter-reveal.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "quote-card",
+      "name": "金句大字卡",
+      "category": "字幕花字",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "金句",
+        "结尾"
+      ],
+      "purpose": "金句大字卡",
+      "card_path": "references/cards/quote-card.md",
+      "code_path": "template/cards/quote-card.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/quote-card.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "soft-blur-in",
+      "name": "柔焦淡入",
+      "category": "字幕花字",
+      "energy": "低",
+      "inputs": [
+        "文"
+      ],
+      "semantics": [
+        "论点"
+      ],
+      "purpose": "柔焦淡入",
+      "card_path": "references/cards/soft-blur-in.md",
+      "code_path": "template/cards/soft-blur-in.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/soft-blur-in.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "per-character-rise",
+      "name": "逐字升起",
+      "category": "字幕花字",
+      "energy": "中",
+      "inputs": [
+        "文"
+      ],
+      "semantics": [
+        "论点",
+        "金句"
+      ],
+      "purpose": "逐字升起",
+      "card_path": "references/cards/per-character-rise.md",
+      "code_path": "template/cards/per-character-rise.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/per-character-rise.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "line-by-line-slide",
+      "name": "逐行滑入",
+      "category": "字幕花字",
+      "energy": "中",
+      "inputs": [
+        "文"
+      ],
+      "semantics": [
+        "列举",
+        "步骤"
+      ],
+      "purpose": "逐行滑入",
+      "card_path": "references/cards/line-by-line-slide.md",
+      "code_path": "template/cards/line-by-line-slide.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/line-by-line-slide.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "tracking-in",
+      "name": "字距收拢",
+      "category": "字幕花字",
+      "energy": "中",
+      "inputs": [
+        "文"
+      ],
+      "semantics": [
+        "金句",
+        "标题"
+      ],
+      "purpose": "字距收拢",
+      "card_path": "references/cards/tracking-in.md",
+      "code_path": "template/cards/tracking-in.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/tracking-in.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "slab-punch-title",
+      "name": "重点放大",
+      "category": "字幕花字",
+      "energy": "高",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "转折",
+        "标题"
+      ],
+      "purpose": "重点放大",
+      "card_path": "references/cards/slab-punch-title.md",
+      "code_path": "template/cards/slab-punch-title.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/slab-punch-title.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "speed-slab-title",
+      "name": "速度块标题",
+      "category": "字幕花字",
+      "energy": "高",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "钩子",
+        "标题"
+      ],
+      "purpose": "速度块标题",
+      "card_path": "references/cards/speed-slab-title.md",
+      "code_path": "template/cards/speed-slab-title.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/speed-slab-title.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "impact-open-title",
+      "name": "冲击开场",
+      "category": "字幕花字",
+      "energy": "高",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "钩子",
+        "标题",
+        "章节"
+      ],
+      "purpose": "冲击开场",
+      "card_path": "references/cards/impact-open-title.md",
+      "code_path": "template/cards/impact-open-title.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/impact-open-title.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "alt-block-lines",
+      "name": "双色块对句",
+      "category": "字幕花字",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "论点",
+        "对比",
+        "列举"
+      ],
+      "purpose": "双色块对句",
+      "card_path": "references/cards/alt-block-lines.md",
+      "code_path": "template/cards/alt-block-lines.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/alt-block-lines.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "outline-box-title",
+      "name": "描边框标题",
+      "category": "字幕花字",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "定义",
+        "标题"
+      ],
+      "purpose": "描边框标题",
+      "card_path": "references/cards/outline-box-title.md",
+      "code_path": "template/cards/outline-box-title.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/outline-box-title.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "count-badge-title",
+      "name": "数字重音标题",
+      "category": "字幕花字",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "钩子",
+        "数据",
+        "列举",
+        "标题"
+      ],
+      "purpose": "数字重音标题",
+      "card_path": "references/cards/count-badge-title.md",
+      "code_path": "template/cards/count-badge-title.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/count-badge-title.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "quote-bracket-pull",
+      "name": "引号夹句",
+      "category": "字幕花字",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "金句",
+        "引用"
+      ],
+      "purpose": "引号夹句",
+      "card_path": "references/cards/quote-bracket-pull.md",
+      "code_path": "template/cards/quote-bracket-pull.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/quote-bracket-pull.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "highlighter-sweep",
+      "name": "荧光笔高亮扫过",
+      "category": "强调标注",
+      "energy": "低",
+      "inputs": [
+        "文"
+      ],
+      "semantics": [
+        "引用",
+        "强调"
+      ],
+      "purpose": "荧光笔高亮扫过",
+      "card_path": "references/cards/highlighter-sweep.md",
+      "code_path": "template/cards/highlighter-sweep.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/highlighter-sweep.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "scribble-annotation",
+      "name": "手绘圈注箭头",
+      "category": "强调标注",
+      "energy": "中",
+      "inputs": [
+        "图 + 截图"
+      ],
+      "semantics": [
+        "强调"
+      ],
+      "purpose": "手绘圈注箭头",
+      "card_path": "references/cards/scribble-annotation.md",
+      "code_path": "template/cards/scribble-annotation.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/scribble-annotation.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "magnifier-detail",
+      "name": "局部放大镜",
+      "category": "强调标注",
+      "energy": "中",
+      "inputs": [
+        "图 + 截图"
+      ],
+      "semantics": [
+        "强调"
+      ],
+      "purpose": "局部放大镜",
+      "card_path": "references/cards/magnifier-detail.md",
+      "code_path": "template/cards/magnifier-detail.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/magnifier-detail.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "callout-line-label",
+      "name": "标注引出线",
+      "category": "强调标注",
+      "energy": "中",
+      "inputs": [
+        "图 + 文"
+      ],
+      "semantics": [
+        "强调"
+      ],
+      "purpose": "标注引出线",
+      "card_path": "references/cards/callout-line-label.md",
+      "code_path": "template/cards/callout-line-label.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/callout-line-label.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "strike-and-replace",
+      "name": "划线纠错替换",
+      "category": "强调标注",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "转折"
+      ],
+      "purpose": "划线纠错替换",
+      "card_path": "references/cards/strike-and-replace.md",
+      "code_path": "template/cards/strike-and-replace.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/strike-and-replace.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "ink-underline",
+      "name": "墨迹下划线",
+      "category": "强调标注",
+      "energy": "低",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "对比",
+        "强调"
+      ],
+      "purpose": "墨迹下划线",
+      "card_path": "references/cards/ink-underline.md",
+      "code_path": "template/cards/ink-underline.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/ink-underline.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "hand-drawn-ellipse",
+      "name": "手绘圈重点",
+      "category": "强调标注",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "强调"
+      ],
+      "purpose": "手绘圈重点",
+      "card_path": "references/cards/hand-drawn-ellipse.md",
+      "code_path": "template/cards/hand-drawn-ellipse.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/hand-drawn-ellipse.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "converging-arrows",
+      "name": "双箭头聚焦",
+      "category": "强调标注",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "强调"
+      ],
+      "purpose": "双箭头聚焦",
+      "card_path": "references/cards/converging-arrows.md",
+      "code_path": "template/cards/converging-arrows.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/converging-arrows.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "corner-bracket-frame",
+      "name": "对角角框",
+      "category": "强调标注",
+      "energy": "低",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "标题"
+      ],
+      "purpose": "对角角框",
+      "card_path": "references/cards/corner-bracket-frame.md",
+      "code_path": "template/cards/corner-bracket-frame.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/corner-bracket-frame.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "quote-hold-arrow",
+      "name": "金句停留",
+      "category": "强调标注",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "转折",
+        "金句"
+      ],
+      "purpose": "金句停留",
+      "card_path": "references/cards/quote-hold-arrow.md",
+      "code_path": "template/cards/quote-hold-arrow.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/quote-hold-arrow.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "number-counter",
+      "name": "数字滚动计数",
+      "category": "数据信息图",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "数据"
+      ],
+      "purpose": "数字滚动计数",
+      "card_path": "references/cards/number-counter.md",
+      "code_path": "template/cards/number-counter.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/number-counter.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "chart-grow",
+      "name": "图表生长",
+      "category": "数据信息图",
+      "energy": "中",
+      "inputs": [
+        "文"
+      ],
+      "semantics": [
+        "数据",
+        "对比"
+      ],
+      "purpose": "图表生长",
+      "card_path": "references/cards/chart-grow.md",
+      "code_path": "template/cards/chart-grow.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/chart-grow.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "info-term-card",
+      "name": "名词解释悬浮卡",
+      "category": "数据信息图",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "定义"
+      ],
+      "purpose": "名词解释悬浮卡",
+      "card_path": "references/cards/info-term-card.md",
+      "code_path": "template/cards/info-term-card.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/info-term-card.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "map-route-pin",
+      "name": "地图路线图钉",
+      "category": "数据信息图",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "步骤",
+        "时间地点",
+        "空间叙事"
+      ],
+      "purpose": "地图路线图钉",
+      "card_path": "references/cards/map-route-pin.md",
+      "code_path": "template/cards/map-route-pin.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/map-route-pin.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "step-timeline-vertical",
+      "name": "竖向步骤线",
+      "category": "数据信息图",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "步骤"
+      ],
+      "purpose": "竖向步骤线",
+      "card_path": "references/cards/step-timeline-vertical.md",
+      "code_path": "template/cards/step-timeline-vertical.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/step-timeline-vertical.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "numbered-step-stack",
+      "name": "编号步骤堆入",
+      "category": "数据信息图",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "列举",
+        "步骤"
+      ],
+      "purpose": "编号步骤堆入",
+      "card_path": "references/cards/numbered-step-stack.md",
+      "code_path": "template/cards/numbered-step-stack.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/numbered-step-stack.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "metric-with-sparkline",
+      "name": "数字带趋势",
+      "category": "数据信息图",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "数据"
+      ],
+      "purpose": "数字带趋势",
+      "card_path": "references/cards/metric-with-sparkline.md",
+      "code_path": "template/cards/metric-with-sparkline.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/metric-with-sparkline.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "bar-chart-growth",
+      "name": "柱状增长",
+      "category": "数据信息图",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "数据"
+      ],
+      "purpose": "柱状增长",
+      "card_path": "references/cards/bar-chart-growth.md",
+      "code_path": "template/cards/bar-chart-growth.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/bar-chart-growth.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "number-slab-pop",
+      "name": "数字弹出",
+      "category": "数据信息图",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "钩子",
+        "数据"
+      ],
+      "purpose": "数字弹出",
+      "card_path": "references/cards/number-slab-pop.md",
+      "code_path": "template/cards/number-slab-pop.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/number-slab-pop.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "media-pop-in",
+      "name": "素材弹入堆叠",
+      "category": "素材呈现",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 图 + 截图"
+      ],
+      "semantics": [
+        "例证",
+        "列举"
+      ],
+      "purpose": "素材弹入堆叠",
+      "card_path": "references/cards/media-pop-in.md",
+      "code_path": "template/cards/media-pop-in.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/media-pop-in.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "news-card-desk",
+      "name": "新闻卡片划重点",
+      "category": "素材呈现",
+      "energy": "中",
+      "inputs": [
+        "图 + 截图"
+      ],
+      "semantics": [
+        "例证",
+        "引用"
+      ],
+      "purpose": "新闻卡片划重点",
+      "card_path": "references/cards/news-card-desk.md",
+      "code_path": "template/cards/news-card-desk.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/news-card-desk.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "terminal-typing-log",
+      "name": "终端逐行推进",
+      "category": "素材呈现",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 界"
+      ],
+      "semantics": [
+        "例证",
+        "过程演示"
+      ],
+      "purpose": "终端逐行推进",
+      "card_path": "references/cards/terminal-typing-log.md",
+      "code_path": "template/cards/terminal-typing-log.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/terminal-typing-log.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "chat-message-flow",
+      "name": "聊天记录自演",
+      "category": "素材呈现",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 界"
+      ],
+      "semantics": [
+        "例证",
+        "引用",
+        "过程演示"
+      ],
+      "purpose": "聊天记录自演",
+      "card_path": "references/cards/chat-message-flow.md",
+      "code_path": "template/cards/chat-message-flow.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/chat-message-flow.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "logo-enter",
+      "name": "Logo 登场",
+      "category": "素材呈现",
+      "energy": "中",
+      "inputs": [
+        "图 + 文"
+      ],
+      "semantics": [
+        "自我介绍",
+        "结尾"
+      ],
+      "purpose": "Logo 登场",
+      "card_path": "references/cards/logo-enter.md",
+      "code_path": "template/cards/logo-enter.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/logo-enter.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "chat-gpt",
+      "name": "ChatGPT 对话框",
+      "category": "素材呈现",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 界"
+      ],
+      "semantics": [
+        "例证",
+        "过程演示"
+      ],
+      "purpose": "ChatGPT 对话框",
+      "card_path": "references/cards/chat-gpt.md",
+      "code_path": "template/cards/chat-gpt.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/chat-gpt.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "claude-code",
+      "name": "编码智能体终端",
+      "category": "素材呈现",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 界"
+      ],
+      "semantics": [
+        "例证",
+        "过程演示"
+      ],
+      "purpose": "编码智能体终端",
+      "card_path": "references/cards/claude-code.md",
+      "code_path": "template/cards/claude-code.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/claude-code.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "glass-code-walk",
+      "name": "玻璃代码走读",
+      "category": "素材呈现",
+      "energy": "中",
+      "inputs": [
+        "界"
+      ],
+      "semantics": [
+        "例证",
+        "强调"
+      ],
+      "purpose": "玻璃代码走读",
+      "card_path": "references/cards/glass-code-walk.md",
+      "code_path": "template/cards/glass-code-walk.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/glass-code-walk.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "gooey-morph",
+      "name": "图块拼入",
+      "category": "素材呈现",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 图"
+      ],
+      "semantics": [
+        "例证"
+      ],
+      "purpose": "图块拼入",
+      "card_path": "references/cards/gooey-morph.md",
+      "code_path": "template/cards/gooey-morph.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/gooey-morph.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "ui-flow-theater",
+      "name": "界面流程剧场",
+      "category": "素材呈现",
+      "energy": "中",
+      "inputs": [
+        "界"
+      ],
+      "semantics": [
+        "步骤",
+        "过程演示"
+      ],
+      "purpose": "界面流程剧场",
+      "card_path": "references/cards/ui-flow-theater.md",
+      "code_path": "template/cards/ui-flow-theater.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/ui-flow-theater.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "chapter-title-card",
+      "name": "章节标题卡",
+      "category": "转场结构",
+      "energy": "高",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "章节",
+        "转场"
+      ],
+      "purpose": "章节标题卡",
+      "card_path": "references/cards/chapter-title-card.md",
+      "code_path": "template/cards/chapter-title-card.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/chapter-title-card.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "shape-wipe-transition",
+      "name": "色块扫屏转场",
+      "category": "转场结构",
+      "energy": "高",
+      "inputs": [
+        "人(可选) + 场"
+      ],
+      "semantics": [
+        "章节",
+        "转场"
+      ],
+      "purpose": "色块扫屏转场",
+      "card_path": "references/cards/shape-wipe-transition.md",
+      "code_path": "template/cards/shape-wipe-transition.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/shape-wipe-transition.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "caret-wipe-transition",
+      "name": "光标擦除转场",
+      "category": "转场结构",
+      "energy": "中",
+      "inputs": [
+        "场"
+      ],
+      "semantics": [
+        "转场"
+      ],
+      "purpose": "光标擦除转场",
+      "card_path": "references/cards/caret-wipe-transition.md",
+      "code_path": "template/cards/caret-wipe-transition.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/caret-wipe-transition.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "chapter-progress-list",
+      "name": "章节进度",
+      "category": "转场结构",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "章节"
+      ],
+      "purpose": "章节进度",
+      "card_path": "references/cards/chapter-progress-list.md",
+      "code_path": "template/cards/chapter-progress-list.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/chapter-progress-list.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "lower-third-nameplate",
+      "name": "人名条展示牌",
+      "category": "人物互动",
+      "energy": "低",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "引用",
+        "自我介绍",
+        "介绍他人"
+      ],
+      "purpose": "人名条展示牌",
+      "card_path": "references/cards/lower-third-nameplate.md",
+      "code_path": "template/cards/lower-third-nameplate.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/lower-third-nameplate.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "behind-text-title",
+      "name": "人后大字视差",
+      "category": "人物互动",
+      "energy": "中",
+      "inputs": [
+        "人(必需) + 文"
+      ],
+      "semantics": [
+        "钩子",
+        "标题"
+      ],
+      "purpose": "人后大字视差",
+      "card_path": "references/cards/behind-text-title.md",
+      "code_path": "template/cards/behind-text-title.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/behind-text-title.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "subscribe-cta",
+      "name": "多平台关注 CTA",
+      "category": "人物互动",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 界"
+      ],
+      "semantics": [
+        "号召"
+      ],
+      "purpose": "多平台关注 CTA",
+      "card_path": "references/cards/subscribe-cta.md",
+      "code_path": "template/cards/subscribe-cta.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/subscribe-cta.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "x-follow-card",
+      "name": "关注卡弹出",
+      "category": "人物互动",
+      "energy": "中",
+      "inputs": [
+        "界"
+      ],
+      "semantics": [
+        "引用",
+        "介绍他人"
+      ],
+      "purpose": "关注卡弹出",
+      "card_path": "references/cards/x-follow-card.md",
+      "code_path": "template/cards/x-follow-card.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/x-follow-card.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "douyin-follow-card",
+      "name": "抖音主页关注卡",
+      "category": "人物互动",
+      "energy": "中",
+      "inputs": [
+        "图 + 界"
+      ],
+      "semantics": [
+        "引用",
+        "介绍他人"
+      ],
+      "purpose": "抖音主页关注卡",
+      "card_path": "references/cards/douyin-follow-card.md",
+      "code_path": "template/cards/douyin-follow-card.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/douyin-follow-card.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "chevron-lower-third",
+      "name": "动态人名条",
+      "category": "人物互动",
+      "energy": "低",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "引用",
+        "自我介绍",
+        "介绍他人"
+      ],
+      "purpose": "动态人名条",
+      "card_path": "references/cards/chevron-lower-third.md",
+      "code_path": "template/cards/chevron-lower-third.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/chevron-lower-third.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "danmu-bubble-praise",
+      "name": "弹幕气泡",
+      "category": "人物互动",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "例证",
+        "引用"
+      ],
+      "purpose": "弹幕气泡",
+      "card_path": "references/cards/danmu-bubble-praise.md",
+      "code_path": "template/cards/danmu-bubble-praise.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/danmu-bubble-praise.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "slow-push-in",
+      "name": "缓推特写",
+      "category": "运镜",
+      "energy": "低",
+      "inputs": [
+        "图 + 截图"
+      ],
+      "semantics": [
+        "例证"
+      ],
+      "purpose": "缓推特写",
+      "card_path": "references/cards/slow-push-in.md",
+      "code_path": "template/cards/slow-push-in.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/slow-push-in.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "slow-pull-reveal",
+      "name": "缓拉全貌",
+      "category": "运镜",
+      "energy": "低",
+      "inputs": [
+        "图 + 截图"
+      ],
+      "semantics": [
+        "钩子"
+      ],
+      "purpose": "缓拉全貌",
+      "card_path": "references/cards/slow-pull-reveal.md",
+      "code_path": "template/cards/slow-pull-reveal.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/slow-pull-reveal.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "tilt-3d-page",
+      "name": "3D 立面展示",
+      "category": "运镜",
+      "energy": "中",
+      "inputs": [
+        "图 + 截图"
+      ],
+      "semantics": [
+        "例证",
+        "氛围"
+      ],
+      "purpose": "3D 立面展示",
+      "card_path": "references/cards/tilt-3d-page.md",
+      "code_path": "template/cards/tilt-3d-page.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/tilt-3d-page.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "sway-parallax",
+      "name": "左右摇移",
+      "category": "运镜",
+      "energy": "低",
+      "inputs": [
+        "图 + 截图"
+      ],
+      "semantics": [
+        "例证",
+        "氛围"
+      ],
+      "purpose": "左右摇移",
+      "card_path": "references/cards/sway-parallax.md",
+      "code_path": "template/cards/sway-parallax.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/sway-parallax.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "orbit-drift",
+      "name": "环绕微漂",
+      "category": "运镜",
+      "energy": "低",
+      "inputs": [
+        "图 + 截图"
+      ],
+      "semantics": [
+        "氛围"
+      ],
+      "purpose": "环绕微漂",
+      "card_path": "references/cards/orbit-drift.md",
+      "code_path": "template/cards/orbit-drift.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/orbit-drift.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "stage-keyframe-tour",
+      "name": "长页兴趣点巡游",
+      "category": "运镜",
+      "energy": "中",
+      "inputs": [
+        "图 + 截图"
+      ],
+      "semantics": [
+        "例证",
+        "空间叙事",
+        "强调"
+      ],
+      "purpose": "长页兴趣点巡游",
+      "card_path": "references/cards/stage-keyframe-tour.md",
+      "code_path": "template/cards/stage-keyframe-tour.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/stage-keyframe-tour.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "cursor-locked-zoom",
+      "name": "光标锁定跟拍",
+      "category": "运镜",
+      "energy": "中",
+      "inputs": [
+        "界"
+      ],
+      "semantics": [
+        "步骤",
+        "过程演示"
+      ],
+      "purpose": "光标锁定跟拍",
+      "card_path": "references/cards/cursor-locked-zoom.md",
+      "code_path": "template/cards/cursor-locked-zoom.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/cursor-locked-zoom.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "pip-zoom-box",
+      "name": "画中画放大",
+      "category": "运镜",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 图"
+      ],
+      "semantics": [
+        "强调"
+      ],
+      "purpose": "画中画放大",
+      "card_path": "references/cards/pip-zoom-box.md",
+      "code_path": "template/cards/pip-zoom-box.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/pip-zoom-box.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "pencil-sketch-draw",
+      "name": "铅笔手绘揭示",
+      "category": "素材呈现",
+      "energy": "中",
+      "inputs": [
+        "图"
+      ],
+      "semantics": [
+        "定义",
+        "步骤"
+      ],
+      "purpose": "铅笔手绘揭示",
+      "card_path": "references/cards/pencil-sketch-draw.md",
+      "code_path": "template/cards/pencil-sketch-draw.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/pencil-sketch-draw.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "push-through-transition",
+      "name": "推穿转场",
+      "category": "转场结构",
+      "energy": "中",
+      "inputs": [
+        "场"
+      ],
+      "semantics": [
+        "转场"
+      ],
+      "purpose": "推穿转场",
+      "card_path": "references/cards/push-through-transition.md",
+      "code_path": "template/cards/push-through-transition.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/push-through-transition.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "overexpose-flip-transition",
+      "name": "过曝翻页转场",
+      "category": "转场结构",
+      "energy": "高",
+      "inputs": [
+        "场"
+      ],
+      "semantics": [
+        "章节",
+        "转场"
+      ],
+      "purpose": "过曝翻页转场",
+      "card_path": "references/cards/overexpose-flip-transition.md",
+      "code_path": "template/cards/overexpose-flip-transition.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/overexpose-flip-transition.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "whip-pan-transition",
+      "name": "横甩转场",
+      "category": "转场结构",
+      "energy": "高",
+      "inputs": [
+        "场"
+      ],
+      "semantics": [
+        "转场"
+      ],
+      "purpose": "横甩转场",
+      "card_path": "references/cards/whip-pan-transition.md",
+      "code_path": "template/cards/whip-pan-transition.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/whip-pan-transition.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "black-slam-transition",
+      "name": "黑震切转场",
+      "category": "转场结构",
+      "energy": "高",
+      "inputs": [
+        "场"
+      ],
+      "semantics": [
+        "转折",
+        "转场"
+      ],
+      "purpose": "黑震切转场",
+      "card_path": "references/cards/black-slam-transition.md",
+      "code_path": "template/cards/black-slam-transition.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/black-slam-transition.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "pullback-cool-transition",
+      "name": "后拉冷却转场",
+      "category": "转场结构",
+      "energy": "低",
+      "inputs": [
+        "场"
+      ],
+      "semantics": [
+        "转场"
+      ],
+      "purpose": "后拉冷却转场",
+      "card_path": "references/cards/pullback-cool-transition.md",
+      "code_path": "template/cards/pullback-cool-transition.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/pullback-cool-transition.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "particle-weld-transition",
+      "name": "粒子溶接转场",
+      "category": "转场结构",
+      "energy": "中",
+      "inputs": [
+        "场"
+      ],
+      "semantics": [
+        "转场"
+      ],
+      "purpose": "粒子溶接转场",
+      "card_path": "references/cards/particle-weld-transition.md",
+      "code_path": "template/cards/particle-weld-transition.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/particle-weld-transition.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "long-take-world",
+      "name": "长镜头世界画布",
+      "category": "转场结构",
+      "energy": "中",
+      "inputs": [
+        "文"
+      ],
+      "semantics": [
+        "步骤",
+        "空间叙事",
+        "转场"
+      ],
+      "purpose": "长镜头世界画布",
+      "card_path": "references/cards/long-take-world.md",
+      "code_path": "template/cards/long-take-world.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/long-take-world.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "type-contrast-emphasis",
+      "name": "字体对比重音",
+      "category": "字幕花字",
+      "energy": "低",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "对比",
+        "转折",
+        "强调"
+      ],
+      "purpose": "字体对比重音",
+      "card_path": "references/cards/type-contrast-emphasis.md",
+      "code_path": "template/cards/type-contrast-emphasis.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/type-contrast-emphasis.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "focus-dim-spotlight",
+      "name": "聚焦压暗切换",
+      "category": "强调标注",
+      "energy": "低",
+      "inputs": [
+        "人(可选) + 截图"
+      ],
+      "semantics": [
+        "数据",
+        "强调"
+      ],
+      "purpose": "聚焦压暗切换",
+      "card_path": "references/cards/focus-dim-spotlight.md",
+      "code_path": "template/cards/focus-dim-spotlight.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/focus-dim-spotlight.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "line-chart-story-draw",
+      "name": "折线分段推演",
+      "category": "数据信息图",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 文"
+      ],
+      "semantics": [
+        "数据",
+        "对比"
+      ],
+      "purpose": "折线分段推演",
+      "card_path": "references/cards/line-chart-story-draw.md",
+      "code_path": "template/cards/line-chart-story-draw.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/line-chart-story-draw.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "ui-prop-theater",
+      "name": "界面道具剧场",
+      "category": "数据信息图",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 界"
+      ],
+      "semantics": [
+        "步骤",
+        "过程演示"
+      ],
+      "purpose": "界面道具剧场",
+      "card_path": "references/cards/ui-prop-theater.md",
+      "code_path": "template/cards/ui-prop-theater.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/ui-prop-theater.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "cursor-actor-demo",
+      "name": "光标演员演示",
+      "category": "素材呈现",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + 界"
+      ],
+      "semantics": [
+        "步骤",
+        "过程演示"
+      ],
+      "purpose": "光标演员演示",
+      "card_path": "references/cards/cursor-actor-demo.md",
+      "code_path": "template/cards/cursor-actor-demo.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/cursor-actor-demo.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "evidence-scroll-tour",
+      "name": "证据长页慢滚",
+      "category": "素材呈现",
+      "energy": "低",
+      "inputs": [
+        "人(可选) + 截图"
+      ],
+      "semantics": [
+        "例证",
+        "引用",
+        "强调"
+      ],
+      "purpose": "证据长页慢滚",
+      "card_path": "references/cards/evidence-scroll-tour.md",
+      "code_path": "template/cards/evidence-scroll-tour.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/evidence-scroll-tour.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "motion-blur-slam-in",
+      "name": "模糊甩入急停",
+      "category": "素材呈现",
+      "energy": "高",
+      "inputs": [
+        "人(可选) + 图 + 截图"
+      ],
+      "semantics": [
+        "例证"
+      ],
+      "purpose": "模糊甩入急停",
+      "card_path": "references/cards/motion-blur-slam-in.md",
+      "code_path": "template/cards/motion-blur-slam-in.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/motion-blur-slam-in.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "color-slam-beat-card",
+      "name": "纯色硬切节拍卡",
+      "category": "转场结构",
+      "energy": "高",
+      "inputs": [
+        "人(可选) + 文 + 场"
+      ],
+      "semantics": [
+        "金句",
+        "转场"
+      ],
+      "purpose": "纯色硬切节拍卡",
+      "card_path": "references/cards/color-slam-beat-card.md",
+      "code_path": "template/cards/color-slam-beat-card.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/color-slam-beat-card.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "host-shrink-to-chip",
+      "name": "人物缩位让台",
+      "category": "人物互动",
+      "energy": "中",
+      "inputs": [
+        "人(必需) + 图 + 文"
+      ],
+      "semantics": [
+        "例证"
+      ],
+      "purpose": "人物缩位让台",
+      "card_path": "references/cards/host-shrink-to-chip.md",
+      "code_path": "template/cards/host-shrink-to-chip.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/host-shrink-to-chip.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "parallel-items-with-host",
+      "name": "并列句排版（人物在场）",
+      "category": "人物互动",
+      "energy": "中",
+      "inputs": [
+        "人(必需) + 图"
+      ],
+      "semantics": [
+        "例证",
+        "列举",
+        "步骤"
+      ],
+      "purpose": "并列句排版（人物在场）",
+      "card_path": "references/cards/parallel-items-with-host.md",
+      "code_path": "template/cards/parallel-items-with-host.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/parallel-items-with-host.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "still-layout-relay",
+      "name": "多图排版 + 焦点接力",
+      "category": "素材呈现",
+      "energy": "低",
+      "inputs": [
+        "图"
+      ],
+      "semantics": [
+        "例证",
+        "列举",
+        "强调"
+      ],
+      "purpose": "多图排版 + 焦点接力",
+      "card_path": "references/cards/still-layout-relay.md",
+      "code_path": "template/cards/still-layout-relay.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/still-layout-relay.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "split-compare-slider",
+      "name": "对比双分屏（滑动揭示）",
+      "category": "素材呈现",
+      "energy": "中",
+      "inputs": [
+        "图"
+      ],
+      "semantics": [
+        "对比"
+      ],
+      "purpose": "对比双分屏（滑动揭示）",
+      "card_path": "references/cards/split-compare-slider.md",
+      "code_path": "template/cards/split-compare-slider.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/split-compare-slider.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "filmstrip-conveyor",
+      "name": "传送带列举 + 减速停靠",
+      "category": "素材呈现",
+      "energy": "中",
+      "inputs": [
+        "图"
+      ],
+      "semantics": [
+        "例证",
+        "列举"
+      ],
+      "purpose": "传送带列举 + 减速停靠",
+      "card_path": "references/cards/filmstrip-conveyor.md",
+      "code_path": "template/cards/filmstrip-conveyor.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/filmstrip-conveyor.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "grid-to-hero",
+      "name": "网格收成主角",
+      "category": "素材呈现",
+      "energy": "中",
+      "inputs": [
+        "V + 图"
+      ],
+      "semantics": [
+        "对比",
+        "列举",
+        "选择"
+      ],
+      "purpose": "网格收成主角",
+      "card_path": "references/cards/grid-to-hero.md",
+      "code_path": "template/cards/grid-to-hero.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/grid-to-hero.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "stack-fan-out",
+      "name": "卡堆扇形展开",
+      "category": "素材呈现",
+      "energy": "中",
+      "inputs": [
+        "图"
+      ],
+      "semantics": [
+        "例证",
+        "列举"
+      ],
+      "purpose": "卡堆扇形展开",
+      "card_path": "references/cards/stack-fan-out.md",
+      "code_path": "template/cards/stack-fan-out.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/stack-fan-out.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "split-60-40-story",
+      "name": "60/40 主从分屏",
+      "category": "素材呈现",
+      "energy": "中",
+      "inputs": [
+        "人(可选) + V + 文"
+      ],
+      "semantics": [
+        "列举",
+        "步骤"
+      ],
+      "purpose": "60/40 主从分屏",
+      "card_path": "references/cards/split-60-40-story.md",
+      "code_path": "template/cards/split-60-40-story.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/split-60-40-story.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "bed-echo-blur",
+      "name": "同源模糊底床",
+      "category": "素材呈现",
+      "energy": "低",
+      "inputs": [
+        "人(可选) + V"
+      ],
+      "semantics": [
+        "例证",
+        "引用"
+      ],
+      "purpose": "同源模糊底床",
+      "card_path": "references/cards/bed-echo-blur.md",
+      "code_path": "template/cards/bed-echo-blur.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/bed-echo-blur.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "rack-focus-pair",
+      "name": "焦点接力",
+      "category": "素材呈现",
+      "energy": "低",
+      "inputs": [
+        "图"
+      ],
+      "semantics": [
+        "对比"
+      ],
+      "purpose": "焦点接力",
+      "card_path": "references/cards/rack-focus-pair.md",
+      "code_path": "template/cards/rack-focus-pair.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/rack-focus-pair.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "gallery-wall-dolly",
+      "name": "照片墙推轨",
+      "category": "素材呈现",
+      "energy": "中",
+      "inputs": [
+        "图"
+      ],
+      "semantics": [
+        "例证",
+        "对比",
+        "列举"
+      ],
+      "purpose": "照片墙推轨",
+      "card_path": "references/cards/gallery-wall-dolly.md",
+      "code_path": "template/cards/gallery-wall-dolly.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/gallery-wall-dolly.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "timeline-photo-strip",
+      "name": "时间线照片带",
+      "category": "素材呈现",
+      "energy": "中",
+      "inputs": [
+        "图"
+      ],
+      "semantics": [
+        "步骤",
+        "时间地点"
+      ],
+      "purpose": "时间线照片带",
+      "card_path": "references/cards/timeline-photo-strip.md",
+      "code_path": "template/cards/timeline-photo-strip.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/timeline-photo-strip.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "word-slot-cycle",
+      "name": "词槽轮换",
+      "category": "字幕花字",
+      "energy": "中",
+      "inputs": [
+        "文"
+      ],
+      "semantics": [
+        "列举",
+        "转折"
+      ],
+      "purpose": "词槽轮换",
+      "card_path": "references/cards/word-slot-cycle.md",
+      "code_path": "template/cards/word-slot-cycle.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/word-slot-cycle.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "lead-word-zoom-assemble",
+      "name": "首词占满补句",
+      "category": "字幕花字",
+      "energy": "高",
+      "inputs": [
+        "文"
+      ],
+      "semantics": [
+        "转折",
+        "金句",
+        "标题"
+      ],
+      "purpose": "首词占满补句",
+      "card_path": "references/cards/lead-word-zoom-assemble.md",
+      "code_path": "template/cards/lead-word-zoom-assemble.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/lead-word-zoom-assemble.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "title-demote-to-label",
+      "name": "标题降格成标签",
+      "category": "字幕花字",
+      "energy": "中",
+      "inputs": [
+        "文"
+      ],
+      "semantics": [
+        "列举",
+        "步骤",
+        "设问",
+        "标题",
+        "章节"
+      ],
+      "purpose": "标题降格成标签",
+      "card_path": "references/cards/title-demote-to-label.md",
+      "code_path": "template/cards/title-demote-to-label.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/title-demote-to-label.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "scanline-annotate",
+      "name": "扫描线逐处点名",
+      "category": "强调标注",
+      "energy": "中",
+      "inputs": [
+        "图 + 截图"
+      ],
+      "semantics": [
+        "强调"
+      ],
+      "purpose": "扫描线逐处点名",
+      "card_path": "references/cards/scanline-annotate.md",
+      "code_path": "template/cards/scanline-annotate.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/scanline-annotate.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "crash-zoom-punch",
+      "name": "急推特写",
+      "category": "强调标注",
+      "energy": "高",
+      "inputs": [
+        "图 + 截图"
+      ],
+      "semantics": [
+        "例证",
+        "强调"
+      ],
+      "purpose": "急推特写",
+      "card_path": "references/cards/crash-zoom-punch.md",
+      "code_path": "template/cards/crash-zoom-punch.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/crash-zoom-punch.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "unit-grid-proportion",
+      "name": "点阵比例图",
+      "category": "数据信息图",
+      "energy": "低",
+      "inputs": [
+        "文"
+      ],
+      "semantics": [
+        "数据"
+      ],
+      "purpose": "点阵比例图",
+      "card_path": "references/cards/unit-grid-proportion.md",
+      "code_path": "template/cards/unit-grid-proportion.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/unit-grid-proportion.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "source-converge",
+      "name": "多源汇聚",
+      "category": "数据信息图",
+      "energy": "中",
+      "inputs": [
+        "文"
+      ],
+      "semantics": [
+        "机制"
+      ],
+      "purpose": "多源汇聚",
+      "card_path": "references/cards/source-converge.md",
+      "code_path": "template/cards/source-converge.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/source-converge.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "line-carry-transition",
+      "name": "线条接力转场",
+      "category": "转场结构",
+      "energy": "中",
+      "inputs": [
+        "图 + 文 + 场"
+      ],
+      "semantics": [
+        "章节",
+        "转场"
+      ],
+      "purpose": "线条接力转场",
+      "card_path": "references/cards/line-carry-transition.md",
+      "code_path": "template/cards/line-carry-transition.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/line-carry-transition.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "error-retype",
+      "name": "打字改口",
+      "category": "字幕花字",
+      "energy": "低",
+      "inputs": [
+        "文"
+      ],
+      "semantics": [
+        "转折"
+      ],
+      "purpose": "打字改口",
+      "card_path": "references/cards/error-retype.md",
+      "code_path": "template/cards/error-retype.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/error-retype.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "countdown-arc-scatter",
+      "name": "数字弧落标题",
+      "category": "字幕花字",
+      "energy": "高",
+      "inputs": [
+        "文"
+      ],
+      "semantics": [
+        "钩子",
+        "数据"
+      ],
+      "purpose": "数字弧落标题",
+      "card_path": "references/cards/countdown-arc-scatter.md",
+      "code_path": "template/cards/countdown-arc-scatter.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/countdown-arc-scatter.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "flying-words",
+      "name": "关键词隧道",
+      "category": "字幕花字",
+      "energy": "中",
+      "inputs": [
+        "文"
+      ],
+      "semantics": [
+        "钩子",
+        "氛围"
+      ],
+      "purpose": "关键词隧道",
+      "card_path": "references/cards/flying-words.md",
+      "code_path": "template/cards/flying-words.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/flying-words.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "split-text-stagger",
+      "name": "逐字裂升",
+      "category": "字幕花字",
+      "energy": "中",
+      "inputs": [
+        "文"
+      ],
+      "semantics": [
+        "金句",
+        "标题"
+      ],
+      "purpose": "逐字裂升",
+      "card_path": "references/cards/split-text-stagger.md",
+      "code_path": "template/cards/split-text-stagger.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/split-text-stagger.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "word-relay-filmstrip",
+      "name": "动词接力胶片",
+      "category": "素材呈现",
+      "energy": "中",
+      "inputs": [
+        "图 + 截图 + 文"
+      ],
+      "semantics": [
+        "例证",
+        "列举"
+      ],
+      "purpose": "动词接力胶片",
+      "card_path": "references/cards/word-relay-filmstrip.md",
+      "code_path": "template/cards/word-relay-filmstrip.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/word-relay-filmstrip.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "doc-park-left-pill-deal",
+      "name": "文档驻留发牌",
+      "category": "素材呈现",
+      "energy": "中",
+      "inputs": [
+        "截图 + 文"
+      ],
+      "semantics": [
+        "引用"
+      ],
+      "purpose": "文档驻留发牌",
+      "card_path": "references/cards/doc-park-left-pill-deal.md",
+      "code_path": "template/cards/doc-park-left-pill-deal.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/doc-park-left-pill-deal.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "info-card-assemble",
+      "name": "信息卡逐字段自建",
+      "category": "素材呈现",
+      "energy": "中",
+      "inputs": [
+        "图 + 文"
+      ],
+      "semantics": [
+        "例证"
+      ],
+      "purpose": "信息卡逐字段自建",
+      "card_path": "references/cards/info-card-assemble.md",
+      "code_path": "template/cards/info-card-assemble.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/info-card-assemble.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "chip-grid-single-select",
+      "name": "五选一反黑",
+      "category": "数据信息图",
+      "energy": "中",
+      "inputs": [
+        "文"
+      ],
+      "semantics": [
+        "数据",
+        "对比",
+        "选择"
+      ],
+      "purpose": "五选一反黑",
+      "card_path": "references/cards/chip-grid-single-select.md",
+      "code_path": "template/cards/chip-grid-single-select.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/chip-grid-single-select.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "reticle-lock-on",
+      "name": "准星咬合",
+      "category": "强调标注",
+      "energy": "高",
+      "inputs": [
+        "图 + 截图"
+      ],
+      "semantics": [
+        "强调"
+      ],
+      "purpose": "准星咬合",
+      "card_path": "references/cards/reticle-lock-on.md",
+      "code_path": "template/cards/reticle-lock-on.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/reticle-lock-on.md",
+      "cached_card": true,
+      "cached_code": true
+    },
+    {
+      "id": "host-card-glass-board",
+      "name": "人物竖卡玻璃台",
+      "category": "人物互动",
+      "energy": "中",
+      "inputs": [
+        "人(必需) + 文 + 界"
+      ],
+      "semantics": [
+        "步骤"
+      ],
+      "purpose": "人物竖卡玻璃台",
+      "card_path": "references/cards/host-card-glass-board.md",
+      "code_path": "template/cards/host-card-glass-board.tsx",
+      "source_url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/references/cards/host-card-glass-board.md",
+      "cached_card": true,
+      "cached_code": true
+    }
+  ]
+}

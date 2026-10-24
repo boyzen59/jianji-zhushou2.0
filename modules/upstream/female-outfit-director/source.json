@@ -1,0 +1,40 @@
+{
+  "id": "female-outfit-director",
+  "url": "https://github.com/liyue-aigc/female-outfit-director.git",
+  "revision": "1f96d63ec5ae9d6fdbc7e3b4e95b06138f1449c0",
+  "checked_at": "2026-10-24T03:15:19.768780+00:00",
+  "package_complete": true,
+  "scope": "Complete selected Git package except video files, generated dependencies, private env files and excluded runtime directories.",
+  "files": {
+    ".gitignore": "c3d7c077763f065987a1ade2d02a9ef022f9d7c646dee44b99b49c2195fa09ce",
+    "CHANGELOG.md": "01409fe6f95fa3db52d92a0a99e6b31d0072479b6a59087df61696fbe92cba9f",
+    "CONTRIBUTING.md": "9130bf7740f7fd63bf6e6571a8ce30565677516a3ab69341fc35d1f0b64eda36",
+    "LICENSE": "f7b2d4e8733b0dbad1848564e537f50b9db4c520c7e7fad0aa62713798ab42e1",
+    "README.md": "3a81070e096be3cfde314ec7ab7b0ef720197cd8917b934d99a488bd95713052",
+    "docs/FIRST_USE.md": "927b5241bc6cc957800d8c73e4f6cc1024998c2dcca6ecd97f1ca3c8c7a0885f",
+    "docs/INSTALLATION.md": "293e70d45246942ef40978870771ab3d8accf780a6979cb0fb2c9ccaf8eaede6",
+    "skill/SKILL.md": "3f102f3c0b69afc0d7bf98a0504e056f84ca3104744ef00203942cdcc64110dc",
+    "skill/agents/openai.yaml": "5d0810b5bd86c1d56d04a2b8f6fbac38e10a3eacd8bf420ff35c02d1a2a3234d",
+    "skill/references/parameter-presets.md": "fc66740aad3750a26ec8281393e0284cbe728ac47ec5b2af91922d46ae1414fb",
+    "skill/references/transition-library.md": "5d8ab4e412fbe305c23f7478e04a138ccbf0c682810d590ac7db3391f3639370"
+  },
+  "upstream_files": {
+    ".gitignore": "c3d7c077763f065987a1ade2d02a9ef022f9d7c646dee44b99b49c2195fa09ce",
+    "CHANGELOG.md": "01409fe6f95fa3db52d92a0a99e6b31d0072479b6a59087df61696fbe92cba9f",
+    "CONTRIBUTING.md": "9130bf7740f7fd63bf6e6571a8ce30565677516a3ab69341fc35d1f0b64eda36",
+    "LICENSE": "f7b2d4e8733b0dbad1848564e537f50b9db4c520c7e7fad0aa62713798ab42e1",
+    "README.md": "3a81070e096be3cfde314ec7ab7b0ef720197cd8917b934d99a488bd95713052",
+    "docs/FIRST_USE.md": "927b5241bc6cc957800d8c73e4f6cc1024998c2dcca6ecd97f1ca3c8c7a0885f",
+    "docs/INSTALLATION.md": "293e70d45246942ef40978870771ab3d8accf780a6979cb0fb2c9ccaf8eaede6",
+    "skill/SKILL.md": "3f102f3c0b69afc0d7bf98a0504e056f84ca3104744ef00203942cdcc64110dc",
+    "skill/agents/openai.yaml": "5d0810b5bd86c1d56d04a2b8f6fbac38e10a3eacd8bf420ff35c02d1a2a3234d",
+    "skill/references/parameter-presets.md": "fc66740aad3750a26ec8281393e0284cbe728ac47ec5b2af91922d46ae1414fb",
+    "skill/references/transition-library.md": "5d8ab4e412fbe305c23f7478e04a138ccbf0c682810d590ac7db3391f3639370"
+  },
+  "omitted_paths": [],
+  "missing_paths": [],
+  "git_submodules": [],
+  "git_lfs_assets": [],
+  "local_edits_retained": [],
+  "retired_paths_archived": []
+}

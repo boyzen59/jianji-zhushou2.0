@@ -1,0 +1,2303 @@
+import { getDefaultFontName, getNewLabelFontName } from './gui-label-fonts';
+import {
+  FontControls, MIXED_TEXT, getFontChangeValues, getFontStyleValues
+} from './gui-font-controls';
+import { ColorPicker, isHexColor } from './gui-color-picker';
+import { StylePresetControl } from './gui-style-preset-control';
+import { SizeField } from './gui-size-field';
+import {
+  claimFieldKeys, isTextInput, opensAMenu, releasePanelFocus
+} from './gui-panel-focus';
+import {
+  makeColorField, makeColorOpacityField, makeCollapsibleSection, makePanelButton,
+  selectOnFocus, setPanelButtonDisabled
+} from './gui-panel-controls';
+import { parseOpacityValue, formatOpacityPct } from './gui-style-values';
+import { El } from './gui-el';
+import { internal } from './gui-core';
+import { runGuiEditCommand } from './gui-edit-command';
+import { quoteCommandValue } from './gui-command-utils';
+import {
+  getNewLabelStyle, updateNewLabelStyle, syncNewLabelStyle, getLabelTextSession, getLabelToolArmed,
+  getLabelPositionMode, setLabelPositionMode, getLabelPositionKind, getToggleState
+} from './gui-label-style-state';
+import { formatEditingStatus } from './gui-editing-status';
+import { getTextCentreOffset, getNearestPosition } from './gui-label-offset';
+import { WRAP_FIELDS, rewrapLabelValue } from './gui-label-wrap';
+import { getLabelTextCommand } from './gui-label-commands';
+import { getDefaultIconSize, getIconShapeChange } from './gui-label-icons';
+import { isNytUser } from './gui-nyt';
+import { IconShapeButtons } from './gui-icon-shape-buttons';
+import { ARROWHEAD_GLYPHS } from './gui-arrowhead-shapes';
+import {
+  getIconShapes, getIconShapeName, getIconShapeValues, ICON_FIELDS,
+  getShownIconPaint, getIconPaintChange, getIconShapePaint
+} from './gui-icon-shapes';
+
+var fontField = 'font-family';
+var fontSizeField = 'font-size';
+var fontStyleField = 'font-style';
+var fontWeightField = 'font-weight';
+var fillField = 'fill';
+var opacityField = 'opacity';
+var letterSpacingField = 'letter-spacing';
+var lineHeightField = 'line-height';
+var textAnchorField = 'text-anchor';
+var labelAlignField = 'label-align';
+var cssField = 'css';
+var haloWidthField = 'halo-width';
+var haloColorField = 'halo-color';
+var haloOpacityField = 'halo-opacity';
+var iconField = 'icon';
+var iconSizeField = 'icon-size';
+var iconColorField = 'icon-color';
+var iconFillField = 'icon-fill';
+var iconStrokeField = 'icon-stroke';
+var iconStrokeWidthField = 'icon-stroke-width';
+var iconOpacityField = 'icon-opacity';
+var calloutField = 'callout';
+var calloutEndField = 'callout-end';
+var calloutEndSizeField = 'callout-end-size';
+var calloutColorField = 'callout-color';
+var calloutOpacityField = 'callout-opacity';
+var calloutWidthField = 'callout-width';
+var calloutGapField = 'callout-gap';
+var backgroundField = 'label-background';
+var backgroundOpacityField = 'label-background-opacity';
+var paddingField = 'label-padding';
+var defaultCalloutWidth = 1;
+var defaultFontSize = 12;
+var defaultFontStyle = 'normal';
+var defaultFontWeight = '400';
+var defaultLabelColor = '#000000';
+// The width a halo is given when a colour adds it: past the edge of the
+// glyphs, so a stroke of twice this.
+var defaultHaloWidth = 2;
+var defaultHaloColor = internal.svg.DEFAULT_HALO_COLOR;
+// The line height a label without one is drawn with. Shown as a bare
+// multiple, which also says what a bare number typed here means: a multiple
+// of the font size, as in CSS, not px.
+var defaultLineHeight = internal.svg.DEFAULT_LINE_HEIGHT;
+var labelStyleMode = 'label_style';
+var labelStylePanelMode = 'label_style_tool';
+var labelMode = 'label';
+var savedStylesKey = 'label_styles';
+var savedStyleFields = [
+  fontField,
+  fontSizeField,
+  fontStyleField,
+  fontWeightField,
+  fillField,
+  opacityField,
+  letterSpacingField,
+  lineHeightField,
+  labelAlignField,
+  cssField,
+  'label-pos',
+  backgroundField,
+  backgroundOpacityField,
+  paddingField,
+  haloWidthField,
+  haloColorField,
+  haloOpacityField,
+  iconField,
+  'icon-sides',
+  iconSizeField,
+  iconColorField,
+  iconFillField,
+  iconStrokeField,
+  iconStrokeWidthField,
+  iconOpacityField,
+  calloutField,
+  calloutEndField,
+  calloutEndSizeField,
+  calloutColorField,
+  calloutOpacityField,
+  calloutWidthField,
+  calloutGapField
+];
+var labelPositions = ['nw', 'n', 'ne', 'w', 'c', 'e', 'sw', 's', 'se'];
+// The position an icon moves a centred label to when it is added: upper
+// right, the conventional first choice for a point label and the one a
+// cartographer would have to undo least often.
+var labelPositionBesideIcon = 'ne';
+// What a drag on a label's glyphs means. This belongs to the tool rather than
+// to the label -- nothing here is written to a record, and it is left out of
+// the saved styles for that reason. See getLabelPositionMode().
+var labelDragModes = [{
+  name: 'fixed',
+  label: 'Fixed',
+  title: 'Dragging a label moves it, text and anchor together'
+}, {
+  name: 'draggable',
+  label: 'Draggable',
+  title: 'Dragging a label\'s text offsets it from its anchor'
+}];
+// The shapes are gui-icon-shapes.mjs's, shared with the symbol tool. No
+// "none" among them: a symbol is taken off by the × in the section's heading,
+// which leaves these to answer only which one.
+var defaultIconShape = 'circle';
+// Alignment writes label-align rather than text-anchor, because text-anchor
+// answers two questions at once -- how the lines line up with each other and
+// where the block of them sits -- and this control is only asking the first.
+// See svg-label-align.mjs.
+var labelAlignments = [{
+  name: 'left',
+  title: 'align left'
+}, {
+  name: 'center',
+  title: 'align center'
+}, {
+  name: 'right',
+  title: 'align right'
+}];
+// Three lines of unequal length, ragged on the side the text is not aligned to.
+// The raggedness has to be the whole difference between the three glyphs, so
+// the short lines are short: at 13px a couple of pixels of inset reads as
+// nothing.
+// For reading a drawn label back into the control: an unaligned label is drawn
+// with the justification its position or the SVG default implies, and that is
+// the button to light.
+var anchorAlignments = {
+  start: 'left',
+  middle: 'center',
+  end: 'right'
+};
+var alignButtonSymbols = {
+  left: '<line x1="3" y1="4.5" x2="13" y2="4.5"></line><line x1="3" y1="8" x2="8" y2="8"></line><line x1="3" y1="11.5" x2="11" y2="11.5"></line>',
+  center: '<line x1="3" y1="4.5" x2="13" y2="4.5"></line><line x1="5.5" y1="8" x2="10.5" y2="8"></line><line x1="4" y1="11.5" x2="12" y2="11.5"></line>',
+  right: '<line x1="3" y1="4.5" x2="13" y2="4.5"></line><line x1="8" y1="8" x2="13" y2="8"></line><line x1="5" y1="11.5" x2="13" y2="11.5"></line>'
+};
+// As with icons, no "none" among the shapes: the section's × takes a callout
+// off. The ends do have one, since a line with no marker is a shape of its own
+// rather than the absence of a callout.
+var calloutShapes = [{
+  name: 'line',
+  title: 'straight'
+}, {
+  name: 'elbow',
+  title: 'elbow'
+}, {
+  name: 'curve',
+  title: 'curve'
+}];
+var calloutEnds = [{
+  name: 'none',
+  title: 'no marker at the anchor'
+}, {
+  name: 'arrow',
+  title: 'solid arrowhead at the anchor'
+}, {
+  name: 'wide-arrow',
+  title: 'wide solid arrowhead at the anchor'
+}, {
+  name: 'open-arrow',
+  title: 'open arrowhead at the anchor'
+}, {
+  name: 'ring',
+  title: 'ring around the anchor'
+}];
+// The anchor is at the lower left of the shapes and at the left of the ends,
+// which is where the markers go. The arrowheads are the ones lines are given
+// (see gui-arrowhead-shapes.mjs).
+var calloutButtonSymbols = {
+  line: '<path d="M3.5 12.5L12.5 3.5"></path>',
+  elbow: '<path d="M3.5 12.5L8 4.5H13"></path>',
+  curve: '<path d="M3.5 12.5Q4.5 4.5 12.5 4"></path>',
+  none: '<path d="M3 8H13"></path>',
+  arrow: ARROWHEAD_GLYPHS.arrow,
+  'wide-arrow': ARROWHEAD_GLYPHS['wide-arrow'],
+  'open-arrow': ARROWHEAD_GLYPHS['open-arrow'],
+  ring: '<path d="M8.4 8H13"></path><circle cx="5.6" cy="8" r="2.8"></circle>'
+};
+
+export function LabelTool(gui) {
+  // Label styling is opened from the point styling entry point.
+  var textBtn = El('div').hide();
+  var parent = gui.container.findChild('.mshp-main-map');
+  // label-style-panel carries the styling the point and layer panels share; the
+  // second class is this panel's own, as theirs are
+  var panel = El('div').addClass('label-style-panel text-style-panel rollover').appendTo(parent).hide();
+  var presetControl, fontControls, colorFieldBox, colorChit, colorInput, colorPicker, opacityInput, letterSpacingInput, lineHeightInput, alignBtns, cssInput, posBtns, dragModeBtns, haloWidthInput, haloColorFieldBox, haloColorChit, haloColorInput, haloColorPicker, haloOpacityInput, iconGroupEl, iconBtns, iconSizeInput, iconColorFieldBox, iconColorChit, iconColorInput, iconColorPicker, iconOpacityInput, iconStrokeFieldBox, iconStrokeChit, iconStrokeInput, iconStrokePicker, iconStrokeWidthInput, iconStrokeWidthCell, haloControl, iconControl, calloutControl, calloutShapeGroupEl, calloutShapeBtns, calloutEndGroupEl, calloutEndBtns, calloutColorFieldBox, calloutColorChit, calloutColorInput, calloutColorPicker, calloutOpacityInput, calloutWidthInput, calloutEndSizeInput, calloutGapInput, backgroundColorFieldBox, backgroundColorChit, backgroundColorInput, backgroundColorPicker, backgroundOpacityInput, paddingInput, editingStatus, clearLink, closeBtn, hit;
+  // The shape the symbol's size and colour defaults are shown for while there
+  // is no symbol: the last one shown.
+  var lastIconShape = defaultIconShape;
+  var shownIconTypes = null;
+  // A halo's width and opacity set while no target has a halo, which go on
+  // with the colour that adds one: {width, opacity}.
+  var haloPending = {};
+  // In the label tool the panel can be hidden, for room to place labels, from
+  // its × or the toolbar's Styles button; it stays hidden for the rest of the
+  // session, each time the tool is opened, until it is shown again.
+  var panelHiddenInTool = false;
+
+  initPanel();
+  gui.addMode(labelStylePanelMode, turnOn, turnOff);
+  // Panel visibility is derived rather than toggled, because two modes can ask
+  // for it -- the label_style entry point through its own GUI mode, and the
+  // label tool, which owns the GUI mode itself -- and either can end while the
+  // other is still on. Registering after addMode() means turnOff() has already
+  // run by the time this recomputes.
+  gui.on('mode', updatePanelVisibility);
+  // from the label tool's toolbar
+  gui.on('label_style_panel_request', function(e) {
+    setPanelShownInTool(!!e.shown);
+  });
+  gui.model.on('update', updateVisibility);
+  gui.model.on('update', function() {
+    syncNewLabelStyleToSelection();
+    if (panel.visible()) updateControls();
+    setTimeout(updateSelectionDisplay, 0);
+  });
+  gui.on('undo_redo_post', function() {
+    syncNewLabelStyleToSelection();
+    if (panel.visible()) {
+      updateControls();
+      updateSelectionDisplay();
+    }
+  });
+  gui.on('label_text_session_change', function() {
+    // a label opened for typing becomes what the controls act on
+    syncNewLabelStyleToSelection();
+    if (panel.visible()) updateControls();
+  });
+  gui.on('label_tool_armed_change', function() {
+    // arming a tool points an empty selection at new labels, and disarming
+    // points it back at the whole layer
+    if (panel.visible()) updateControls();
+  });
+  gui.on('label_position_mode_change', function() {
+    // The tool sets the mode back to Fixed when it opens, and the toggle is
+    // the only thing on screen that says which of the two is on.
+    if (panel.visible()) updateDragModeButtons();
+  });
+  gui.on('interaction_mode_change', function(e) {
+    if (gui.getMode() == labelStylePanelMode && e.mode != labelStyleMode) {
+      gui.clearMode(); // runs turnOff(), which recomputes visibility
+    } else {
+      updatePanelVisibility();
+    }
+  });
+
+  hit = gui.map.getHitControl && gui.map.getHitControl();
+  if (hit) {
+    hit.on('change', function(e) {
+      if (e.mode == labelStyleMode || e.mode == labelMode) {
+        syncNewLabelStyleToSelection();
+        updateSelectionDisplay();
+        updateControls();
+      }
+    });
+  }
+
+  // The next label is made in the style of the labels last selected, or of the
+  // label being typed into, whether or not the panel is showing. With nothing
+  // selected the panel describes the whole layer, which says nothing about
+  // the next label.
+  function syncNewLabelStyleToSelection() {
+    var mode = gui.interaction && gui.interaction.getMode();
+    var session = getLabelTextSession(gui);
+    var table = getActiveTable();
+    var ids;
+    if (mode != labelStyleMode && mode != labelMode || !table) return;
+    ids = session && session.id > -1 ? [session.id] : getSelectionIds();
+    if (ids.length === 0) return;
+    syncNewLabelStyle(gui, ids.map(function(id) {
+      return table.getRecordAt(id) || {};
+    }));
+  }
+
+  updateVisibility();
+
+  this.open = function(lyr, dataset) {
+    if (!lyr || !internal.layerHasLabels(lyr)) return;
+    if (!gui.map.isActiveLayer(lyr)) {
+      modelSelectLayer(lyr, dataset);
+    }
+    if (gui.getMode() == labelStylePanelMode) {
+      showPanel();
+    } else {
+      gui.enterMode(labelStylePanelMode);
+    }
+  };
+
+  function initPanel() {
+    // A label being typed into keeps the caret while the panel is used. Most of
+    // these controls are divs and spans, which take focus from the textarea on
+    // mousedown without wanting it, and the editing session ends when the
+    // textarea is blurred. Refusing the focus change is what lets the user set
+    // a font and carry on typing; the real form elements below are allowed to
+    // take focus and hand it back (see releaseFocus).
+    panel.node().addEventListener('mousedown', function(e) {
+      if (!isFormElement(e.target) && getLabelTextSession(gui)) {
+        e.preventDefault();
+      }
+    });
+
+    // The catch-all for the controls that do take focus and then do not set a
+    // style -- the colour picker's Close button is the one that exists. Runs
+    // after the control's own handler, and leaves focus alone if it is in
+    // something the user is typing into, such as the CSS field.
+    //
+    // A click on a <select> is left alone too. That click has just opened the
+    // menu, and a native menu closes as soon as its element loses focus, so
+    // taking the caret back here made the font menu flash open and shut. The
+    // menu hands focus back by its own change handler, through
+    // applyStyleValues(). Only the click on the menu itself is skipped, so
+    // every other way out of a menu still returns the caret: any other control
+    // either sets a style or reaches this handler with itself as the target.
+    panel.node().addEventListener('click', function(e) {
+      if (isTextInput(document.activeElement) || opensAMenu(e.target)) return;
+      releaseFocus();
+    });
+
+    // The size fields already kept the keyboard to themselves, for the reasons
+    // in gui-panel-focus.mjs; this is the rest of the panel's fields.
+    claimFieldKeys(panel.node(), {
+      revert: updateControls,
+      release: releaseFocus
+    });
+
+    var header = El('div').addClass('label-style-panel-title').appendTo(panel).text('Label styles');
+    // In label mode the × hides the panel and leaves the tool on, as in the
+    // line and polygon modes; the toolbar's Done button leaves the tool.
+    closeBtn = El('button').addClass('label-style-close').appendTo(header).text('×').on('click', function() {
+      if (labelModeIsOn()) {
+        setPanelShownInTool(false);
+      } else {
+        gui.clearMode();
+      }
+    });
+
+    var selectRow = El('div').addClass('label-style-selection-row').appendTo(panel);
+    editingStatus = El('span').addClass('label-editing-status').appendTo(selectRow);
+    clearLink = El('span').addClass('label-editing-clear colored-text').appendTo(selectRow).text('deselect').on('click', clearSelection);
+
+    // Three sections rather than one flat stack: the text, the symbol beside
+    // it, and where the two sit relative to each other. Every section's colour
+    // row is the same shape -- the colour with its opacity in one field, and
+    // the value that qualifies it most closely beside it -- so that each reads
+    // as a variation on the first rather than as a different kind of control.
+    var textSection = addSection('Text', {open: true}).section;
+
+    // The font controls carry no label (see gui-font-controls.mjs). The ones
+    // that would be a bare number otherwise keep theirs, and so does a colour
+    // field, because the field beside it has one and "Color" says the
+    // percentage is its opacity.
+    fontControls = new FontControls(textSection, {
+      onFont: applyFont,
+      onFace: applyFontStyleVariant,
+      onSize: function(value) {
+        applyStyleValues([[fontSizeField, value]]);
+      },
+      onSizeStep: nudgeFontSize,
+      onDone: releaseFocus
+    });
+
+    // Letter spacing beside the colour, above line height: the two spacing
+    // values read as a pair in the narrow column, and the left of the row
+    // below is where the alignment buttons go.
+    //
+    // A text block's width is not here: it is set by dragging the block's
+    // handle, and a field for it would be clutter on every other label.
+    var colorRow = El('div').addClass('label-style-row label-split-row').appendTo(textSection);
+    var textColorCell = El('div').addClass('label-split-cell label-color-row label-text-color-row').appendTo(colorRow);
+    El('span').appendTo(textColorCell).text('Color');
+    colorChit = El('div').addClass('label-color-chit').attr('role', 'button');
+    colorInput = El('input').attr('type', 'text').attr('aria-label', 'Text color');
+    var textColorField = addColorOpacityField(textColorCell, colorChit, colorInput, applyLabelOpacity);
+    colorFieldBox = textColorField.box;
+    opacityInput = textColorField.opacity;
+    colorChit.on('click', function() {
+      if (this.classList.contains('disabled')) return;
+      toggleColorPicker();
+    });
+    colorInput.on('change', function() {
+      var color = colorInput.node().value.trim();
+      // An emptied field unsets the colour.
+      if (isHexColor(color)) colorPicker.setColor(color);
+      applyLabelColor(color);
+    });
+    colorPicker = initColorPicker(textColorCell, colorChit, colorInput, applyLabelColor, opacityInput);
+
+    var letterCell = El('div').addClass('label-split-cell label-spacing-row').appendTo(colorRow);
+    El('span').appendTo(letterCell).text('Letter spacing');
+    letterSpacingInput = makeMeasureInput(letterCell, letterSpacingField);
+
+    var alignRow = El('div').addClass('label-style-row label-split-row').appendTo(textSection);
+    var alignCell = El('div').addClass('label-split-cell label-align-row').appendTo(alignRow);
+    El('span').appendTo(alignCell).text('Alignment');
+    var alignGroup = El('div').addClass('label-btn-group label-align-buttons').appendTo(alignCell);
+    alignBtns = {};
+    labelAlignments.forEach(function(item) {
+      var btn = makePanelButton(alignGroup, '', function() {
+          applyLabelAlign(item.name);
+        })
+        .attr('data-align', item.name)
+        .attr('aria-label', item.title);
+      alignBtns[item.name] = btn;
+      appendAlignButtonSymbol(btn, item.name);
+    });
+
+    var lineHeightCell = El('div').addClass('label-split-cell label-spacing-row').appendTo(alignRow);
+    El('span').appendTo(lineHeightCell).text('Line height');
+    lineHeightInput = makeMeasureInput(lineHeightCell, lineHeightField);
+
+    // An empty colour is "no background", as an empty text colour is "no
+    // fill", and the padding means something without one -- it moves a
+    // callout and a position's offset out from the text.
+    var backgroundRow = El('div').addClass('label-style-row label-split-row').appendTo(textSection);
+    var backgroundColorCell = El('div').addClass('label-split-cell label-color-row label-background-color-row').appendTo(backgroundRow);
+    El('span').appendTo(backgroundColorCell).text('Background');
+    backgroundColorChit = El('div').addClass('label-color-chit').attr('role', 'button');
+    backgroundColorInput = El('input').attr('type', 'text').attr('aria-label', 'Background color');
+    var backgroundColorField = addColorOpacityField(backgroundColorCell, backgroundColorChit,
+      backgroundColorInput, applyBackgroundOpacity);
+    backgroundColorFieldBox = backgroundColorField.box;
+    backgroundOpacityInput = backgroundColorField.opacity;
+    backgroundColorChit.on('click', function() {
+      if (this.classList.contains('disabled')) return;
+      backgroundColorPicker.toggle();
+    });
+    backgroundColorInput.on('change', function() {
+      var color = backgroundColorInput.node().value.trim();
+      if (isHexColor(color)) backgroundColorPicker.setColor(color);
+      applyBackgroundColor(color);
+    });
+    backgroundColorPicker = initColorPicker(backgroundColorCell, backgroundColorChit,
+      backgroundColorInput, applyBackgroundColor, backgroundOpacityInput);
+
+    var paddingCell = El('div').addClass('label-split-cell label-spacing-row label-padding-row').appendTo(backgroundRow);
+    El('span').appendTo(paddingCell).text('Padding');
+    paddingInput = El('input').attr('type', 'text').addClass('label-measure-input')
+      .attr('title', 'Space around the text, as in CSS: 4, or 2 6 for top and bottom, then sides')
+      .appendTo(paddingCell)
+      .on('change', function() {
+        applyLabelPadding(paddingInput.node().value.trim());
+      });
+    selectOnFocus(paddingInput);
+
+    var cssRow = El('label').addClass('label-style-row label-css-row').appendTo(textSection);
+    El('span').appendTo(cssRow).text('Inline CSS');
+    cssInput = El('input').attr('type', 'text').appendTo(cssRow).on('change', function() {
+      applyInlineCss(cssInput.node().value.trim());
+    });
+
+    // The caption for the grid and the drag-mode toggle below it, and what
+    // gives Fixed|Draggable something to be an adjective of. "Position" read as
+    // the label's own position -- which a drag moves in either mode -- and made
+    // Fixed sound like a lock on a label that is still perfectly draggable.
+    var positionRow = El('label').addClass('label-style-row').appendTo(textSection);
+    El('span').appendTo(positionRow).text('Offset from anchor');
+
+    // A halo is there when it has a colour, as a line's stroke is: picking one
+    // adds the halo and emptying the field removes it. Its row is the shape of
+    // the Text section's colour row: a colour and its opacity, and a width in
+    // the narrow column beside them, where letter spacing sits above.
+    haloControl = addSection('Halo', {
+      className: 'label-halo-section',
+      onRemove: removeHalo,
+      removeTitle: 'Remove halo'
+    });
+    var haloSection = haloControl.section;
+
+    var haloColorRow = El('div').addClass('label-style-row label-split-row').appendTo(haloSection);
+    var haloColorCell = El('div').addClass('label-split-cell label-color-row label-halo-color-row').appendTo(haloColorRow);
+    El('span').appendTo(haloColorCell).text('Color');
+    haloColorChit = El('div').addClass('label-color-chit').attr('role', 'button');
+    haloColorInput = El('input').attr('type', 'text').attr('aria-label', 'Halo color');
+    var haloColorField = addColorOpacityField(haloColorCell, haloColorChit, haloColorInput, applyHaloOpacity);
+    haloColorFieldBox = haloColorField.box;
+    haloOpacityInput = haloColorField.opacity;
+    haloColorChit.on('click', function() {
+      if (this.classList.contains('disabled')) return;
+      haloColorPicker.toggle();
+    });
+    haloColorInput.on('change', function() {
+      var color = haloColorInput.node().value.trim();
+      if (isHexColor(color)) haloColorPicker.setColor(color);
+      applyHaloColor(color);
+    });
+    haloColorPicker = initColorPicker(haloColorCell, haloColorChit, haloColorInput, applyHaloColor, haloOpacityInput);
+
+    var haloWidthCell = El('div').addClass('label-split-cell label-spacing-row').appendTo(haloColorRow);
+    El('span').appendTo(haloWidthCell).text('Width');
+    // Halves as well as whole pixels: a halo is usually 1 to 2px, and the
+    // step between those two is most of the range anyone uses.
+    haloWidthInput = new SizeField(haloWidthCell, {
+      title: 'How far the halo extends past the text, in px',
+      min: 0.1,
+      max: 50,
+      step: 0.5,
+      bigStep: 2,
+      onSet: applyHaloWidth,
+      onStep: nudgeHaloWidth,
+      onDone: releaseFocus
+    });
+
+    // Choosing a shape adds a symbol, and the heading's × takes it off. The
+    // size and colour are inert until there is a symbol, which is also the
+    // honest reading of an icon-size or icon-color on a label with no icon:
+    // nothing to apply it to.
+    iconControl = addSection('Icon', {
+      className: 'label-icon-section',
+      onRemove: removeIcon,
+      removeTitle: 'Remove symbol'
+    });
+    var iconSection = iconControl.section;
+    // The shapes have the whole row, so there is room for more of them, and
+    // the size sits beside the colour below, as the halo's width does.
+    var iconRow = El('div').addClass('label-style-row label-icon-shapes-row').appendTo(iconSection);
+    iconGroupEl = El('div').addClass('label-btn-group label-icon-buttons').appendTo(iconRow);
+    iconBtns = new IconShapeButtons(iconGroupEl, getShownIconTypes(), applyIcon);
+
+    // Every shape has a fill and a stroke, as a symbol does in the symbol
+    // tool; a shape only decides which it starts with -- a ring a stroke, the
+    // rest a fill. The opacity in the fill's field is the whole symbol's.
+    var iconColorRow = El('div').addClass('label-style-row label-split-row').appendTo(iconSection);
+    var iconColorCell = El('div').addClass('label-split-cell label-color-row label-icon-color-row label-icon-fill-row').appendTo(iconColorRow);
+    El('span').appendTo(iconColorCell).text('Fill');
+    iconColorChit = El('div').addClass('label-color-chit').attr('role', 'button');
+    iconColorInput = El('input').attr('type', 'text').attr('aria-label', 'Symbol fill');
+    var iconColorField = addColorOpacityField(iconColorCell, iconColorChit, iconColorInput, applyIconOpacity);
+    iconColorFieldBox = iconColorField.box;
+    iconOpacityInput = iconColorField.opacity;
+    iconColorChit.on('click', function() {
+      if (this.classList.contains('disabled')) return;
+      iconColorPicker.toggle();
+    });
+    iconColorInput.on('change', function() {
+      var color = iconColorInput.node().value.trim();
+      if (isHexColor(color)) iconColorPicker.setColor(color);
+      applyIconColor(color);
+    });
+    iconColorPicker = initColorPicker(iconColorCell, iconColorChit, iconColorInput, applyIconColor, iconOpacityInput);
+
+    var sizeRow = El('div').addClass('label-split-cell label-icon-size-row').appendTo(iconColorRow);
+    El('span').appendTo(sizeRow).text('Size');
+    iconSizeInput = new SizeField(sizeRow, {
+      title: 'Symbol size in px',
+      onSet: function(value) {
+        applyIconSize(value);
+      },
+      onStep: nudgeIconSize,
+      onDone: releaseFocus
+    });
+
+    var iconStrokeRow = El('div').addClass('label-style-row label-split-row').appendTo(iconSection);
+    var iconStrokeCell = El('div').addClass('label-split-cell label-color-row label-icon-stroke-row').appendTo(iconStrokeRow);
+    El('span').appendTo(iconStrokeCell).text('Stroke');
+    iconStrokeChit = El('div').addClass('label-color-chit').attr('role', 'button');
+    iconStrokeInput = El('input').attr('type', 'text').attr('aria-label', 'Symbol stroke');
+    iconStrokeFieldBox = makeColorField(iconStrokeCell, iconStrokeChit, iconStrokeInput);
+    iconStrokeChit.on('click', function() {
+      if (this.classList.contains('disabled')) return;
+      iconStrokePicker.toggle();
+    });
+    iconStrokeInput.on('change', function() {
+      var color = iconStrokeInput.node().value.trim();
+      if (isHexColor(color)) iconStrokePicker.setColor(color);
+      applyIconStroke(color);
+    });
+    iconStrokePicker = initColorPicker(iconStrokeCell, iconStrokeChit, iconStrokeInput, applyIconStroke);
+
+    // The NYT star's outline is part of the logo, so it has no width to set
+    iconStrokeWidthCell = El('div').addClass('label-split-cell label-icon-stroke-width-row').appendTo(iconStrokeRow);
+    El('span').appendTo(iconStrokeWidthCell).text('Width');
+    iconStrokeWidthInput = new SizeField(iconStrokeWidthCell, {
+      title: 'Symbol stroke width in px',
+      min: 0,
+      max: 50,
+      step: 0.5,
+      bigStep: 2,
+      onSet: applyIconStrokeWidth,
+      onStep: nudgeIconStrokeWidth,
+      onDone: releaseFocus
+    });
+
+    initCalloutSection();
+
+    var posRow = El('div').addClass('label-style-row label-position-row').appendTo(textSection);
+
+
+    // Beside the grid rather than under it, because the two work together: the
+    // grid puts a label in one of nine places around its anchor, this says
+    // whether a drag may then take it somewhere else, and clicking a cell is
+    // the way back from having done so.
+    var dragModeGroup = El('div').addClass('label-btn-group label-drag-mode-buttons').appendTo(posRow);
+
+    var grid = El('div').addClass('label-position-grid').appendTo(posRow);
+    posBtns = {};
+    labelPositions.forEach(function(pos) {
+      posBtns[pos] = makePanelButton(grid, '', function() {
+          applyLabelPosition(pos);
+        })
+        .attr('data-position', pos)
+        .attr('aria-label', pos);
+    });
+
+
+    dragModeBtns = {};
+    labelDragModes.forEach(function(item) {
+      dragModeBtns[item.name] = makePanelButton(dragModeGroup, item.label, function() {
+          setLabelPositionMode(gui, item.name, getPositionModeKind());
+        })
+        .attr('data-drag-mode', item.name)
+        .attr('aria-label', item.title);
+    });
+
+    presetControl = new StylePresetControl(panel, {
+      storageKey: savedStylesKey,
+      type: 'label',
+      useType: false,
+      saveTitle: 'Save label style',
+      styleLabel: 'label style',
+      getStyle: getCurrentStyle,
+      applyStyle: applyStyleObject,
+      getItemId: getStyleId,
+      disabled: function() {
+        return !controlsEnabled();
+      }
+    });
+  }
+
+  // Added and removed like the symbol, and shaped like it: the choices on the
+  // first line, a colour and its opacity on the next, then the sizes. The
+  // line's geometry -- its corner or bend, where it meets the text, how far it
+  // stops short of the anchor -- is a matter of positions, which are dragged on
+  // the map rather than typed here. See docs/development/text-annotation-design.md.
+  function initCalloutSection() {
+    calloutControl = addSection('Callout', {
+      className: 'label-callout-section',
+      onRemove: removeCallout,
+      removeTitle: 'Remove callout'
+    });
+    var calloutSection = calloutControl.section;
+
+    // Each choice in the wide column with the size that qualifies it beside
+    // it, as Alignment has Line height: the line's shape and its width, then
+    // the marker and its size.
+    var shapeRow = El('div').addClass('label-style-row label-split-row').appendTo(calloutSection);
+    var shapeCell = El('div').addClass('label-split-cell label-align-row').appendTo(shapeRow);
+    El('span').appendTo(shapeCell).text('Line');
+    calloutShapeGroupEl = El('div').addClass('label-btn-group label-callout-buttons').appendTo(shapeCell);
+    calloutShapeBtns = {};
+    calloutShapes.forEach(function(item) {
+      calloutShapeBtns[item.name] = makeCalloutButton(calloutShapeGroupEl, item, function() {
+        applyCalloutShape(item.name);
+      });
+    });
+    var widthCell = El('div').addClass('label-split-cell label-spacing-row label-callout-width-row').appendTo(shapeRow);
+    El('span').appendTo(widthCell).text('Width');
+    calloutWidthInput = new SizeField(widthCell, {
+      title: 'Callout line width in px',
+      min: 0.25,
+      max: 20,
+      step: 0.5,
+      bigStep: 2,
+      decimals: 2,
+      onSet: applyCalloutWidth,
+      onStep: nudgeCalloutWidth,
+      onDone: releaseFocus
+    });
+
+    var endRow = El('div').addClass('label-style-row label-split-row').appendTo(calloutSection);
+    var endCell = El('div').addClass('label-split-cell label-align-row').appendTo(endRow);
+    El('span').appendTo(endCell).text('End');
+    calloutEndGroupEl = El('div').addClass('label-btn-group label-callout-buttons').appendTo(endCell);
+    calloutEndBtns = {};
+    calloutEnds.forEach(function(item) {
+      calloutEndBtns[item.name] = makeCalloutButton(calloutEndGroupEl, item, function() {
+        applyCalloutEnd(item.name);
+      });
+    });
+    var endSizeCell = El('div').addClass('label-split-cell label-spacing-row label-callout-end-size-row').appendTo(endRow);
+    El('span').appendTo(endSizeCell).text('Size');
+    calloutEndSizeInput = new SizeField(endSizeCell, {
+      title: 'Marker size in px: an arrowhead\'s sides, or a ring\'s diameter',
+      min: 1,
+      max: 60,
+      step: 1,
+      bigStep: 5,
+      onSet: applyCalloutEndSize,
+      onStep: nudgeCalloutEndSize,
+      onDone: releaseFocus
+    });
+
+    var colorRow = El('div').addClass('label-style-row label-split-row').appendTo(calloutSection);
+    var colorCell = El('div').addClass('label-split-cell label-color-row label-callout-color-row').appendTo(colorRow);
+    El('span').appendTo(colorCell).text('Color');
+    calloutColorChit = El('div').addClass('label-color-chit').attr('role', 'button');
+    calloutColorInput = El('input').attr('type', 'text').attr('aria-label', 'Callout color');
+    var calloutColorField = addColorOpacityField(colorCell, calloutColorChit, calloutColorInput, applyCalloutOpacity);
+    calloutColorFieldBox = calloutColorField.box;
+    calloutOpacityInput = calloutColorField.opacity;
+    calloutColorChit.on('click', function() {
+      if (this.classList.contains('disabled')) return;
+      calloutColorPicker.toggle();
+    });
+    calloutColorInput.on('change', function() {
+      var color = calloutColorInput.node().value.trim();
+      if (isHexColor(color)) calloutColorPicker.setColor(color);
+      applyCalloutColor(color);
+    });
+    calloutColorPicker = initColorPicker(colorCell, calloutColorChit, calloutColorInput, applyCalloutColor, calloutOpacityInput);
+
+    // The gap in the narrow column, under the sizes. Unset, it is worked out
+    // from the anchor's symbol, which it clears, and it shows what that comes
+    // to; blanking it goes back to that. It can be 0, so it is not a size
+    // field.
+    var gapCell = El('div').addClass('label-split-cell label-spacing-row label-callout-gap-row').appendTo(colorRow);
+    El('span').appendTo(gapCell).text('Gap');
+    calloutGapInput = El('input').attr('type', 'text').addClass('label-measure-input')
+      .attr('aria-label', 'Space between the callout and the anchor, in px')
+      .appendTo(gapCell)
+      .on('change', function() {
+        applyCalloutGap(calloutGapInput.node().value.trim());
+      });
+    selectOnFocus(calloutGapInput);
+  }
+
+  function makeCalloutButton(parent, item, action) {
+    var btn = makePanelButton(parent, '', action)
+      .attr('data-callout', item.name)
+      .attr('aria-label', item.title);
+    El('<svg class="label-callout-symbol" viewBox="0 0 16 16" aria-hidden="true">' +
+      calloutButtonSymbols[item.name] + '</svg>').appendTo(btn);
+    return btn;
+  }
+
+  function appendAlignButtonSymbol(btn, anchor) {
+    var svg = '<svg class="label-align-symbol" viewBox="0 0 16 16" aria-hidden="true">' +
+      alignButtonSymbols[anchor] + '</svg>';
+    El(svg).appendTo(btn);
+  }
+
+  // A colour picker hangs from its field, so one left open in a section being
+  // closed would change a colour nobody can see.
+  function addSection(title, opts) {
+    var control = makeCollapsibleSection(panel, title, Object.assign({
+      onToggle: function(open) {
+        if (!open) hideColorPicker();
+      }
+    }, opts));
+    if (opts && opts.className) control.section.addClass(opts.className);
+    return control;
+  }
+
+  function addColorOpacityField(parent, chit, input, onOpacity) {
+    return makeColorOpacityField(parent, chit, input, {
+      onSet: onOpacity,
+      revert: updateControls
+    });
+  }
+
+  // A field for an SVG length: 2, 2px, 0.1em. Blank means the property is not
+  // set, and blanking a field that was set removes it -- which is the only way
+  // back to the renderer's own spacing once a value has been chosen.
+  function makeMeasureInput(parent, field) {
+    var input = El('input').attr('type', 'text').addClass('label-measure-input')
+      .appendTo(parent)
+      .on('change', function() {
+        applyStyleValues([[field, input.node().value.trim()]]);
+      });
+    selectOnFocus(input);
+    return input;
+  }
+
+  function turnOn() {
+    if (!activeLayerHasLabels()) {
+      gui.clearMode();
+      return;
+    }
+    gui.interaction.setMode(labelStyleMode);
+    showPanel();
+  }
+
+  function turnOff() {
+    updatePanelVisibility(); // the label tool may still want the panel up
+    if (hit) hit.clearSelection();
+    if (gui.interaction.getMode() == labelStyleMode) {
+      gui.interaction.turnOff();
+    }
+  }
+
+  function updatePanelVisibility() {
+    if (panelShouldBeVisible()) {
+      showPanel();
+    } else if (panel.visible()) {
+      hidePanel();
+    }
+  }
+
+  function panelShouldBeVisible() {
+    // The label tool keeps the panel up whether or not the layer has labels, so
+    // that a style can be chosen before there is a label to apply it to.
+    return labelModeIsOn() && !panelHiddenInTool || gui.getMode() == labelStylePanelMode;
+  }
+
+  function setPanelShownInTool(shown) {
+    panelHiddenInTool = !shown;
+    if (!shown) releaseFocus();
+    updatePanelVisibility();
+  }
+
+  // gui.state.label_style_panel_open says whether the panel is up, for the
+  // label tool's Styles button, which follows 'label_style_panel_change'
+  function showPanel() {
+    fontControls.renderFontOptions();
+    gui.state.label_style_panel_open = true;
+    panel.show();
+    closeBtn.show();
+    textBtn.addClass('selected');
+    updateControls();
+    updateSelectionDisplay();
+    gui.dispatchEvent('label_style_panel_change');
+  }
+
+  function hidePanel() {
+    panel.hide();
+    hideColorPicker();
+    iconBtns.closeMenu();
+    haloPending = {};
+    gui.state.label_style_panel_open = false;
+    textBtn.removeClass('selected');
+    clearSelectionDisplay();
+    gui.dispatchEvent('label_style_panel_change');
+  }
+
+  function labelModeIsOn() {
+    return !!(gui.interaction && gui.interaction.getMode() == labelMode);
+  }
+
+  // Whether an empty selection means the next label rather than every label:
+  // only while a placement tool is armed, or a label not yet made is being
+  // typed. With no tool armed the panel styles the whole layer, as the line
+  // and polygon panels do.
+  function editingNewLabels() {
+    var session = getLabelTextSession(gui);
+    if (!labelModeIsOn()) return false;
+    return !!getLabelToolArmed(gui) || !!(session && session.id == -1);
+  }
+
+  function updateVisibility() {
+    var enabled = activeLayerHasLabels();
+    textBtn.classed('disabled', !enabled);
+    textBtn[enabled ? 'show' : 'hide']();
+    if (!enabled && gui.getMode() == labelStylePanelMode) {
+      gui.clearMode();
+    }
+  }
+
+  function activeLayerHasLabels() {
+    var active = gui.model.getActiveLayer();
+    return !!(active && internal.layerHasLabels(active.layer));
+  }
+
+  function activeLayerIsPointLayer() {
+    var active = gui.model.getActiveLayer();
+    return !!(active && active.layer && active.layer.geometry_type == 'point');
+  }
+
+  function modelSelectLayer(lyr, dataset) {
+    if (lyr) lyr.hidden = false;
+    gui.model.selectLayer(lyr, dataset);
+  }
+
+  function clearSelection() {
+    if (hit) hit.clearSelection();
+    updateSelectionDisplay();
+    updateControls();
+  }
+
+  function getActiveLayer() {
+    var active = gui.model.getActiveLayer();
+    return active && active.layer;
+  }
+
+  function getActiveTable() {
+    var lyr = getActiveLayer();
+    return lyr && lyr.data || null;
+  }
+
+  function getSelectionIds() {
+    return hit ? hit.getSelectionIds() : [];
+  }
+
+  // The labels a control acts on: whatever is selected for styling.
+  //
+  // With the label tool on, an empty selection means the label about to be made
+  // rather than every label on the layer -- restyling a whole layer is not what
+  // a click on a font control means while labels are being placed. Outside
+  // label mode an empty selection still means the whole layer, which is right
+  // for a styling mode entered deliberately.
+  //
+  // A label open for text editing is the target on its own, ahead of the
+  // styling selection, which text editing empties anyway. Setting a style
+  // while typing is ordinary use rather than a corner case: a label is placed
+  // empty, and its font, colour and position are usually chosen before, or
+  // instead of, any of its text.
+  function getTargetIds() {
+    var session = getLabelTextSession(gui);
+    var ids;
+    // A pending label has no feature to style yet, so a control set while one
+    // is open writes the style for the next label -- which is the label being
+    // typed into, and which renders it immediately.
+    if (session && session.id > -1) return [session.id];
+    if (session) return [];
+    ids = getSelectionIds();
+    if (ids.length > 0) return ids;
+    return editingNewLabels() ? [] : getAllLabelIds();
+  }
+
+  // With a tool armed and nothing selected the controls edit the style that
+  // new labels are given, so they stay live even when there is no label, and
+  // no layer, yet. With no tool armed and no labels, there is nothing to edit.
+  function controlsEnabled() {
+    return getTargetIds().length > 0 || editingNewLabels();
+  }
+
+  // The labels Cmd-A selects: not the layer's symbols or plain points, which
+  // the panel has nothing for, and not its numbered markers, which are the
+  // symbol panel's.
+  function getAllLabelIds() {
+    var lyr = getActiveLayer();
+    var records = lyr && lyr.data ? lyr.data.getRecords() : null;
+    var ids = [];
+    if (!records) return ids;
+    for (var i=0, n=internal.getFeatureCount(lyr); i<n; i++) {
+      if (internal.svg.featureIsTextLabel(records[i])) ids.push(i);
+    }
+    return ids;
+  }
+
+  function updateControls() {
+    var ids = getTargetIds();
+    var manualIds = getSelectionIds();
+    var showValues = controlsEnabled();
+    // With nothing selected the menu shows the font the next label will be
+    // made in; with labels selected it shows the font they are drawn in, which
+    // for a label carrying none is whatever sans-serif resolves to here.
+    var font = getShownValue(ids, fontField,
+      {useDefault: true, defaultValue: getFontNameForTarget(ids)});
+    var fontSize = getShownValue(ids, fontSizeField, {useDefault: true, defaultValue: defaultFontSize});
+    var fontStyleVal = getCommonValue(ids, fontStyleField, {useDefault: true, defaultValue: defaultFontStyle});
+    var fontWeightVal = getCommonValue(ids, fontWeightField, {useDefault: true, defaultValue: defaultFontWeight});
+    var fill = getShownValue(ids, fillField, {useDefault: true, defaultValue: defaultLabelColor});
+    var opacity = getShownValue(ids, opacityField, {useDefault: true, defaultValue: 1});
+    var letterSpacing = getShownValue(ids, letterSpacingField, {useDefault: true, defaultValue: 0});
+    var lineHeight = getShownValue(ids, lineHeightField, {useDefault: true, defaultValue: defaultLineHeight});
+    var alignVal = getCommonAlignment(ids);
+    var css = getShownValue(ids, cssField);
+    var posVal = getCommonValue(ids, 'label-pos');
+    // From the labels that have a symbol, so that a selection where only some
+    // do shows the symbols it has rather than blanking every field because the
+    // rest of the selection has nothing to compare.
+    var iconIds = getIconValueIds();
+    var iconVal = getCommonIconShape(iconIds);
+    var iconShape = iconVal || lastIconShape;
+    var iconSize = getShownValue(iconIds, iconSizeField, {useDefault: true, defaultValue: getDefaultIconSize(iconShape)});
+    var iconPaint = getShownIconPaints(iconIds, iconShape);
+    var iconOpacity = getShownValue(iconIds, iconOpacityField, {useDefault: true, defaultValue: 1});
+    var backgroundColor = getShownValue(ids, backgroundField);
+    var backgroundOpacity = getShownValue(ids, backgroundOpacityField, {useDefault: true, defaultValue: 1});
+    var padding = getShownValue(ids, paddingField, {useDefault: true, defaultValue: 0});
+    updateEditingStatus(manualIds.length, !!getLabelTextSession(gui));
+    updateSavedStyleControls();
+    fontControls.showFont(font, !showValues);
+    fontControls.showFace(font.value, fontStyleVal, fontWeightVal, !showValues);
+    fontControls.showSize(fontSize, !showValues);
+    updateColorControls(fill);
+    updateOpacityControl(opacityInput, opacity);
+    updateMeasureControl(letterSpacingInput, letterSpacing);
+    updateMeasureControl(lineHeightInput, lineHeight);
+    updateAlignButtons(showValues ? alignVal : '');
+    updateBackgroundControls(backgroundColor, backgroundOpacity, padding, ids);
+    updateCssControl(css);
+    updatePositionButtons(showValues ? posVal : '', ids);
+    updateHaloControls();
+    // The symbol's size and colour show their defaults, greyed, while there is
+    // no symbol: what they show is what a shape will add.
+    var iconOff = updateIconControls(showValues ? iconVal : '');
+    updateIconSizeControls(iconSize, iconOff);
+    updateIconPaintControls(iconPaint, iconShape, iconOff);
+    updateOpacityControl(iconOpacityInput, iconOpacity, iconOff);
+    updateCalloutValueControls();
+  }
+
+  // Every field that can show a value can also show nothing, which is why each
+  // of these takes a {value, mixed} rather than a value: a field blank because
+  // the selected labels disagree says so, in the placeholder. An unset
+  // property is not blank -- the field shows the value the renderer uses
+  // instead, as a value like any other.
+  function updateOpacityControl(input, shown, disabled) {
+    input.node().disabled = disabled || !controlsEnabled();
+    input.node().value = shown.value === '' ? '' : formatOpacityPct(shown.value);
+    setMixedPlaceholder(input, shown.mixed);
+  }
+
+  function updateMeasureControl(input, shown) {
+    var val = shown.value;
+    input.node().disabled = !controlsEnabled();
+    input.node().value = val || val === 0 ? String(val) : '';
+    setMixedPlaceholder(input, shown.mixed);
+  }
+
+  function setMixedPlaceholder(input, mixed) {
+    input.node().setAttribute('placeholder', mixed ? MIXED_TEXT : '');
+  }
+
+  // Alignment stays live whatever is selected, including nothing. It was
+  // disabled for anything but a multi-line or path label, on the grounds that
+  // alignment and the position grid both write text-anchor and only one of
+  // them can be answering the question -- but that reserved it for labels that
+  // already have a second line, when the style is usually chosen before the
+  // text is typed. Choosing left-aligned and then writing two lines has to
+  // work.
+  function updateAlignButtons(align) {
+    var disabled = !controlsEnabled();
+    labelAlignments.forEach(function(item) {
+      alignBtns[item.name].classed('selected', !disabled && item.name == align);
+      setPanelButtonDisabled(alignBtns[item.name], disabled);
+    });
+  }
+
+  function updatePositionButtons(pos, ids) {
+    // Disabled for a selection of nothing but path labels, whose text runs
+    // along a curve from a start offset and so has no position around an anchor
+    // to take. The commands ignore a position given for one, and a disabled
+    // button says so where a console warning would not.
+    var disabled = !controlsEnabled() || everyLabelIsOnAPath(ids);
+    // Faintly, and only when no cell is lit: a label carrying offsets is not
+    // at any of the nine, but one of them is roughly where it is and clicking
+    // it is the way back.
+    var nearest = !disabled && !pos ? getNearestPositionCell(ids) : '';
+    labelPositions.forEach(function(name) {
+      posBtns[name].classed('selected', !disabled && name == pos);
+      posBtns[name].classed('nearest', name == nearest);
+      setPanelButtonDisabled(posBtns[name], disabled);
+    });
+    updateDragModeButtons();
+  }
+
+  // Whether a label has been put somewhere other than on top of its anchor: a
+  // position of its own other than the centre one, or offsets from a drag.
+  function labelIsPlaced(rec) {
+    if (!rec) return false;
+    if (rec['label-pos']) return rec['label-pos'] != 'c';
+    return internal.hasStyleValue(rec, 'dx') ||
+      internal.hasStyleValue(rec, 'dy');
+  }
+
+  // Which of the nine positions a dragged label is nearest, or ''.
+  //
+  // Only for a single label: the cell is a hint about where one label sits,
+  // and the nearest position to several of them at once is not a hint about
+  // anything. Offsets are compared through the middle of the text rather than
+  // through dx, which means different things at different justifications.
+  function getNearestPositionCell(ids) {
+    var table = getActiveTable();
+    var rec = ids.length == 1 && table ? table.getRecordAt(ids[0]) : null;
+    var width, drawn;
+    if (!rec || !labelIsPlaced(rec)) return '';
+    drawn = internal.svg.getDrawnLabelOffset(rec);
+    width = internal.svg.getMeasuredTextWidth(rec) || 0;
+    return getNearestPosition({
+      x: getTextCentreOffset(drawn.dx, drawn['text-anchor'], width),
+      y: drawn.dy
+    }, labelPositions.map(function(name) {
+      // The position on its own, without the record's own offsets, which win
+      // over a position and would make every candidate the same point.
+      var o = internal.svg.getDrawnLabelOffset({
+        'label-pos': name,
+        'font-size': rec['font-size'],
+        'label-padding': rec['label-padding']
+      });
+      return {
+        name: name,
+        x: getTextCentreOffset(o.dx, o['text-anchor'], width),
+        y: o.dy
+      };
+    }));
+  }
+
+  // The toggle is the tool's state and not the selection's, but there is one
+  // for point text and one for text blocks, and it shows the one for the kind
+  // of label selected. It is inert outside the label tool, where there is no
+  // drag on a label for it to describe.
+  function updateDragModeButtons() {
+    var mode = getLabelPositionMode(gui, getPositionModeKind());
+    var disabled = !labelModeIsOn();
+    labelDragModes.forEach(function(item) {
+      dragModeBtns[item.name].classed('selected', !disabled && item.name == mode);
+      setPanelButtonDisabled(dragModeBtns[item.name], disabled);
+    });
+  }
+
+  // 'block' when the labels the panel is pointed at are all text blocks, and
+  // otherwise 'point', including for the next label to be made.
+  function getPositionModeKind() {
+    var table = getActiveTable();
+    var ids = getTargetIds();
+    return ids.length > 0 && table && ids.every(function(id) {
+      return getLabelPositionKind(table.getRecordAt(id)) == 'block';
+    }) ? 'block' : 'point';
+  }
+
+  function everyLabelIsOnAPath(ids) {
+    return someLabelIsOnAPath(ids, 'every');
+  }
+
+  function anyLabelIsOnAPath(ids) {
+    return someLabelIsOnAPath(ids, 'some');
+  }
+
+  function someLabelIsOnAPath(ids, method) {
+    var lyr = getActiveLayer();
+    var table = lyr && lyr.data;
+    if (!ids || ids.length === 0 || !lyr || !lyr.shapes) return false;
+    return ids[method](function(id) {
+      return internal.svg.shapeIsPathLabel(lyr.shapes[id],
+        table ? table.getRecordAt(id) : null);
+    });
+  }
+
+  // What the controls will act on. With a tool armed an empty selection is the
+  // next label rather than the whole layer, and saying "all" there is what
+  // would make the panel untrustworthy.
+  function updateEditingStatus(count, editingText) {
+    editingStatus.text(formatEditingStatus({
+      selected: count,
+      total: getAllLabelIds().length,
+      newLabels: editingNewLabels(),
+      editingText: editingText
+    }));
+    // "deselect" is for a selection the user made; a label being typed into is
+    // left by clicking away or pressing Escape, not from here.
+    clearLink.classed('hidden', count === 0 || editingText);
+  }
+
+  function getFontNameForTarget(ids) {
+    return ids.length === 0 ? getNewLabelFontName() : getDefaultFontName();
+  }
+
+  function updateColorControls(shown) {
+    var colorVal = shown.value;
+    var disabled = !controlsEnabled();
+    colorInput.node().disabled = disabled;
+    colorInput.node().value = colorVal || '';
+    setMixedPlaceholder(colorInput, shown.mixed);
+    colorFieldBox.classed('disabled', disabled);
+    setPanelButtonDisabled(colorChit, disabled);
+    // An empty swatch is how the field says "no colour", so a mixed one is
+    // marked instead of being left blank to mean two things.
+    colorChit.classed('mixed', shown.mixed);
+    colorChit.css('background-color', isHexColor(colorVal) ? colorVal : 'transparent');
+    if (colorPicker.visible()) {
+      return; // avoid HSB -> RGB -> HSB rounding jumps after picker commits
+    }
+    // Only this field's own picker: the halo's or the symbol's may be the one
+    // open, and a text fill like "blue" says nothing about either.
+    if (isHexColor(colorVal)) {
+      colorPicker.setColor(colorVal);
+    } else {
+      colorPicker.hide();
+    }
+  }
+
+  // Inert for a selection of nothing but path labels, which have no box: text
+  // along a curve has nothing rectangular to fill or pad.
+  function updateBackgroundControls(color, opacity, padding, ids) {
+    var off = everyLabelIsOnAPath(ids);
+    updateSwatchField(backgroundColorInput, backgroundColorFieldBox, backgroundColorChit,
+      backgroundColorPicker, color, off);
+    updateOpacityControl(backgroundOpacityInput, opacity, off);
+    updateMeasureControl(paddingInput, padding);
+    if (off) paddingInput.node().disabled = true;
+  }
+
+  function updateCssControl(shown) {
+    cssInput.node().disabled = !controlsEnabled();
+    cssInput.node().value = shown.value || '';
+    setMixedPlaceholder(cssInput, shown.mixed);
+  }
+
+  // The heading's marker reads the data rather than holding a state of its
+  // own: a symbol is there when the target has one, which is what makes it
+  // follow an undo.
+  //
+  // A selection where only some labels have a symbol is marked mixed, and the
+  // section stays usable: there are symbols in the selection to style. What
+  // the size and colour then act on narrows to the labels that have one --
+  // see getIconTargetIds() -- so styling a symbol never creates one. Clicking
+  // a shape is the one thing in the section that applies to every selected
+  // label, because choosing a shape for a group is a plain statement about
+  // all of it, and it is how a symbol is added.
+  function updateIconControls(iconVal) {
+    var enabled = controlsEnabled();
+    var state = enabled ? getIconState() : 'off';
+    var off = state == 'off';
+    if (iconVal) lastIconShape = iconVal;
+    iconControl.setPresence(state);
+    // The group is faded as a whole rather than button by button, so that the
+    // border the buttons share fades with them -- a live border around dead
+    // buttons is the one part of a disabled control that still looks usable.
+    iconGroupEl.classed('disabled', !enabled);
+    iconBtns.update(off ? '' : iconVal || '', function() { return !enabled; });
+    return off;
+  }
+
+  // Everything a symbol is drawn with goes with it, so that a label with no
+  // symbol carries no icon-size or icon-color that draws nothing.
+  function removeIcon() {
+    applyStyleValues(getRemoveValues(ICON_FIELDS));
+  }
+
+  function updateIconSizeControls(shown, iconOff) {
+    iconSizeInput.setValue(shown.value || '');
+    iconSizeInput.setPlaceholder(shown.mixed ? MIXED_TEXT : '');
+    iconSizeInput.setDisabled(iconOff || !controlsEnabled());
+  }
+
+  function updateIconPaintControls(paint, shape, iconOff) {
+    updateSwatchField(iconColorInput, iconColorFieldBox, iconColorChit,
+      iconColorPicker, paint.fill, iconOff);
+    updateSwatchField(iconStrokeInput, iconStrokeFieldBox, iconStrokeChit,
+      iconStrokePicker, paint.stroke, iconOff);
+    iconStrokeWidthInput.setValue(paint.strokeWidth.value || '');
+    iconStrokeWidthInput.setPlaceholder(paint.strokeWidth.mixed ? MIXED_TEXT : '');
+    iconStrokeWidthInput.setDisabled(iconOff || !controlsEnabled() || !paint.stroke.value);
+    iconStrokeWidthCell.classed('hidden', getIconShapePaint(shape) == 'nyt');
+  }
+
+  // The fill, stroke and stroke width the labels' symbols are drawn with, each
+  // as a {value, mixed} for a field to show. A symbol with no color of its own
+  // takes its label's text color, which is what is shown for it.
+  function getShownIconPaints(ids, shape) {
+    var recs = getTargetRecords(ids);
+    var blank = {value: '', mixed: false};
+    var paints;
+    if (!controlsEnabled()) return {fill: blank, stroke: blank, strokeWidth: blank};
+    paints = (recs.length > 0 ? recs : [{}]).map(function(rec) {
+      return getShownIconPaint(rec, shape, rec[fillField] || defaultLabelColor);
+    });
+    return {
+      fill: getSharedValue(paints, 'fill'),
+      stroke: getSharedValue(paints, 'stroke'),
+      strokeWidth: getSharedValue(paints, 'strokeWidth')
+    };
+  }
+
+  function getSharedValue(objects, key) {
+    var first = objects[0][key];
+    var mixed = objects.some(function(o) { return o[key] !== first; });
+    return {value: mixed ? '' : first, mixed: mixed};
+  }
+
+  // A colour field that can be inert: the symbol's, which goes on showing its
+  // colour, greyed, while there is no symbol, and the background's.
+  function updateSwatchField(input, fieldBox, chit, picker, shown, sectionOff) {
+    var colorVal = shown.value;
+    var disabled = sectionOff || !controlsEnabled();
+    input.node().disabled = disabled;
+    input.node().value = colorVal || '';
+    setMixedPlaceholder(input, shown.mixed);
+    fieldBox.classed('disabled', disabled);
+    setPanelButtonDisabled(chit, disabled);
+    chit.classed('mixed', shown.mixed);
+    chit.css('background-color', isHexColor(colorVal) ? colorVal : 'transparent');
+    if (picker.visible()) {
+      return; // avoid HSB -> RGB -> HSB rounding jumps after picker commits
+    }
+    if (isHexColor(colorVal)) {
+      picker.setColor(colorVal);
+    } else {
+      picker.clearColor();
+    }
+  }
+
+  // The marker reads the data, as the symbol's does, so that it follows an
+  // undo. A label has a halo when its halo-width is above 0, which is the
+  // renderer's rule, and one with no halo-color is drawn in white -- so the
+  // colour field shows white for it rather than the blank that means "no halo".
+  //
+  // With no halo anywhere the colour is blank and the width and opacity are
+  // live, showing what a colour will add the halo with: the width and
+  // opacity set since, or the defaults. A selection
+  // where only some labels have a halo shows the colour mixed, and the width
+  // and opacity of the labels that have one.
+  function updateHaloControls() {
+    var enabled = controlsEnabled();
+    var state = enabled ? getHaloState() : 'off';
+    var ids = getHaloTargetIds();
+    var color, width, opacity;
+    haloControl.setPresence(state);
+    if (state == 'off') {
+      color = {value: '', mixed: false};
+      width = {value: enabled ? haloPending.width || defaultHaloWidth : '', mixed: false};
+      opacity = {value: !enabled ? '' : 'opacity' in haloPending ? haloPending.opacity : 1, mixed: false};
+    } else {
+      color = state == 'mixed' ? {value: '', mixed: true} :
+        getShownValue(ids, haloColorField, {useDefault: true, defaultValue: defaultHaloColor});
+      width = getShownValue(ids, haloWidthField);
+      opacity = getShownValue(ids, haloOpacityField, {useDefault: true, defaultValue: 1});
+    }
+    updateSwatchField(haloColorInput, haloColorFieldBox, haloColorChit,
+      haloColorPicker, color, false);
+    haloWidthInput.setValue(width.value || '');
+    haloWidthInput.setPlaceholder(width.mixed ? MIXED_TEXT : '');
+    haloWidthInput.setDisabled(!enabled);
+    updateOpacityControl(haloOpacityInput, opacity, false);
+  }
+
+  function getHaloState() {
+    var ids = getTargetIds();
+    var table = getActiveTable();
+    if (ids.length === 0) {
+      return internal.svg.labelHasHalo(editingNewLabels() ? getNewLabelStyle(gui) : null) ? 'on' : 'off';
+    }
+    return getToggleState(ids.map(function(id) {
+      return internal.svg.labelHasHalo(table && table.getRecordAt(id));
+    }));
+  }
+
+  // A colour gives every target a halo, and an emptied field removes it.
+  //
+  // Labels that had none are given a width as well: the one set while there
+  // was no halo, or else the one the selection's halos share, so that a mixed
+  // selection is brought into line with the labels that had a halo rather
+  // than reset, or else the default. One command gives the width to every
+  // target, which brings halos that differed in width into line too.
+  function applyHaloColor(color) {
+    var state = getHaloState();
+    var values = [[haloColorField, color]];
+    if (!color) {
+      removeHalo();
+      return;
+    }
+    if (state != 'on') {
+      values.push([haloWidthField, getNewHaloWidth(state)]);
+      if (haloPending.opacity < 1) values.push([haloOpacityField, haloPending.opacity]);
+    }
+    haloPending = {};
+    applyStyleValues(values);
+  }
+
+  function getNewHaloWidth(state) {
+    if (haloPending.width > 0) return haloPending.width;
+    if (state == 'off') return defaultHaloWidth;
+    return getNumericSize(getHaloTargetIds(), haloWidthField, defaultHaloWidth);
+  }
+
+  // Everything a halo is drawn with goes with it, so that a label with no
+  // halo carries no halo-color that draws nothing.
+  function removeHalo() {
+    haloPending = {};
+    applyStyleValues(getRemoveValues([haloWidthField, haloColorField, haloOpacityField]));
+  }
+
+  // With no halo to give it to, a width is kept for the colour that adds one.
+  function applyHaloWidth(value) {
+    if (getHaloState() == 'off') {
+      haloPending.width = value;
+      updateControls();
+      return;
+    }
+    applyStyleValues([[haloWidthField, value]], getHaloTargetIds());
+  }
+
+  function nudgeHaloWidth(delta) {
+    var off = getHaloState() == 'off';
+    var width = off ? haloPending.width || defaultHaloWidth :
+      getNumericSize(getHaloTargetIds(), haloWidthField, defaultHaloWidth);
+    if (!controlsEnabled()) return;
+    width = Math.max(0.5, Math.round((width + delta) * 10) / 10);
+    applyHaloWidth(width);
+  }
+
+  // An emptied field removes the background.
+  function applyBackgroundColor(color) {
+    applyStyleValues([[backgroundField, color]], getBoxTargetIds());
+  }
+
+  function applyBackgroundOpacity(value) {
+    applyStyleValues([[backgroundOpacityField, value >= 1 ? '' : value]], getBoxTargetIds());
+  }
+
+  // Padding that is not a CSS padding string is refused here, where the
+  // command would otherwise stop with an error about it.
+  function applyLabelPadding(value) {
+    var padding = value ? internal.svg.parseLabelPadding(value) : '';
+    if (padding === null) {
+      updateControls();
+      return;
+    }
+    applyStyleValues([[paddingField, padding]], getBoxTargetIds());
+  }
+
+  // The targets that are not path labels, for the reason a position is not
+  // written to them: it would be a property nothing reads.
+  function getBoxTargetIds() {
+    return getTargetIds().filter(function(id) {
+      return !everyLabelIsOnAPath([id]);
+    });
+  }
+
+  // Full opacity is stored as no halo-opacity, as it is for the text's own.
+  function applyHaloOpacity(value) {
+    if (getHaloState() == 'off') {
+      haloPending.opacity = value;
+      updateControls();
+      return;
+    }
+    applyStyleValues([[haloOpacityField, value >= 1 ? '' : value]], getHaloTargetIds());
+  }
+
+  // The labels a halo's width or opacity goes to: the targets that have a
+  // halo, for the reason the symbol's values go only to labels with a symbol.
+  // Empty for "new labels", as there.
+  function getHaloTargetIds() {
+    var table = getActiveTable();
+    return getTargetIds().filter(function(id) {
+      return internal.svg.labelHasHalo(table && table.getRecordAt(id));
+    });
+  }
+
+  // [field, ''] for each of @fields that a target carries, which is how a
+  // style is removed: -labels writes an empty value as an empty field, and a
+  // property no target had should not leave an empty column behind. With no
+  // target -- the style of the next label -- all of them.
+  function getRemoveValues(fields) {
+    var ids = getTargetIds();
+    var table = getActiveTable();
+    return fields.filter(function(field) {
+      return ids.length === 0 || ids.some(function(id) {
+        var val = table && table.getRecordAt(id) ? table.getRecordAt(id)[field] : null;
+        return val !== undefined && val !== null && String(val) !== '';
+      });
+    }).map(function(field) {
+      return [field, ''];
+    });
+  }
+
+  // The marker reads the data, as the halo's does. A callout is there for a
+  // label whose callout names a shape.
+  function getCalloutState() {
+    var ids = getTargetIds();
+    var table = getActiveTable();
+    if (ids.length === 0) {
+      return internal.svg.labelHasCallout(editingNewLabels() ? getNewLabelStyle(gui) : null) ? 'on' : 'off';
+    }
+    return getToggleState(ids.map(function(id) {
+      return internal.svg.labelHasCallout(table && table.getRecordAt(id));
+    }));
+  }
+
+  // The labels a callout's end, colour, width and gap go to: the targets that
+  // have a callout, for the reason the symbol's values go only to labels with a
+  // symbol.
+  function getCalloutTargetIds() {
+    var table = getActiveTable();
+    return getTargetIds().filter(function(id) {
+      return internal.svg.labelHasCallout(table && table.getRecordAt(id));
+    });
+  }
+
+  function getCalloutValueIds() {
+    var ids = getCalloutTargetIds();
+    return ids.length > 0 ? ids : getTargetIds();
+  }
+
+  // Everything a callout is drawn with goes with it, its corner and
+  // attachment included: those were placed for the line that was there.
+  function removeCallout() {
+    applyStyleValues(getRemoveValues([calloutField, calloutEndField, calloutEndSizeField,
+      calloutColorField, calloutOpacityField, calloutWidthField, calloutGapField,
+      'callout-via', 'callout-attach']));
+  }
+
+  // A shape is a plain statement about every selected label, as a symbol's
+  // is, and choosing one is how a callout is added.
+  function applyCalloutShape(shape) {
+    applyStyleValues([[calloutField, shape]]);
+  }
+
+  // No marker is stored as no callout-end.
+  function applyCalloutEnd(end) {
+    applyStyleValues([[calloutEndField, end == 'none' ? '' : end]], getCalloutTargetIds());
+  }
+
+  function applyCalloutColor(color) {
+    applyStyleValues([[calloutColorField, color]], getCalloutTargetIds());
+  }
+
+  function applyCalloutOpacity(value) {
+    applyStyleValues([[calloutOpacityField, value >= 1 ? '' : value]], getCalloutTargetIds());
+  }
+
+  function applyCalloutWidth(value) {
+    applyStyleValues([[calloutWidthField, value]], getCalloutTargetIds());
+  }
+
+  function nudgeCalloutWidth(delta) {
+    var width = getNumericSize(getCalloutTargetIds(), calloutWidthField, defaultCalloutWidth);
+    if (!controlsEnabled() || getCalloutState() == 'off') return;
+    applyCalloutWidth(Math.max(0.25, Math.round((width + delta) * 4) / 4));
+  }
+
+  // A marker size goes to the callouts that have a marker to size, as a
+  // symbol's size goes only to labels with a symbol.
+  function applyCalloutEndSize(value) {
+    applyStyleValues([[calloutEndSizeField, value]], getCalloutEndTargetIds());
+  }
+
+  // Stepped from the size each marker is drawn at, which for one with no
+  // callout-end-size is the default its line width gives it.
+  function nudgeCalloutEndSize(delta) {
+    var shown = getCalloutEndSizeShown(getCalloutEndTargetIds());
+    var size = Number(shown.value);
+    if (!controlsEnabled() || !(size > 0)) return;
+    applyCalloutEndSize(Math.max(1, Math.round(size + delta)));
+  }
+
+  function getCalloutEndTargetIds() {
+    var table = getActiveTable();
+    return getCalloutTargetIds().filter(function(id) {
+      return getCalloutEnd(table && table.getRecordAt(id)) != 'none';
+    });
+  }
+
+  function getCalloutEnd(rec) {
+    return internal.svg.getCalloutEndType(rec);
+  }
+
+  // The size a marker is drawn at: its own, or the default for its kind and
+  // line width.
+  function getCalloutEndSizeShown(ids) {
+    return getShownRecordValues(ids, function(rec) {
+      var size = rec ? Number(rec[calloutEndSizeField]) : 0;
+      var width = rec ? Number(rec[calloutWidthField]) : 0;
+      if (size > 0) return size;
+      return internal.svg.getDefaultCalloutEndSize(getCalloutEnd(rec),
+        width > 0 ? width : defaultCalloutWidth);
+    });
+  }
+
+  // Blank is "auto", which clears the anchor's symbol, and 0 is no gap at all:
+  // the two are different, which is why this is not a size field.
+  function applyCalloutGap(str) {
+    var val = Number(str);
+    if (str !== '' && !(isFinite(val) && val >= 0)) {
+      updateControls();
+      return;
+    }
+    applyStyleValues([[calloutGapField, str === '' ? '' : val]], getCalloutTargetIds());
+  }
+
+  // Returns whether the section is off.
+  function updateCalloutValueControls() {
+    var enabled = controlsEnabled();
+    var state = enabled ? getCalloutState() : 'off';
+    var off = state == 'off';
+    var ids = getCalloutValueIds();
+    var shape = enabled ? getCommonValue(ids, calloutField) : '';
+    var end = enabled ? getCommonValue(ids, calloutEndField, {useDefault: true, defaultValue: 'none'}) : '';
+    var width = getShownValue(ids, calloutWidthField, {useDefault: true, defaultValue: defaultCalloutWidth});
+    var gap = getCalloutGapShown(ids);
+    calloutControl.setPresence(state);
+    updateButtonGroup(calloutShapeGroupEl, calloutShapeBtns, off ? '' : shape, !enabled);
+    updateButtonGroup(calloutEndGroupEl, calloutEndBtns, off ? '' : end, off);
+    updateSwatchField(calloutColorInput, calloutColorFieldBox, calloutColorChit,
+      calloutColorPicker, getCalloutColorShown(ids), off);
+    updateOpacityControl(calloutOpacityInput,
+      getShownValue(ids, calloutOpacityField, {useDefault: true, defaultValue: 1}), off);
+    calloutWidthInput.setValue(width.value || '');
+    calloutWidthInput.setPlaceholder(width.mixed ? MIXED_TEXT : '');
+    calloutWidthInput.setDisabled(off || !enabled);
+    updateCalloutEndSizeControl(off || !enabled);
+    calloutGapInput.node().disabled = off || !enabled;
+    calloutGapInput.node().value = gap.value;
+    setMixedPlaceholder(calloutGapInput, gap.mixed);
+    return off;
+  }
+
+  // Inert with no marker to size. With nothing selected it describes the next
+  // label's marker, which the new-label style holds.
+  function updateCalloutEndSizeControl(off) {
+    var ids = getTargetIds().length > 0 ? getCalloutEndTargetIds() : [];
+    var noMarker = getTargetIds().length > 0 ? ids.length === 0 :
+      getCalloutEnd(editingNewLabels() ? getNewLabelStyle(gui) : null) == 'none';
+    var shown = off || noMarker ? {value: '', mixed: false} : getCalloutEndSizeShown(ids);
+    calloutEndSizeInput.setValue(shown.value);
+    calloutEndSizeInput.setPlaceholder(shown.mixed ? MIXED_TEXT : '');
+    calloutEndSizeInput.setDisabled(off || noMarker);
+  }
+
+  function updateButtonGroup(groupEl, btns, selected, off) {
+    groupEl.classed('disabled', off);
+    Object.keys(btns).forEach(function(name) {
+      btns[name].classed('selected', name == selected);
+      setPanelButtonDisabled(btns[name], off);
+    });
+  }
+
+  // The colour a callout is drawn in, which is the text's unless it has its
+  // own -- so a label with red text shows red here, not the black that
+  // getCommonValueInfo() would supply for an unset callout-color.
+  function getCalloutColorShown(ids) {
+    return getShownRecordValues(ids, function(rec) {
+      return rec && (rec[calloutColorField] || rec[fillField]) || defaultLabelColor;
+    });
+  }
+
+  // The gap the line is drawn with, which for a label with no callout-gap is
+  // the one the renderer works out from the symbol at the anchor. Not from
+  // getCommonValueInfo(), which reads 0 as unset, and a gap of 0 is a value.
+  function getCalloutGapShown(ids) {
+    return getShownRecordValues(ids, function(rec) {
+      var gap = internal.svg.getCalloutGap(rec || {}, internal.svg.getAnchorSymbolRadius(rec || {}));
+      return String(Math.round(gap * 10) / 10);
+    });
+  }
+
+  // {value, mixed} for a value worked out from each target's record, or from
+  // the new-label style when there is no target.
+  function getShownRecordValues(ids, fn) {
+    var table = getActiveTable();
+    var vals;
+    if (!controlsEnabled()) return {value: '', mixed: false};
+    if (ids.length === 0) {
+      return {value: fn(editingNewLabels() ? getNewLabelStyle(gui) : null), mixed: false};
+    }
+    vals = ids.map(function(id) {
+      return fn(table && table.getRecordAt(id));
+    });
+    return vals.every(function(val) { return val === vals[0]; }) ?
+      {value: vals[0], mixed: false} : {value: '', mixed: true};
+  }
+
+  function updateSavedStyleControls() {
+    presetControl.update();
+  }
+
+  function getCommonValue(ids, field, opts) {
+    return getCommonValueInfo(ids, field, opts).value;
+  }
+
+  // What the target labels say about one property:
+  //
+  //   value: the value they agree on, or '' if they do not
+  //   mixed: whether they disagree
+  //
+  // Both, because a control showing nothing has to be able to say which of the
+  // two kinds of nothing it means. Blank is also what an unset property looks
+  // like -- a label carries no letter-spacing until one is chosen -- and a
+  // field that reads the same either way leaves the user to guess whether the
+  // selection is uniform.
+  function getCommonValueInfo(ids, field, opts) {
+    var table = getActiveTable();
+    var records = table && table.getRecords();
+    var value, val, hasValue;
+    if (ids.length === 0) {
+      return {value: getNewLabelValue(field, opts), mixed: false};
+    }
+    if (!records) return {value: '', mixed: false};
+    for (var i=0; i<ids.length; i++) {
+      val = records[ids[i]] && records[ids[i]][field];
+      if (!val) {
+        // A property nobody set reads as what it renders as, where the caller
+        // says what that is: a label with font-size=12 and one with no
+        // font-size are drawn the same and agree. Without a default the two
+        // disagree, which is right for a property that means nothing when it
+        // is absent -- one label carrying inline css and one not are not in
+        // the same state.
+        val = opts && opts.useDefault ? opts.defaultValue : '';
+      } else {
+        hasValue = true;
+      }
+      if (i === 0) {
+        value = val;
+      } else if (val != value) {
+        return {value: '', mixed: true};
+      }
+    }
+    return {
+      value: hasValue || opts && opts.useDefault ? value : '',
+      mixed: false
+    };
+  }
+
+  // The same, as a control shows it: nothing at all, and nothing to say about
+  // it, while there is no target to read.
+  function getShownValue(ids, field, opts) {
+    if (!controlsEnabled()) return {value: '', mixed: false};
+    return getCommonValueInfo(ids, field, opts);
+  }
+
+  // The alignment the labels are *drawn* with, rather than the one they carry.
+  // A label with no label-align of its own is drawn with the justification its
+  // position implies, and one with no position either takes the SVG default,
+  // so a control with nothing selected would be saying "no alignment" about
+  // text that is plainly aligned one way or another.
+  function getCommonAlignment(ids) {
+    var records = getActiveTable() && getActiveTable().getRecords();
+    var value, val;
+    if (ids.length === 0) {
+      return resolveAlignment(editingNewLabels() ? getNewLabelStyle(gui) : null);
+    }
+    for (var i = 0; i < ids.length; i++) {
+      val = resolveAlignment(records && records[ids[i]]);
+      if (i === 0) value = val;
+      else if (val != value) return '';
+    }
+    return value;
+  }
+
+  function resolveAlignment(rec) {
+    var resolved = rec ? internal.resolveLabelPosition(rec) : null;
+    var anchor = resolved && resolved[textAnchorField] || 'start';
+    return anchorAlignments[anchor] || '';
+  }
+
+  // What a control shows when there is nothing to style: the value the next
+  // label will be created with, falling back to the same default an existing
+  // label would show.
+  function getNewLabelValue(field, opts) {
+    var style = editingNewLabels() ? getNewLabelStyle(gui) : null;
+    var val = style ? style[field] : '';
+    if (val || val === 0) return val;
+    return opts && opts.useDefault ? opts.defaultValue : '';
+  }
+
+  function applyFont(fontName) {
+    var ids = getTargetIds();
+    var style = getCommonValue(ids, fontStyleField, {useDefault: true, defaultValue: defaultFontStyle});
+    var weight = getCommonValue(ids, fontWeightField, {useDefault: true, defaultValue: defaultFontWeight});
+    applyStyleValues(getFontChangeValues(fontName, style, weight));
+  }
+
+  function nudgeFontSize(delta) {
+    var ids = getTargetIds();
+    var size = getNumericSize(ids, fontSizeField, defaultFontSize);
+    if (!controlsEnabled()) return;
+    size = Math.max(1, size + delta);
+    applyStyleValues([[fontSizeField, size]]);
+  }
+
+  // A face belongs to a font, so a label given one names the font it is a face
+  // of. Labels made before the tool started naming fonts, and labels made by
+  // the CLI, carry none: this is where the font they are already drawn in
+  // stops being a guess about the machine they are opened on.
+  //
+  // The font named is the one they are drawn in, not the tool's preferred
+  // font: choosing Bold is not a request to change the typeface. A label that
+  // does not exist yet is left alone here and given its font when it is made.
+  function applyFontStyleVariant(variant) {
+    var ids = getTargetIds();
+    var values = getFontStyleValues(variant);
+    if (ids.length > 0 && !getCommonValue(ids, fontField) && getDefaultFontName()) {
+      values.unshift([fontField, getDefaultFontName()]);
+    }
+    applyStyleValues(values);
+  }
+
+  function applyLabelColor(color) {
+    applyStyleValues([[fillField, color]]);
+  }
+
+  // Full opacity is stored as no opacity at all, rather than as opacity=1: the
+  // property is what makes a label translucent, and a column of 1s on every
+  // label the panel has touched is noise in the user's table. -style reads the
+  // empty value as "remove this".
+  function applyLabelOpacity(value) {
+    applyStyleValues([[opacityField, value >= 1 ? '' : value]]);
+  }
+
+  // The label-align written here replaces any text-anchor the label carries,
+  // which is why the two are set together: leaving a stale text-anchor behind
+  // would make the record say two things about the same question, and the
+  // resolved one wins by a rule rather than by being the last thing the user
+  // asked for.
+  function applyLabelAlign(align) {
+    var values = [[labelAlignField, align]];
+    // Only blanked if there is one to blank: -style writes an empty value as a
+    // field with nothing in it, and a label that never had a text-anchor
+    // should not acquire an empty column for one.
+    if (targetsHaveTextAnchor()) values.push([textAnchorField, '']);
+    applyStyleValues(values);
+  }
+
+  function targetsHaveTextAnchor() {
+    var records = getActiveTable() && getActiveTable().getRecords();
+    var ids = getTargetIds();
+    if (ids.length === 0) {
+      return !!(editingNewLabels() && getNewLabelStyle(gui)[textAnchorField]);
+    }
+    return ids.some(function(id) {
+      var rec = records && records[id];
+      return !!(rec && rec[textAnchorField]);
+    });
+  }
+
+  function applyInlineCss(css) {
+    applyStyleValues([[cssField, css || '']]);
+  }
+
+  function getStyleId(item) {
+    return item.id || 'label-' + item.name;
+  }
+
+  function getCurrentStyle() {
+    var style = {};
+    var fontStyle = fontControls.getFace();
+    var icon = getSelectedIcon();
+    addStyleValue(style, fontField, fontControls.getFont());
+    if (fontStyle) {
+      style[fontStyleField] = fontStyle.style;
+      style[fontWeightField] = fontStyle.weight;
+    }
+    addStyleValue(style, fontSizeField, fontControls.getSize());
+    addStyleValue(style, fillField, colorInput.node().value.trim());
+    addStyleValue(style, opacityField, getOpacityBelowFull(opacityInput));
+    addStyleValue(style, letterSpacingField, letterSpacingInput.node().value.trim());
+    addStyleValue(style, lineHeightField, lineHeightInput.node().value.trim());
+    addStyleValue(style, labelAlignField, getSelectedAlignment());
+    addStyleValue(style, cssField, cssInput.node().value.trim());
+    addStyleValue(style, 'label-pos', getSelectedLabelPosition());
+    addStyleValue(style, backgroundField, backgroundColorInput.node().value.trim());
+    if (backgroundColorInput.node().value.trim()) {
+      addStyleValue(style, backgroundOpacityField, getOpacityBelowFull(backgroundOpacityInput));
+    }
+    addStyleValue(style, paddingField, paddingInput.node().value.trim());
+    // A style saved without a halo carries no halo-width, so applying it
+    // leaves a halo alone rather than removing one; the same is true of icons.
+    if (getHaloState() == 'on') {
+      addStyleValue(style, haloWidthField, haloWidthInput.getValue());
+      addStyleValue(style, haloColorField, haloColorInput.node().value.trim());
+      addStyleValue(style, haloOpacityField, getOpacityBelowFull(haloOpacityInput));
+    }
+    if (icon) {
+      getIconShapeValues(icon).forEach(function(pair) {
+        addStyleValue(style, pair[0], pair[1]);
+      });
+      addStyleValue(style, iconSizeField, iconSizeInput.getValue());
+      // none is said only where the shape would otherwise have one
+      addStyleValue(style, iconFillField, iconColorInput.node().value.trim() ||
+        (getIconShapePaint(icon) == 'stroke' ? '' : 'none'));
+      addStyleValue(style, iconStrokeField, iconStrokeInput.node().value.trim() ||
+        (getIconShapePaint(icon) == 'fill' ? '' : 'none'));
+      if (iconStrokeInput.node().value.trim() && getIconShapePaint(icon) != 'nyt') {
+        addStyleValue(style, iconStrokeWidthField, iconStrokeWidthInput.getValue());
+      }
+      addStyleValue(style, iconOpacityField, getIconOpacityToWrite());
+    }
+    // A callout's shape and look, but not its geometry: a corner or an
+    // attachment point is placed for one label's surroundings, and means
+    // nothing on another.
+    if (getCalloutState() == 'on') {
+      addStyleValue(style, calloutField, getSelectedButton(calloutShapeBtns));
+      addStyleValue(style, calloutEndField, getSelectedButton(calloutEndBtns));
+      addStyleValue(style, calloutEndSizeField,
+        getCommonValue(getCalloutEndTargetIds(), calloutEndSizeField));
+      addStyleValue(style, calloutColorField,
+        getCommonValue(getCalloutTargetIds(), calloutColorField));
+      addStyleValue(style, calloutOpacityField, getOpacityBelowFull(calloutOpacityInput));
+      addStyleValue(style, calloutWidthField, calloutWidthInput.getValue());
+      addStyleValue(style, calloutGapField, getCommonValue(getCalloutTargetIds(), calloutGapField));
+    }
+    return style;
+  }
+
+  function getSelectedButton(btns) {
+    var out = '';
+    Object.keys(btns).forEach(function(name) {
+      if (btns[name].hasClass('selected')) out = name;
+    });
+    return out;
+  }
+
+  // A saved style carries an opacity only if it has one to carry: saving at
+  // 100% and applying it should not write a property the label did not have.
+  function getOpacityBelowFull(input) {
+    var val = parseOpacityValue(input.node().value);
+    return val === null || val >= 1 ? null : val;
+  }
+
+  function addStyleValue(style, field, value) {
+    if (value || value === 0) {
+      style[field] = value;
+    }
+  }
+
+  function getSelectedLabelPosition() {
+    var out = '';
+    labelPositions.forEach(function(pos) {
+      if (posBtns[pos].hasClass('selected')) out = pos;
+    });
+    return out;
+  }
+
+  function getSelectedAlignment() {
+    var out = '';
+    labelAlignments.forEach(function(item) {
+      if (alignBtns[item.name].hasClass('selected')) out = item.name;
+    });
+    return out;
+  }
+
+  function getSelectedIcon() {
+    return iconBtns.getSelected();
+  }
+
+  // A label that already has an NYT icon keeps it without the menu: it is
+  // drawn for everyone, and only choosing one is gated.
+  function getShownIconTypes() {
+    if (!shownIconTypes) {
+      shownIconTypes = getIconShapes('label', {nyt: isNytUser()});
+    }
+    return shownIconTypes;
+  }
+
+  function applyStyleObject(style) {
+    var styles = [];
+    savedStyleFields.forEach(function(field) {
+      if (field in style) {
+        styles.push([field, style[field]]);
+      }
+    });
+    applyStyleValues(styles);
+  }
+
+  function applyLabelPosition(pos) {
+    applyStyleValues([['label-pos', pos]]);
+  }
+
+  function applyIcon(iconName) {
+    var ids = getTargetIds();
+    var styles = getIconShapeValues(iconName, getTargetRecords(ids));
+    // The size the symbols in the selection already share, where they share
+    // one: a shape applied to a mixed selection gives the labels that had no
+    // symbol the size of the ones that did, rather than resetting them all to
+    // the default. A size or colour that was the old shape's default becomes
+    // the new one's (see getIconShapeChange()).
+    addIconShapeDefaults(styles, iconName, getIconValueIds());
+    // The symbol's own opacity goes on with it, because the label's opacity
+    // is applied to both elements: without this, text set to 50% would give
+    // a half-faded symbol while the Icon section showed it at 100%.
+    styles.push([iconOpacityField, getIconOpacityToWrite()]);
+    addIconPositionChange(styles, ids);
+    applyStyleValues(styles);
+  }
+
+  // The paint moves with the shape too: a circle's fill becomes a ring's
+  // stroke, and the NYT star brings its red (see getIconPaintChange()).
+  function addIconShapeDefaults(styles, iconName, ids) {
+    var prevShape = getCommonIconShape(ids);
+    var change = getIconShapeChange(iconName, prevShape, getCommonValue(ids, iconSizeField));
+    var vals = {};
+    var paint;
+    styles.push([iconSizeField, change.size]);
+    [iconFillField, iconStrokeField, iconStrokeWidthField, iconColorField].forEach(function(field) {
+      var info = getCommonValueInfo(ids, field);
+      vals[field] = info.mixed ? null : info.value || '';
+    });
+    paint = getIconPaintChange(iconName, prevShape, vals, '');
+    Object.keys(paint).forEach(function(field) {
+      styles.push([field, paint[field]]);
+    });
+  }
+
+  // Adding a symbol moves a label sitting at the centre out from under it, in
+  // the same command, so that the pair is one undo step and the text is never
+  // briefly drawn over the symbol it just asked for.
+  //
+  // Removing one moves nothing. It used to put the label back to the centre,
+  // which threw away a placement the user had made by hand for the sake of an
+  // invariant -- that text with nothing at its anchor sits on the anchor --
+  // that was never worth what it cost.
+  //
+  // Not for path labels, whose text runs along a curve: the commands ignore a
+  // position given for one and warn about it, and a warning from adding a
+  // symbol would be about something the user did not ask for.
+  function addIconPositionChange(styles, ids) {
+    if (anyLabelIsOnAPath(ids)) return;
+    if (everyTargetIsCentred(ids)) {
+      styles.push(['label-pos', labelPositionBesideIcon]);
+    }
+  }
+
+  function everyTargetIsCentred(ids) {
+    var table = getActiveTable();
+    if (ids.length === 0) return !labelIsPlaced(getNewLabelStyle(gui));
+    return ids.every(function(id) {
+      return !labelIsPlaced(table && table.getRecordAt(id));
+    });
+  }
+
+  function applyIconSize(value) {
+    applyStyleValues([[iconSizeField, value]], getIconTargetIds());
+  }
+
+  // An emptied field is no fill, or no stroke: "none" where the shape would
+  // otherwise have one -- a ring's stroke, a circle's fill -- and nothing
+  // where it has none without one.
+  function applyIconColor(color) {
+    var noneByDefault = getIconShapePaint(getCommonIconShape(getIconTargetIds())) == 'stroke';
+    applyStyleValues([[iconFillField, color || (noneByDefault ? '' : 'none')]], getIconTargetIds());
+  }
+
+  function applyIconStroke(color) {
+    var noneByDefault = getIconShapePaint(getCommonIconShape(getIconTargetIds())) == 'fill';
+    applyStyleValues([[iconStrokeField, color || (noneByDefault ? '' : 'none')]], getIconTargetIds());
+  }
+
+  function applyIconStrokeWidth(value) {
+    applyStyleValues([[iconStrokeWidthField, value]], getIconTargetIds());
+  }
+
+  function nudgeIconStrokeWidth(delta) {
+    var ids = getIconTargetIds();
+    var shown = getShownIconPaints(ids, getCommonIconShape(ids) || lastIconShape).strokeWidth;
+    if (!controlsEnabled() || shown.mixed) return;
+    applyIconStrokeWidth(Math.max(0, (Number(shown.value) || 0) + delta * 0.5));
+  }
+
+  function applyIconOpacity(value) {
+    applyStyleValues([[iconOpacityField, value]], getIconTargetIds());
+  }
+
+  function nudgeIconSize(delta) {
+    var ids = getIconTargetIds();
+    var size = getNumericSize(ids, iconSizeField,
+      getDefaultIconSize(getCommonIconShape(ids)));
+    if (!controlsEnabled()) return;
+    size = Math.max(1, size + delta);
+    applyIconSize(size);
+  }
+
+  // Whether the target labels have a symbol: 'on', 'off', or 'mixed' when only
+  // some of them do.
+  //
+  // An icon-size or icon-color on a label with no symbol draws nothing, which
+  // is why the size and colour controls are inert until a shape puts a symbol
+  // there to style.
+  function getIconState() {
+    var ids = getTargetIds();
+    var table = getActiveTable();
+    if (ids.length === 0) return getNewLabelValue(iconField) ? 'on' : 'off';
+    return getToggleState(ids.map(function(id) {
+      var rec = table && table.getRecordAt(id);
+      return !!(rec && rec[iconField]);
+    }));
+  }
+
+  // The labels an icon-size, icon-color or icon-opacity goes to: those in the
+  // target that have a symbol, which is all of them unless the section is mixed.
+  // Writing one of these to a label with no icon would add a property that
+  // draws nothing and a column to the user's table.
+  //
+  // Empty for a target with no symbol anywhere, which is the state those
+  // controls are disabled in, and empty for "new labels", where the style is
+  // held by the tool rather than by any feature.
+  function getIconTargetIds() {
+    var ids = getTargetIds();
+    var table = getActiveTable();
+    return ids.filter(function(id) {
+      var rec = table && table.getRecordAt(id);
+      return !!(rec && rec[iconField]);
+    });
+  }
+
+  // The labels the section's controls *show* the values of, which is not quite
+  // the set they write to: with no symbol anywhere the fields go on showing
+  // what the target carries, greyed, because that is what a shape adds the
+  // symbol with. Narrowing there would show the values held for the next label
+  // instead of the ones stored on the selection.
+  function getIconValueIds() {
+    var ids = getIconTargetIds();
+    return ids.length > 0 ? ids : getTargetIds();
+  }
+
+  // The panel's shape for the labels' icons -- 'triangle' rather than the
+  // icon=polygon and icon-sides=3 it is stored as -- or '' if they disagree,
+  // or have an icon the panel does not offer, or none.
+  function getCommonIconShape(ids) {
+    var names = getTargetRecords(ids).map(getIconShapeName);
+    var first = names.length > 0 ? names[0] : null;
+    return first && names.every(function(name) { return name == first; }) ? first : '';
+  }
+
+  // The records of @ids, or the style of the next label for none
+  function getTargetRecords(ids) {
+    var table = getActiveTable();
+    if (ids.length === 0) {
+      return editingNewLabels() ? [getNewLabelStyle(gui)] : [];
+    }
+    return ids.map(function(id) {
+      return table && table.getRecordAt(id) || {};
+    });
+  }
+
+  function getIconOpacityToWrite() {
+    var val = parseOpacityValue(iconOpacityInput.node().value);
+    if (val !== null) return val;
+    // The field reads blank while there is no symbol, so a symbol added to a
+    // label that still carries a fade takes it back rather than being reset
+    // to full.
+    var stored = getCommonValue(getIconValueIds(), iconOpacityField, {useDefault: true, defaultValue: 1});
+    val = stored === '' ? 1 : Number(stored);
+    return isFinite(val) ? val : 1;
+  }
+
+  function getNumericSize(ids, field, defaultValue) {
+    var val = getCommonValue(ids, field);
+    val = val ? Number(val) : defaultValue;
+    return isFinite(val) && val > 0 ? val : defaultValue;
+  }
+
+  function initColorPicker(parent, chit, input, onChange, opacityInput) {
+    return new ColorPicker(parent, {
+      opacityInput: opacityInput,
+      onPreview: function(hex) {
+        input.node().value = hex;
+        chit.css('background-color', hex);
+      },
+      onChange: onChange
+    });
+  }
+
+  function toggleColorPicker() {
+    colorPicker.toggle();
+  }
+
+  function hideColorPicker() {
+    colorPicker.hide();
+    haloColorPicker.hide();
+    iconColorPicker.hide();
+    iconStrokePicker.hide();
+    calloutColorPicker.hide();
+    backgroundColorPicker.hide();
+  }
+
+  function isFormElement(node) {
+    return !!node && /^(INPUT|SELECT|TEXTAREA|BUTTON|OPTION)$/.test(node.nodeName);
+  }
+
+  // Hands the keyboard back after a control has done its job: to the label
+  // being typed into if there is one, and to nothing at all otherwise.
+  function releaseFocus() {
+    var session = getLabelTextSession(gui);
+    if (!session) {
+      releasePanelFocus(panel.node());
+    } else if (panel.node().contains(document.activeElement)) {
+      session.refocus();
+    }
+  }
+
+  // idsArg: (optional) the labels to write to, when they are not the whole
+  //   target -- an icon property goes only to the labels that have a symbol.
+  function applyStyleValues(styles, idsArg) {
+    var ids = idsArg || getTargetIds();
+    if (styles.length === 0) return;
+    releaseFocus();
+    // What the panel is set to is always what the next label gets, whether or
+    // not these values also went to a label that already exists. -labels
+    // writes them when that label is created, which is why this needs no
+    // command and no undo step of its own.
+    if (labelModeIsOn()) {
+      updateNewLabelStyle(gui, styles);
+      // A label being typed into that has no feature yet is drawn from that
+      // style, so it has to be redrawn to show the change -- it is the preview.
+      refreshPendingLabel();
+    }
+    if (ids.length > 0) {
+      applyStyleCommand(styles, ids);
+      return;
+    }
+    if (!labelModeIsOn()) return;
+    updateControls();
+  }
+
+  function refreshPendingLabel() {
+    var session = getLabelTextSession(gui);
+    if (session && session.id == -1 && session.refresh) session.refresh();
+  }
+
+  function applyStyleCommand(styles, ids) {
+    var lyr = getActiveLayer();
+    var parts = ['-labels'];
+    if (!gui.console || !lyr) return;
+    styles.forEach(function(style) {
+      parts.push(style[0] + '=' + quoteCommandValue(style[1]));
+    });
+    if (ids.length < internal.getFeatureCount(lyr)) {
+      parts.push('ids=' + ids.join(','));
+    }
+    parts = parts.concat(getRewrapCommands(styles, ids, lyr));
+    runGuiEditCommand(gui, parts.join(' '), {
+      title: 'Label styles',
+      onDone: function() {
+        setTimeout(updateSelectionDisplay, 0);
+        updateControls();
+        updateSelectionDisplay();
+      }
+    });
+  }
+
+  // A text block's breaks are only right for the width and font they were
+  // found with, so a change to either rewraps it in the same command: one undo
+  // step, and no moment at which the block is drawn with its old lines in its
+  // new font. One -labels per label, since each has text of its own.
+  function getRewrapCommands(styles, ids, lyr) {
+    var table = lyr.data;
+    var changes = {};
+    var out = [];
+    styles.forEach(function(style) { changes[style[0]] = style[1]; });
+    if (!table || !WRAP_FIELDS.some(function(name) { return name in changes; })) {
+      return out;
+    }
+    ids.forEach(function(id) {
+      var rec = table.getRecordAt(id);
+      var value = rec && rec['label-text'];
+      var wrapped;
+      if (!value || everyLabelIsOnAPath([id])) return;
+      wrapped = rewrapLabelValue(value, Object.assign({}, rec, changes));
+      if (wrapped !== value) out.push(getLabelTextCommand(wrapped, id, null));
+    });
+    return out;
+  }
+
+  // The yellow halo, which belongs to the older label_style mode. The label
+  // tool draws its selection as an outline instead (gui-label-selection.mjs),
+  // because a halo says "this text is marked" where an outline says "this is
+  // an object you can act on" -- and the tool needs the second reading now that
+  // one click selects and another reaches into the text.
+  function updateSelectionDisplay() {
+    clearSelectionDisplay();
+    if (labelModeIsOn()) return;
+    getSelectionIds().forEach(function(id) {
+      var textNode = getTextNodeById(id);
+      if (textNode) {
+        textNode.classList.add('label-style-selected');
+      }
+    });
+  }
+
+  function clearSelectionDisplay() {
+    var lyr = hit && hit.getHitTarget();
+    var container = lyr && lyr.gui && lyr.gui.svg_container;
+    if (!container) return;
+    container.querySelectorAll('.label-style-selected').forEach(function(node) {
+      node.classList.remove('label-style-selected');
+    });
+  }
+
+  function getTextNodeById(id) {
+    var lyr = hit && hit.getHitTarget();
+    var container = lyr && lyr.gui && lyr.gui.svg_container;
+    var symbol = container && container.querySelector('[data-id="' + id + '"]');
+    if (!symbol) return null;
+    return symbol.tagName == 'text' ? symbol : symbol.querySelector('text');
+  }
+
+}

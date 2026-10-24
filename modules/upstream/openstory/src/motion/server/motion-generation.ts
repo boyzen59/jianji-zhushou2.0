@@ -1,0 +1,1118 @@
+import { getEnv } from '#env';
+import { registersWithArk } from '@/cast/likeness';
+import { toArkFetchableUrl } from '@/models/server/byteplus-asset-ingest';
+import {
+  arkUrlFor,
+  type ArkAssetMap,
+  type ArkStill,
+} from '@/models/server/byteplus-asset-steps';
+import {
+  arkAdapterConfig,
+  claimBytePlusVia,
+  getArkApiKey,
+  isBytePlusConfigured,
+  loadBytePlusVideo,
+} from '@/models/server/byteplus-config';
+import {
+  BYTEPLUS_PORTRAIT_FILTER_MESSAGE,
+  isBytePlusPortraitFilterError,
+} from '@/models/server/byteplus-portrait-filter';
+import { bytePlusVideoUnitsBilled } from '@/billing/byteplus-pricing';
+import { withBytePlusQuotaRetry } from '@/models/server/quota-retry';
+import { falCostFromUnits } from '@/billing/server/fal-cost-billing';
+import { estimateFalCost, type EffectiveFalPricing } from '@/billing/fal-cost';
+import {
+  createDeadlineFetch,
+  FAL_REQUEST_TIMEOUT_MS,
+} from '@/models/server/fal-deadline-fetch';
+import {
+  geminiVideoCostFromUsage,
+  geminiVideoDurationCost,
+  isNativeGeminiVideoModel,
+  NATIVE_GEMINI_VIDEO_MODEL,
+} from '@/models/gemini-native';
+import {
+  grokVideoCost,
+  grokVideoDurationCost,
+  isNativeGrokVideoModel,
+  NATIVE_GROK_VIDEO_MODEL,
+} from '@/models/grok-native';
+import {
+  DEFAULT_VIDEO_MODEL,
+  getBytePlusVideoModelId,
+  getMotionReferenceEndpoint,
+  IMAGE_TO_VIDEO_MODELS,
+  isNativeBytePlusVideoModel,
+  referenceOnlyCapableWith,
+  supportsDraftMode,
+  supportsReferenceOnlyMotion,
+  type ImageToVideoModel,
+} from '@/models/models';
+import { submitBytePlusFinalRender } from '@/models/server/byteplus-final-render';
+import { DRAFT_FINAL_RESOLUTION, DRAFT_RESOLUTION } from '@/motion/draft-mode';
+import { assertMediaVia, type MediaVia } from '@/models/via';
+import { workersSafeFetch } from '@/platform/server/ai/workers-safe-fetch';
+import { reportMissingBillingCost } from '@/billing/billing-observability';
+import { getLogger } from '@/platform/logger';
+import { getPostHogClient } from '@/platform/server/observability/posthog-server';
+import { ZERO_MICROS, type Microdollars } from '@/billing/money';
+import type { AspectRatio } from '@/models/aspect-ratios';
+import type { Resolution } from '@/models/resolutions';
+import type { ResolvedApiKey } from '@/models/server/db/api-keys';
+import type { CredentialScopedDb } from '@/platform/server/db/scoped-workflow';
+import { snapDuration } from '@/motion/snap-duration';
+import type { ReferenceImageDescription } from '@/stills/reference-image-prompt';
+import {
+  ensureExternallyFetchableUrl,
+  toDataOrCdnUrl,
+} from '@/platform/server/storage/external-url';
+import { bindableReferences } from './build-reference-video-prompt';
+import { assertReferencesUsable } from '@/motion/reference-support';
+import { generateVideo, type TokenUsage } from '@tanstack/ai';
+import { getVideoJobStatus } from './video-job-status';
+import { falVideo } from '@tanstack/ai-fal';
+import { createGeminiVideo } from '@tanstack/ai-gemini';
+import { createGrokVideo } from '@tanstack/ai-grok';
+import { buildBytePlusVideoRequest } from './build-byteplus-video-request';
+import { buildGeminiVideoRequest } from './build-gemini-video-request';
+import { getGeminiFileState, isGeminiFilesVideoUrl } from './video-storage';
+import { buildGrokVideoRequest } from './build-grok-video-request';
+import {
+  buildMotionRequest,
+  pinsDedicatedStartFrame,
+} from './build-model-input';
+import { resolveMotionEndpoint } from '@/motion/resolve-motion-endpoint';
+
+const logger = getLogger(['openstory', 'motion', 'generation']);
+
+export type GenerateMotionOptions = {
+  credentials?: CredentialScopedDb;
+  /**
+   * The rendered start frame. Absent only in reference-only mode, where no
+   * still was ever generated and the clip is driven by the prompt plus the
+   * cast/location/element sheets — see `referenceOnly` below.
+   */
+  imageUrl?: string;
+  prompt: string;
+  model?: ImageToVideoModel;
+  duration?: number;
+  fps?: number;
+  motionBucket?: number;
+  aspectRatio?: AspectRatio;
+  /** Output resolution tier (#1449). Resolved against whatever `resolution`
+   *  tokens the endpoint advertises — a model that stops at 1080p serves a 4K
+   *  ask with 1080p rather than rejecting it. */
+  resolution?: Resolution;
+  /** For audio-capable models (kling v3, seedance), pass `false` to suppress
+   *  the model's native audio output (sfx/ambient/lip-sync). Omitting the
+   *  flag lets the API schema default apply (true for audio-capable models). */
+  generateAudio?: boolean;
+  /**
+   * Character + element reference images for identity consistency across the
+   * clip (#873). Emitted when `resolveMotionEndpoint` says they go on the
+   * wire: Seedance / Kling O3 `image_urls[]`, H3 Max
+   * `reference_image_urls[]`, and Grok Imagine 1.5 native
+   * `metadata.role: 'reference' | 'character'` prompt parts. Other models
+   * substitute tokens with descriptions instead.
+   */
+  referenceImages?: ReferenceImageDescription[];
+  /**
+   * Reference-only mode: this shot has no start frame by design, not by
+   * failure. It routes to the reference-to-video endpoint when the scene
+   * matched sheets and to the model's text-to-video sibling when it matched
+   * none (#1521 — fal r2v rejects an empty image list), and it is what keeps
+   * `@Image1` bound to a real reference instead of a nonexistent still.
+   * `imageUrl` must be absent whenever this is true.
+   */
+  referenceOnly?: boolean;
+  /**
+   * Kling v3 packed multi-shot (#1510). When set, the fal request sends
+   * `multi_prompt[]` + `shot_type: customize` and omits `prompt`.
+   */
+  multiPrompt?: Array<{ prompt: string; duration: string }>;
+  /**
+   * Ark draft mode (#1756): render a 480p preview. Honoured only when the
+   * model `supportsDraftMode` — other models render as usual — and only on
+   * the BytePlus via; a draft-capable model routed elsewhere refuses.
+   */
+  draft?: boolean;
+  /**
+   * Render the 1080p final of this Ark draft task (#1756). The request's only
+   * content is the id — Ark reuses the draft's prompt, assets and seed — so
+   * `imageUrl` / `referenceImages` / `prompt` are not sent. BytePlus via only.
+   */
+  finalFromDraftTaskId?: string;
+};
+
+export type MotionJobSubmission = {
+  jobId: string;
+  modelKey: ImageToVideoModel;
+  /**
+   * Endpoint this job was submitted to. H3 Max with refs hits
+   * `minimax/h3-max/reference-to-video`, not the catalog i2v id — polling
+   * MUST use this stamp. Missing on in-flight runs from before the field:
+   * poll falls back to `IMAGE_TO_VIDEO_MODELS[model].id`.
+   */
+  endpointId: string;
+  /**
+   * Pricing Via — which API this job was submitted to. Job ids are via-scoped,
+   * so polling MUST go back to the same via. Re-deciding from live keys would
+   * send a fal request id to xAI (or the reverse) if a key changed mid-run
+   * (#1216). Vendor is `IMAGE_TO_VIDEO_MODELS[model].vendor`.
+   */
+  via: MediaVia;
+  usedOwnKey: boolean;
+  submittedAt: number;
+  /**
+   * Set when the job went out as an Ark draft (#1756): the id "Render at
+   * quality" renders the final from. The workflow stamps it on the version.
+   */
+  draftTaskId?: string;
+};
+
+async function resolveFalMotionKey(
+  credentials?: CredentialScopedDb
+): Promise<ResolvedApiKey> {
+  if (credentials) return credentials.resolveKey('fal');
+  return { key: getEnv().FAL_KEY, source: 'platform' };
+}
+
+/** Undefined when the model isn't Grok or no xAI key exists — it then goes to
+ *  fal as before (#1167). */
+async function resolveOptionalXaiKey(
+  credentials?: CredentialScopedDb
+): Promise<ResolvedApiKey | undefined> {
+  if (credentials) return credentials.resolveOptionalKey('xai');
+  const platformKey = getEnv().XAI_API_KEY;
+  return platformKey ? { key: platformKey, source: 'platform' } : undefined;
+}
+
+/** Undefined when the model isn't Omni Flash or no Google key exists — it
+ *  then goes to fal as before. */
+async function resolveOptionalGoogleKey(
+  credentials?: CredentialScopedDb
+): Promise<ResolvedApiKey | undefined> {
+  if (credentials) return credentials.resolveOptionalKey('google');
+  const platformKey = getEnv().GEMINI_API_KEY;
+  return platformKey ? { key: platformKey, source: 'platform' } : undefined;
+}
+
+/**
+ * Can this model render a reference-only shot FOR THIS TEAM?
+ *
+ * `supportsReferenceOnlyMotion` is the model-only floor for isomorphic code,
+ * keyed on the model alone because a pure schema cannot see a team's keys.
+ * Here the via IS knowable, so the answer can be the honest one — which
+ * matters for Grok Imagine: it accepts references with no start frame on the
+ * native xAI route (`resolveMotionEndpoint` already returns `inline` for it),
+ * but its fal id is `xai/grok-imagine-video/v1.5/image-to-video`, which
+ * requires `image_url`. So Grok can serve a reference-only shot exactly when
+ * an xAI key resolves.
+ *
+ * Use this wherever a team's keys are reachable: creation, the per-shot
+ * toggle, regenerate, add-model, and the content-flag rescue. A key can still
+ * be revoked between creation and submit, so `MotionWorkflow`'s entry guard
+ * re-asks.
+ */
+export async function canRenderReferenceOnly(
+  modelKey: ImageToVideoModel,
+  credentials?: CredentialScopedDb
+): Promise<boolean> {
+  if (supportsReferenceOnlyMotion(modelKey)) return true;
+  return referenceOnlyCapableWith(modelKey, {
+    xai: Boolean(await resolveOptionalXaiKey(credentials)),
+  });
+}
+
+/**
+ * Which via this model would submit to right now. Same claim order as
+ * `submitMotionJob` (native xAI → native Google → BytePlus → fal). Used by
+ * motion `onFailure` so a Google Omni failure is not recorded as `fal`.
+ */
+export async function resolveMotionVia(
+  modelKey: ImageToVideoModel,
+  credentials?: CredentialScopedDb
+): Promise<MediaVia> {
+  if (isNativeGrokVideoModel(modelKey)) {
+    const xaiKey = await resolveOptionalXaiKey(credentials);
+    if (xaiKey) return 'xai';
+  }
+  if (isNativeGeminiVideoModel(modelKey)) {
+    const googleKey = await resolveOptionalGoogleKey(credentials);
+    if (googleKey) return 'google';
+  }
+  if (isNativeBytePlusVideoModel(modelKey) && isBytePlusConfigured()) {
+    const falKey = await resolveOptionalFalKey(credentials);
+    return claimBytePlusVia({
+      native: true,
+      usingOwnFalKey: falKey?.source === 'team',
+    });
+  }
+  return 'fal';
+}
+
+/**
+ * Whether Seedance 2.5 submits to Ark for this team right now: the `onArk`
+ * every edit decision takes (#2036). A team on its own fal key lands on fal,
+ * which never sends an edit.
+ */
+export async function seedanceRunsOnArk(
+  credentials?: CredentialScopedDb
+): Promise<boolean> {
+  return (await resolveMotionVia('seedance_v2_5', credentials)) === 'byteplus';
+}
+
+function createNativeMotionAdapter(apiKey: string) {
+  const env = getEnv();
+  return createGrokVideo(NATIVE_GROK_VIDEO_MODEL, apiKey, {
+    fetch: workersSafeFetch,
+    ...(env.XAI_BASE_URL && { baseURL: env.XAI_BASE_URL }),
+  });
+}
+
+function createNativeGeminiMotionAdapter(apiKey: string) {
+  const env = getEnv();
+  return createGeminiVideo(NATIVE_GEMINI_VIDEO_MODEL, apiKey, {
+    // GEMINI_BASE_URL is the aimock hook for the native Google path,
+    // mirroring XAI_BASE_URL above.
+    ...(env.GEMINI_BASE_URL && {
+      httpOptions: { baseUrl: env.GEMINI_BASE_URL },
+    }),
+  });
+}
+
+async function inlineNativeReferenceImages(
+  references: ReferenceImageDescription[] | undefined
+): Promise<ReferenceImageDescription[]> {
+  if (!references?.length) return [];
+  return Promise.all(
+    references.map(async (ref) => ({
+      ...ref,
+      referenceImageUrl: await toDataOrCdnUrl(ref.referenceImageUrl),
+    }))
+  );
+}
+
+async function resolveOptionalFalKey(
+  credentials?: CredentialScopedDb
+): Promise<ResolvedApiKey | undefined> {
+  if (credentials) return credentials.resolveOptionalKey('fal');
+  const platformKey = getEnv().FAL_KEY;
+  return platformKey ? { key: platformKey, source: 'platform' } : undefined;
+}
+
+async function submitFalMotionJob(
+  options: GenerateMotionOptions,
+  modelKey: ImageToVideoModel
+): Promise<{ jobId: string; usedOwnKey: boolean; endpointId: string }> {
+  // A clip or voice line this model cannot use — it takes no reference of
+  // that kind, or not one that long — is a refusal, not a degradation
+  // (#1559). Describing it in the prompt instead would bill a clip that
+  // ignored what the user attached, silently, once per shot across a batch.
+  // The panel and the trigger say the same thing before Generate; a run that
+  // holds first (smart retry, update-stale, add-model) is refused here. fal
+  // never sends a Seedance edit (#2036).
+  assertReferencesUsable(modelKey, options.referenceImages ?? [], {
+    hasStartFrame: Boolean(options.imageUrl),
+    prompt: options.prompt,
+    onArk: false,
+  });
+
+  // References this model can actually carry (#1559): a shot whose only
+  // attachment is an audio element has nothing to send a reference endpoint,
+  // which rejects a request with no reference image or video.
+  const hasReferenceImages =
+    bindableReferences(
+      getMotionReferenceEndpoint(modelKey),
+      options.referenceImages ?? [],
+      Boolean(options.imageUrl)
+    ).length > 0;
+  const endpoint = resolveMotionEndpoint(
+    modelKey,
+    hasReferenceImages,
+    'fal',
+    options.referenceOnly ?? false
+  );
+  const key = await resolveFalMotionKey(options.credentials);
+
+  // Locally-served /r2/ image URLs aren't reachable by real fal — swap them
+  // for a fal-storage upload first (no-op in prod and e2e replay).
+  const imageUrl = options.imageUrl
+    ? await ensureExternallyFetchableUrl(options.imageUrl, key.key)
+    : undefined;
+
+  // Reference URLs only need to be fetchable when they go on the wire
+  // (`endpoint` or `inline`). Models with `references: 'none'` keep the raw
+  // URLs: they are never sent, but the builder still needs tokens +
+  // descriptions to substitute entity names in the prompt.
+  const referenceImages =
+    endpoint.references !== 'none' && options.referenceImages?.length
+      ? await Promise.all(
+          options.referenceImages.map(async (ref) => ({
+            ...ref,
+            referenceImageUrl: await ensureExternallyFetchableUrl(
+              ref.referenceImageUrl,
+              key.key
+            ),
+          }))
+        )
+      : options.referenceImages;
+
+  const optionsWithFetchableUrls = {
+    ...options,
+    imageUrl,
+    referenceImages,
+    model: modelKey,
+  };
+  const modelInput = buildMotionRequest(
+    optionsWithFetchableUrls,
+    modelKey
+  ).input;
+
+  const { prompt: optimisedPrompt, ...modelOptions } = modelInput;
+  if (typeof optimisedPrompt !== 'string') {
+    throw new Error('Truncated prompt is not a string');
+  }
+
+  const job = await generateVideo({
+    adapter: falVideo(endpoint.endpointId, { apiKey: key.key }),
+    prompt: optimisedPrompt,
+    modelOptions,
+    timeout: FAL_REQUEST_TIMEOUT_MS,
+    debug: false,
+  });
+  return {
+    jobId: job.jobId,
+    usedOwnKey: key.source === 'team',
+    endpointId: endpoint.endpointId,
+  };
+}
+
+/**
+ * Submit a motion generation job without polling.
+ * Returns the job ID so the workflow can poll with `context.sleep()` between steps.
+ */
+/**
+ * Submitting needs the stills the workflow already registered with BytePlus
+ * (`ingestArkAssets`, #1519), which estimating does not — so the map rides
+ * here rather than on `GenerateMotionOptions`, which `calculateMotionMetadata`
+ * shares. Only the byteplus via reads it; see {@link arkStillsForMotion} for
+ * which stills it must cover.
+ */
+export type SubmitMotionOptions = GenerateMotionOptions & {
+  arkAssets: ArkAssetMap;
+  /** See `BytePlusVideoRequestOptions.heldSeedanceEditSeconds` (#2036). */
+  heldSeedanceEditSeconds: number | null;
+};
+
+type MotionRef = NonNullable<GenerateMotionOptions['referenceImages']>[number];
+
+/**
+ * Character (and other face-bearing) refs go through ingest — as `asset://`
+ * when {@link registersWithArk}, else as `plain`. A reference clip is always
+ * registered, as a Video asset (#1930): Ark refuses a lifelike face in a clip
+ * sent as a URL. The run has already refused a clip the ledger has not
+ * cleared or signed (`check-reference-clip-rights`). Location/element
+ * sheets and audio are never ingested. Submit uses the same helper so
+ * `arkUrlFor` is not asked for a URL the map does not hold.
+ */
+function arkStillForMotionRef(ref: MotionRef): ArkStill | null {
+  // ponytail: every clip spends a CreateAsset turn; snapshot the ledger
+  // verdict on the ref if clips without a person ever crowd the pool.
+  if (ref.kind === 'video') {
+    return { storedUrl: ref.referenceImageUrl, slot: 'library', kind: 'Video' };
+  }
+  if (ref.role === 'location' || ref.role === 'element') return null;
+  if (ref.kind === 'audio') return null;
+  return {
+    storedUrl: ref.referenceImageUrl,
+    slot: 'library',
+    ...(registersWithArk(ref.isPerson) ? {} : { plain: true }),
+  };
+}
+
+/**
+ * The stills a BytePlus submit needs registered: the start frame and every
+ * character sheet that may show a person. CreateAsset is paced by
+ * `BYTEPLUS_ASSET_WRITE_QPM`, so location and element sheets — no people —
+ * are not spent on, and neither are non-person character sheets (#1682).
+ * Those still go through ingest as `plain` so submit looks them up in the
+ * same map. The workflow runs these through `ingestArkAssets` before
+ * submit.
+ */
+export function arkStillsForMotion(
+  options: Pick<GenerateMotionOptions, 'imageUrl' | 'referenceImages'>
+): ArkStill[] {
+  const stills: ArkStill[] = [];
+  if (options.imageUrl)
+    stills.push({ storedUrl: options.imageUrl, slot: 'frame' });
+  for (const ref of options.referenceImages ?? []) {
+    const still = arkStillForMotionRef(ref);
+    if (still) stills.push(still);
+  }
+  return stills;
+}
+
+/**
+ * The stills a batch would actually spend `CreateAsset` on — what pool
+ * admission budgets for (#1756). The same rule as ingest: start frames and
+ * sheets that may show a person; `plain` stills (location, element, known
+ * non-person) ride as URLs and take no slot. Budgeting every reference URL
+ * instead asked for 8 slots where 4 would be created, and stalled the batch.
+ */
+export function arkStillsToRegister(
+  shots: readonly Pick<GenerateMotionOptions, 'imageUrl' | 'referenceImages'>[]
+): string[] {
+  return shots.flatMap((shot) =>
+    arkStillsForMotion(shot)
+      .filter((still) => !still.plain)
+      .map((still) => still.storedUrl)
+  );
+}
+
+export async function submitMotionJob(
+  options: SubmitMotionOptions
+): Promise<MotionJobSubmission> {
+  const modelKey = options.model || DEFAULT_VIDEO_MODEL;
+
+  // Same order as Grok (#1167): native key first, fal is the fallback.
+  // `resolveKey('fal')` throws with no fal key, so an xAI-only (or
+  // Google-only) deploy must not reach it. BytePlus is platform-only (no
+  // resolveOptionalKey('byteplus')) and yields to a BYOK fal team.
+  const via = await resolveMotionVia(modelKey, options.credentials);
+  const xaiKey =
+    via === 'xai'
+      ? await resolveOptionalXaiKey(options.credentials)
+      : undefined;
+  const googleKey =
+    via === 'google'
+      ? await resolveOptionalGoogleKey(options.credentials)
+      : undefined;
+
+  // A clip or voice line this model cannot use — it takes no reference of
+  // that kind, or not one that long — is a refusal, not a degradation
+  // (#1559). Describing it in the prompt instead would bill a clip that
+  // ignored what the user attached, silently, once per shot across a batch.
+  // The panel and the trigger say the same thing before Generate; a run that
+  // holds first (smart retry, update-stale, add-model) is refused here.
+  assertReferencesUsable(modelKey, options.referenceImages ?? [], {
+    hasStartFrame: Boolean(options.imageUrl),
+    prompt: options.prompt,
+    onArk: via === 'byteplus',
+  });
+
+  // References this model can actually carry (#1559): a shot whose only
+  // attachment is an audio element has nothing to send a reference endpoint,
+  // which rejects a request with no reference image or video.
+  const hasReferenceImages =
+    bindableReferences(
+      getMotionReferenceEndpoint(modelKey),
+      options.referenceImages ?? [],
+      Boolean(options.imageUrl)
+    ).length > 0;
+
+  const endpoint = resolveMotionEndpoint(
+    modelKey,
+    hasReferenceImages,
+    via,
+    options.referenceOnly ?? false
+  );
+
+  // Reference-only with nothing matched is not the mode — it is text-to-video
+  // (the fal route submits to the t2v sibling, #1521), with the character, set
+  // and continuity all reinvented for this one shot while every sibling shot
+  // binds its sheets. The request is still valid, so this is a warning rather
+  // than a throw; without it the shot just comes back looking wrong and
+  // nothing anywhere says why. Also emitted as an event: a server log is
+  // nobody's dashboard, and the rate of this is the measure of how often
+  // reference-only silently degrades to text-to-video.
+  if (options.referenceOnly && !hasReferenceImages) {
+    logger.warn(
+      'Reference-only motion job has no matched reference sheets; submitting as text-to-video',
+      { modelKey, via: endpoint.via, endpointId: endpoint.endpointId }
+    );
+    getPostHogClient()?.capture({
+      distinctId: 'system',
+      event: 'reference_only_no_references',
+      properties: {
+        model: modelKey,
+        via: endpoint.via,
+        endpointId: endpoint.endpointId,
+      },
+    });
+  }
+
+  // The image list is capped per endpoint, so references past the cap never
+  // reach the model. Their tokens degrade to plain descriptions, and one whose
+  // token was never in the prompt leaves no trace at all — no image, no
+  // description, no legend line. Kling O3's cap of 4 is the tightest of any
+  // reference model, so a large cast reaches it in ordinary use. Warned rather
+  // than thrown for the same reason as above — the request is valid, the clip
+  // just comes back missing someone.
+  if (endpoint.references === 'endpoint') {
+    // The still only spends a slot where it rides the image list; pinned in
+    // its own start-frame field it does not (#1498).
+    const budget =
+      endpoint.referenceConfig.maxImages -
+      (pinsDedicatedStartFrame(endpoint.referenceConfig.endpointId, options)
+        ? 0
+        : options.imageUrl
+          ? 1
+          : 0);
+    const attachable = (options.referenceImages ?? []).filter(
+      (ref) => ref.referenceImageUrl
+    ).length;
+    if (attachable > budget) {
+      logger.warn(
+        'Motion references exceed the endpoint image cap; the overflow is not attached',
+        {
+          modelKey,
+          endpointId: endpoint.endpointId,
+          attachable,
+          budget,
+          dropped: attachable - budget,
+        }
+      );
+      getPostHogClient()?.capture({
+        distinctId: 'system',
+        event: 'motion_references_over_cap',
+        properties: {
+          model: modelKey,
+          via: endpoint.via,
+          endpointId: endpoint.endpointId,
+          attachable,
+          budget,
+          dropped: attachable - budget,
+        },
+      });
+    }
+  }
+
+  // Draft mode is an Ark feature (#1756): a draft-capable model that lands
+  // on fal (a BYOK fal team) cannot honour it, and saying so beats a full
+  // render the user thought was a cheap preview. A model without draft mode
+  // ignores the flag, like `generateAudio` on a silent model. A final is
+  // never a draft, whatever its payload says: its task id must not be stamped.
+  const draft =
+    Boolean(options.draft) &&
+    !options.finalFromDraftTaskId &&
+    supportsDraftMode(modelKey);
+  if ((draft || options.finalFromDraftTaskId) && via !== 'byteplus') {
+    throw new Error(
+      `Draft mode needs the BytePlus route, but ${IMAGE_TO_VIDEO_MODELS[modelKey].name} is routed to ${via} for this team`
+    );
+  }
+
+  let jobId: string;
+  let usedOwnKey: boolean;
+  let stampedVia: MediaVia = endpoint.via;
+  let stampedEndpointId = endpoint.endpointId;
+
+  switch (endpoint.via) {
+    case 'xai': {
+      if (!xaiKey) {
+        throw new Error('xAI motion via selected with no xAI key');
+      }
+      // Start frame and refs are inlined as data URIs so this path needs no
+      // fal key. Same payload as the scene editor's Grok preview.
+      const imageUrl = options.imageUrl
+        ? await toDataOrCdnUrl(options.imageUrl)
+        : undefined;
+      const referenceImages = await inlineNativeReferenceImages(
+        options.referenceImages
+      );
+      const { input } = buildGrokVideoRequest({
+        prompt: options.prompt,
+        imageUrl,
+        duration: snapDuration(options.duration, modelKey),
+        aspectRatio: options.aspectRatio,
+        ...(options.resolution && { resolution: options.resolution }),
+        referenceImages,
+        model: modelKey,
+      });
+      const job = await generateVideo({
+        adapter: createNativeMotionAdapter(xaiKey.key),
+        prompt: input.prompt,
+        duration: input.duration,
+        ...(input.size && { size: input.size }),
+        // Carries the pinned opening frame on a shot that has both a still
+        // and references — see `GROK_VIDEO_REFERENCE_CONFIG`.
+        ...(input.modelOptions && { modelOptions: input.modelOptions }),
+        timeout: FAL_REQUEST_TIMEOUT_MS,
+        debug: false,
+      });
+      jobId = job.jobId;
+      usedOwnKey = xaiKey.source === 'team';
+      break;
+    }
+    case 'google': {
+      if (!googleKey) {
+        throw new Error('Google motion via selected with no Google key');
+      }
+      // Start frame and refs are inlined as data URIs so this path needs no
+      // fal key. Same payload as the scene editor's Gemini preview.
+      // Optional: Omni Flash has a reference-to-video route, so a
+      // reference-only shot reaches here with no still and the sheets alone.
+      const imageUrl = options.imageUrl
+        ? await toDataOrCdnUrl(options.imageUrl)
+        : undefined;
+      const referenceImages = await inlineNativeReferenceImages(
+        options.referenceImages
+      );
+      const { input } = buildGeminiVideoRequest({
+        prompt: options.prompt,
+        imageUrl,
+        duration: options.duration,
+        aspectRatio: options.aspectRatio,
+        referenceImages,
+        model: modelKey,
+      });
+      // Duration/size ride on `modelOptions.response_format` (with
+      // `delivery: "uri"`). Passing them as generateVideo top-level
+      // fields makes the adapter rebuild response_format without
+      // delivery, and Google inlines the MP4 as a data: URL.
+      const job = await generateVideo({
+        adapter: createNativeGeminiMotionAdapter(googleKey.key),
+        prompt: input.prompt,
+        modelOptions: input.modelOptions,
+        timeout: FAL_REQUEST_TIMEOUT_MS,
+        debug: false,
+      });
+      jobId = job.jobId;
+      usedOwnKey = googleKey.source === 'team';
+      break;
+    }
+    case 'fal': {
+      const fal = await submitFalMotionJob(options, modelKey);
+      jobId = fal.jobId;
+      usedOwnKey = fal.usedOwnKey;
+      stampedEndpointId = fal.endpointId;
+      break;
+    }
+    case 'byteplus': {
+      const arkKey = getArkApiKey();
+      if (!arkKey) {
+        throw new Error('ARK_API_KEY is required for the BytePlus motion via');
+      }
+      // The final of a draft (#1756): only the draft's task id goes out.
+      if (options.finalFromDraftTaskId) {
+        const modelId = getBytePlusVideoModelId(modelKey);
+        if (!modelId) {
+          throw new Error(
+            `No BytePlus model id for motion model "${modelKey}"`
+          );
+        }
+        const final = await submitBytePlusFinalRender({
+          modelId,
+          draftTaskId: options.finalFromDraftTaskId,
+          label: 'motion final submit',
+        });
+        jobId = final.jobId;
+        usedOwnKey = false;
+        stampedEndpointId = modelId;
+        break;
+      }
+      // Every still that can carry a face was registered by the workflow
+      // (`arkStillsForMotion` → `ingestArkAssets`); the rest are plain URLs.
+      // A still missing from the map throws — nothing is re-derived here.
+      const falKey = await resolveOptionalFalKey(options.credentials);
+      const imageUrl = options.imageUrl
+        ? arkUrlFor(options.arkAssets, options.imageUrl)
+        : undefined;
+      let referenceImages = options.referenceImages;
+      if (referenceImages?.length) {
+        referenceImages = [];
+        for (const ref of options.referenceImages ?? []) {
+          // Same helper as `arkStillsForMotion`: ingested stills (faces as
+          // asset://, non-person sheets as `plain`) live in the map.
+          const registered = arkStillForMotionRef(ref) !== null;
+          referenceImages.push({
+            ...ref,
+            referenceImageUrl: registered
+              ? arkUrlFor(options.arkAssets, ref.referenceImageUrl)
+              : await toArkFetchableUrl(ref.referenceImageUrl, falKey?.key),
+          });
+        }
+      }
+      const request = buildBytePlusVideoRequest(
+        { ...options, imageUrl, referenceImages, draft },
+        modelKey
+      );
+      const { apiKey, ...config } = arkAdapterConfig(
+        arkKey,
+        FAL_REQUEST_TIMEOUT_MS
+      );
+      const createBytePlusVideo = await loadBytePlusVideo();
+      try {
+        const job = await withBytePlusQuotaRetry('motion submit', () =>
+          generateVideo({
+            adapter: createBytePlusVideo(endpoint.endpointId, apiKey, config),
+            prompt: request.prompt,
+            size: request.size,
+            ...(request.duration !== undefined && {
+              duration: request.duration,
+            }),
+            modelOptions: request.modelOptions,
+            timeout: FAL_REQUEST_TIMEOUT_MS,
+            debug: false,
+          })
+        );
+        jobId = job.jobId;
+        usedOwnKey = false;
+      } catch (error) {
+        // No fal fallback (#1519): the job was routed to Ark, so an Ark
+        // rejection is the failure the user sees and retries against.
+        if (isBytePlusPortraitFilterError(error)) {
+          throw new Error(BYTEPLUS_PORTRAIT_FILTER_MESSAGE, { cause: error });
+        }
+        throw error;
+      }
+      break;
+    }
+  }
+
+  return {
+    jobId,
+    modelKey,
+    endpointId: stampedEndpointId,
+    via: stampedVia,
+    usedOwnKey,
+    submittedAt: Date.now(),
+    ...(draft && { draftTaskId: jobId }),
+  };
+}
+
+/**
+ * Check the status of a submitted motion job.
+ * Designed to be called from individual workflow steps.
+ *
+ * `via` comes from the submission rather than being re-resolved: polling the
+ * wrong API for a job id it never issued reads as a lost generation.
+ * Defaults to `'fal'` so in-flight runs from before this field existed keep
+ * polling fal — correct, since that is where they were submitted.
+ */
+export async function pollMotionJob(
+  jobId: string,
+  modelKey: ImageToVideoModel,
+  credentials?: CredentialScopedDb,
+  viaStamp: string = 'fal',
+  endpointId?: string
+) {
+  const via = assertMediaVia(viaStamp);
+  const modelConfig = IMAGE_TO_VIDEO_MODELS[modelKey];
+  const falEndpointId = endpointId ?? modelConfig.id;
+
+  switch (via) {
+    case 'xai': {
+      const key = await resolveOptionalXaiKey(credentials);
+      if (!key) {
+        throw new Error(
+          `Motion job ${jobId} was submitted to xAI but no xAI key is available to poll it`
+        );
+      }
+      return await getVideoJobStatus({
+        adapter: createNativeMotionAdapter(key.key),
+        jobId,
+      });
+    }
+    case 'google': {
+      const key = await resolveOptionalGoogleKey(credentials);
+      if (!key) {
+        throw new Error(
+          `Motion job ${jobId} was submitted to Google but no Google key is available to poll it`
+        );
+      }
+      const result = await getVideoJobStatus({
+        adapter: createNativeGeminiMotionAdapter(key.key),
+        jobId,
+      });
+      if (
+        result.status === 'completed' &&
+        result.url &&
+        isGeminiFilesVideoUrl(result.url)
+      ) {
+        const fileState = await getGeminiFileState(result.url, key.key);
+        if (fileState === 'FAILED') {
+          return {
+            ...result,
+            status: 'failed' as const,
+            error: 'Gemini Files API marked the generated video as FAILED',
+          };
+        }
+        if (fileState !== 'ACTIVE') {
+          return { jobId: result.jobId, status: 'processing' as const };
+        }
+      }
+      return result;
+    }
+    case 'fal': {
+      const key = await resolveFalMotionKey(credentials);
+      // Bound a single status fetch — the workflow already budgets total poll
+      // wall-clock across batches; this only prevents one hung HTTP call from
+      // freezing a poll step forever (#826).
+      return await getVideoJobStatus({
+        adapter: falVideo(falEndpointId, {
+          apiKey: key.key,
+          fetch: createDeadlineFetch(
+            FAL_REQUEST_TIMEOUT_MS,
+            'Motion job status'
+          ),
+        }),
+        jobId,
+      });
+    }
+    case 'byteplus': {
+      const arkKey = getArkApiKey();
+      if (!arkKey) {
+        throw new Error(
+          'ARK_API_KEY is required to poll a BytePlus motion job'
+        );
+      }
+      const modelId = getBytePlusVideoModelId(modelKey);
+      if (!modelId) {
+        throw new Error(`No BytePlus model id for motion model "${modelKey}"`);
+      }
+      const { apiKey, ...config } = arkAdapterConfig(
+        arkKey,
+        FAL_REQUEST_TIMEOUT_MS
+      );
+      const createBytePlusVideo = await loadBytePlusVideo();
+      return await withBytePlusQuotaRetry('motion poll', () =>
+        getVideoJobStatus({
+          adapter: createBytePlusVideo(modelId, apiKey, config),
+          jobId,
+        })
+      );
+    }
+  }
+}
+
+export async function motionCostFromUsage(
+  via: MediaVia,
+  usage: TokenUsage | undefined,
+  ctx: {
+    modelKey: ImageToVideoModel;
+    hasReferenceImages: boolean;
+    /**
+     * Reference-only shots route to the reference-to-video endpoint (or its
+     * text-to-video sibling when no sheets matched, #1521), so the charge must
+     * be priced against that endpoint — resolving without it would bill an
+     * image-to-video rate for a job that never ran there.
+     */
+    referenceOnly?: boolean;
+  }
+) {
+  switch (via) {
+    case 'xai': {
+      const cost = grokVideoCost(usage?.cost);
+      if (cost === undefined) {
+        reportMissingBillingCost({
+          source: 'motion-cost-from-usage-xai',
+          modelId: ctx.modelKey,
+          metadata: { usage },
+        });
+      }
+      return {
+        endpointId: NATIVE_GROK_VIDEO_MODEL,
+        unitsBilled: usage?.unitsBilled,
+        cost: cost ?? ZERO_MICROS,
+        recordFalUsage: false,
+      };
+    }
+    case 'google': {
+      // Omni bills per second of video, reported as output tokens on the
+      // interaction's usage — priced at Google's published video-output rate.
+      const cost = geminiVideoCostFromUsage(usage);
+      if (cost === undefined) {
+        reportMissingBillingCost({
+          source: 'motion-cost-from-usage-google',
+          modelId: ctx.modelKey,
+          metadata: { usage },
+        });
+      }
+      return {
+        endpointId: NATIVE_GEMINI_VIDEO_MODEL,
+        unitsBilled: usage?.unitsBilled,
+        cost: cost ?? ZERO_MICROS,
+        recordFalUsage: false,
+      };
+    }
+    case 'fal': {
+      const endpointId = resolveMotionEndpoint(
+        ctx.modelKey,
+        ctx.hasReferenceImages,
+        'fal',
+        ctx.referenceOnly ?? false
+      ).endpointId;
+      return {
+        endpointId,
+        unitsBilled: usage?.unitsBilled,
+        cost: await falCostFromUnits(endpointId, usage?.unitsBilled),
+        recordFalUsage: true,
+      };
+    }
+    case 'byteplus': {
+      const endpointId = getBytePlusVideoModelId(ctx.modelKey);
+      if (!endpointId) {
+        throw new Error(
+          `No BytePlus model id for motion model "${ctx.modelKey}"`
+        );
+      }
+      const unitsBilled = bytePlusVideoUnitsBilled(usage?.totalTokens);
+      return {
+        endpointId,
+        unitsBilled,
+        cost: await falCostFromUnits(endpointId, unitsBilled),
+        recordFalUsage: false,
+      };
+    }
+  }
+}
+
+/**
+ * Pre-flight motion cost estimate + metadata, computed before the job runs.
+ * `cost` is a rough estimate for the credit gate (null = no honest estimate;
+ * gate with `gateEstimate`) — the exact charge comes from `falCostFromUnits`
+ * once fal reports `unitsBilled`. Pass `getEffectiveFalPricing()` as
+ * `pricing` on server paths.
+ */
+export function calculateMotionMetadata(
+  options: GenerateMotionOptions,
+  pricing: Record<string, EffectiveFalPricing>
+): {
+  cost: Microdollars | null;
+  duration: number;
+  model: string;
+  vendor: string;
+} {
+  const modelKey = options.model || DEFAULT_VIDEO_MODEL;
+  const modelConfig = IMAGE_TO_VIDEO_MODELS[modelKey];
+
+  const validatedDuration = snapDuration(options.duration, modelKey);
+
+  // Flat per-second rate, so no `model_pricing` row is needed. Pure, so it
+  // can't know whether a key resolves — over-estimating a Grok render that
+  // lands on fal is the safe direction (fal's rate is within a cent).
+  if (isNativeGrokVideoModel(modelKey)) {
+    return {
+      cost: grokVideoDurationCost(validatedDuration),
+      duration: validatedDuration,
+      model: modelConfig.id,
+      vendor: modelConfig.vendor,
+    };
+  }
+
+  // Same shape for Omni Flash: Google bills a fixed token count per second
+  // of video, so the estimate needs no `model_pricing` row either.
+  if (isNativeGeminiVideoModel(modelKey)) {
+    return {
+      cost: geminiVideoDurationCost(validatedDuration),
+      duration: validatedDuration,
+      model: modelConfig.id,
+      vendor: modelConfig.vendor,
+    };
+  }
+
+  // The final of a draft (#1756) sends only the task id: no still, no
+  // references, no prompt, so there is no request to build — and building
+  // one would demand the start frame a reference-only draft never had. It is
+  // always 1080p on the model's own id.
+  if (options.finalFromDraftTaskId) {
+    return {
+      cost: estimateFalCost(
+        modelConfig.id,
+        {
+          durationSeconds: validatedDuration,
+          resolution: DRAFT_FINAL_RESOLUTION,
+        },
+        pricing
+      ),
+      duration: validatedDuration,
+      model: modelConfig.id,
+      vendor: modelConfig.vendor,
+    };
+  }
+
+  const { endpointId, input } = buildMotionRequest(options, modelKey);
+  // A draft is always 480p (#1756), whatever tier the sequence asks for.
+  const resolution =
+    options.draft && supportsDraftMode(modelKey)
+      ? DRAFT_RESOLUTION
+      : 'resolution' in input && typeof input.resolution === 'string'
+        ? input.resolution
+        : undefined;
+  const cost = estimateFalCost(
+    endpointId,
+    {
+      request: input,
+      usage: { duration: validatedDuration },
+      durationSeconds: validatedDuration,
+      resolution,
+    },
+    pricing
+  );
+
+  return {
+    cost,
+    duration: validatedDuration,
+    model: endpointId,
+    vendor: modelConfig.vendor,
+  };
+}
+
+type FalQueueStatus = {
+  status: 'IN_QUEUE' | 'IN_PROGRESS' | 'COMPLETED';
+  queue_position?: number;
+  response_url?: string;
+  cancel_url?: string;
+  status_url?: string;
+  logs?: Array<{ level: string; message: string }>;
+  metrics?: { inference_time?: number };
+};
+
+/** Authenticated fetch against the fal queue API */
+async function falQueueFetch(
+  url: string,
+  init?: RequestInit
+): Promise<Response> {
+  const apiKey = getEnv().FAL_KEY;
+  if (!apiKey) {
+    throw new Error('FAL_KEY environment variable is required');
+  }
+
+  const deadlineFetch = createDeadlineFetch(
+    FAL_REQUEST_TIMEOUT_MS,
+    'Motion queue request'
+  );
+  const response = await deadlineFetch(url, {
+    ...init,
+    headers: new Headers({
+      Authorization: `Key ${apiKey}`,
+      ...Object.fromEntries(new Headers(init?.headers).entries()),
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Fal API error: ${response.status} ${response.statusText}`);
+  }
+
+  return response;
+}
+
+export async function checkMotionStatus(
+  statusUrl: string
+): Promise<FalQueueStatus> {
+  const response = await falQueueFetch(statusUrl);
+  return response.json();
+}
+
+export async function getMotionResult(
+  responseUrl: string
+): Promise<{ video: { url: string } }> {
+  const response = await falQueueFetch(responseUrl);
+  return response.json();
+}
+
+export async function cancelMotionGeneration(cancelUrl: string): Promise<void> {
+  await falQueueFetch(cancelUrl, { method: 'PUT' });
+}

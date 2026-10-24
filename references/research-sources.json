@@ -1,0 +1,934 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "xilo-opus-video",
+      "url": "https://github.com/Kianzzz/xilo-opus-video",
+      "license": "MIT",
+      "verified_on": "inherited local cache",
+      "integration": "local_production_module",
+      "adoption": "方向方案与代表预览",
+      "local_path": "modules/upstream/xilo-opus-video",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "f2cd828e2692e7186186408ee01a936707c2c38d",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "lemo-opuscar",
+      "url": "https://github.com/lemomo-ai/lemo-opuscar",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "按故事语气选择风格、材质和光线；全片统一到本项目tokens",
+      "local_path": "modules/upstream/lemo-opuscar",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "3961ddb3d24d8876e0e2754f7790d66908acee51",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "plugin/skills/lemo-opuscar/SKILL.md",
+          "url": "https://github.com/lemomo-ai/lemo-opuscar/blob/3961ddb3d24d8876e0e2754f7790d66908acee51/plugin/skills/lemo-opuscar/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "mg-styles-15",
+      "url": "https://github.com/Vincentwei1021/mg-styles-15",
+      "license": "MIT",
+      "verified_on": "inherited local cache",
+      "integration": "local_production_module",
+      "adoption": "形变、拼贴、线描等MG机制",
+      "local_path": "modules/upstream/mg-styles-15",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "49052d80bfaf9fa8412cc9710530e5e95a3b8d8c",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "dashi-animationstyle",
+      "url": "https://github.com/chuspeeism/dashi-animationstyle",
+      "license": "MIT; example voice excluded",
+      "verified_on": "inherited local cache",
+      "integration": "local_production_module",
+      "adoption": "口播概念到可见事件、风格卡",
+      "local_path": "modules/upstream/dashi-animationstyle",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "aa620f3b859aa5d191b783b2eb0fb59263731c76",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "SKILL.md",
+          "url": "https://github.com/chuspeeism/dashi-animationstyle/blob/aa620f3b859aa5d191b783b2eb0fb59263731c76/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "huashu-art-motion",
+      "url": "https://github.com/alchaincyf/huashu-art-motion",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "让材料、造型和画内对象承担叙事；按内容安排动作",
+      "local_path": "modules/upstream/huashu-art-motion",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "8a0d7d72ca65fcce6f8ba82c4a6c8dfe35b8422c",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "SKILL.md",
+          "url": "https://github.com/alchaincyf/huashu-art-motion/blob/8a0d7d72ca65fcce6f8ba82c4a6c8dfe35b8422c/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "wtt-code-animation-studio",
+      "url": "https://github.com/WaterDJiang/Wattter_openSkills",
+      "license": "CC-BY-NC-SA-4.0 (root README)",
+      "verified_on": "inherited local cache",
+      "integration": "local_production_module",
+      "adoption": "剧本→分镜→统一事件时间线",
+      "local_path": "modules/upstream/wtt-code-animation-studio",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "c91aa786755afe195a44037ed0226a26c704f7fb",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "wattter_skills/wtt-code-animation-studio/SKILL.md",
+          "url": "https://github.com/WaterDJiang/Wattter_openSkills/blob/c91aa786755afe195a44037ed0226a26c704f7fb/wattter_skills/wtt-code-animation-studio/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "video-shotcraft",
+      "url": "https://github.com/Vincentwei1021/video-shotcraft",
+      "license": "Apache-2.0",
+      "verified_on": "inherited local cache",
+      "integration": "local_production_module",
+      "adoption": "素材聚焦、空间运镜与跨镜交接",
+      "local_path": "modules/upstream/video-shotcraft",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "310330cadcf41f5d2b15ee1c908d629e26d0a324",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "SKILL.md",
+          "url": "https://github.com/Vincentwei1021/video-shotcraft/blob/310330cadcf41f5d2b15ee1c908d629e26d0a324/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "iart-map-animation",
+      "url": "https://github.com/iart-ai/map-animation-skills",
+      "license": "MIT",
+      "verified_on": "inherited local cache",
+      "integration": "local_production_module",
+      "adoption": "真实地理路径、区域强调与地图镜头",
+      "local_path": "modules/upstream/iart-map-animation",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "390ca98bbcf2ea88a430a69c0dcbf423e43d075d",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "skills/map-animation/SKILL.md",
+          "url": "https://github.com/iart-ai/map-animation-skills/blob/390ca98bbcf2ea88a430a69c0dcbf423e43d075d/skills/map-animation/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "iart-data-animation",
+      "url": "https://github.com/iart-ai/data-animation-skills",
+      "license": "MIT",
+      "verified_on": "inherited local cache",
+      "integration": "local_production_module",
+      "adoption": "数据尺度、比较与动态信息图",
+      "local_path": "modules/upstream/iart-data-animation",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "8ce2709c3992490251e8a991535b1945f01c6865",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "skills/animated-infographic/SKILL.md",
+          "url": "https://github.com/iart-ai/data-animation-skills/blob/8ce2709c3992490251e8a991535b1945f01c6865/skills/animated-infographic/SKILL.md"
+        },
+        {
+          "path": "skills/chart-animation/SKILL.md",
+          "url": "https://github.com/iart-ai/data-animation-skills/blob/8ce2709c3992490251e8a991535b1945f01c6865/skills/chart-animation/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "iart-explainer-video",
+      "url": "https://github.com/iart-ai/explainer-video-skills",
+      "license": "MIT",
+      "verified_on": "inherited local cache",
+      "integration": "local_production_module",
+      "adoption": "流程关系、白板绘制与2.5D拆层",
+      "local_path": "modules/upstream/iart-explainer-video",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "3e2d411b725d9a72939cf8e5eb81579e751373e7",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "skills/diagram-animation/SKILL.md",
+          "url": "https://github.com/iart-ai/explainer-video-skills/blob/3e2d411b725d9a72939cf8e5eb81579e751373e7/skills/diagram-animation/SKILL.md"
+        },
+        {
+          "path": "skills/isometric-animation/SKILL.md",
+          "url": "https://github.com/iart-ai/explainer-video-skills/blob/3e2d411b725d9a72939cf8e5eb81579e751373e7/skills/isometric-animation/SKILL.md"
+        },
+        {
+          "path": "skills/whiteboard-animation/SKILL.md",
+          "url": "https://github.com/iart-ai/explainer-video-skills/blob/3e2d411b725d9a72939cf8e5eb81579e751373e7/skills/whiteboard-animation/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "iart-javascript-animation",
+      "url": "https://github.com/iart-ai/javascript-animation-skills",
+      "license": "MIT",
+      "verified_on": "inherited local cache",
+      "integration": "local_production_module",
+      "adoption": "纯时间函数的手绘与代码场景",
+      "local_path": "modules/upstream/iart-javascript-animation",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "f7d0882a313249cbd43f0e4e9e209b1622870253",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "skills/javascript-animation/SKILL.md",
+          "url": "https://github.com/iart-ai/javascript-animation-skills/blob/f7d0882a313249cbd43f0e4e9e209b1622870253/skills/javascript-animation/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "video-talkcraft",
+      "url": "https://github.com/Vincentwei1021/video-talkcraft",
+      "license": "PolyForm-Noncommercial-1.0.0",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "108卡按输入与语义检索，适配到本片；非商业许可，商业使用需满足作者授权",
+      "local_path": "modules/upstream/video-talkcraft",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "a7c29edfb2404612dde6a5a1c8aa94232e85625b",
+      "copied_code": true,
+      "reviewed_documents": [
+        {
+          "path": "SKILL.md",
+          "url": "https://github.com/Vincentwei1021/video-talkcraft/blob/a7c29edfb2404612dde6a5a1c8aa94232e85625b/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "doodle-anim",
+      "url": "https://github.com/feitangyuan/doodle-anim",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "程序绘制角色、姿态和图解；Canvas按帧绘制，非仅头像生成",
+      "local_path": "modules/upstream/doodle-anim",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "bfc4c257151450c03f13013dec5585ebb935aeb4",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "SKILL.md",
+          "url": "https://github.com/feitangyuan/doodle-anim/blob/bfc4c257151450c03f13013dec5585ebb935aeb4/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "vox-director",
+      "url": "https://github.com/Alisa0808/vox-director",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "论点→证据→抠图层→视觉揭示；移除固定云服务依赖，用本地时间轴组合",
+      "local_path": "modules/upstream/vox-director",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "6a85a7c341610442a6a5b1885e6e0217ab82a11f",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "SKILL.md",
+          "url": "https://github.com/Alisa0808/vox-director/blob/6a85a7c341610442a6a5b1885e6e0217ab82a11f/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "awesome-opus5-5-videos",
+      "url": "https://github.com/yihui-dev/awesome-opus5-5-videos",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "动画代码案例，按文案意图挑案例并转成本片镜头；不按模型品牌选效果",
+      "local_path": "modules/upstream/awesome-opus5-5-videos",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "92aee2f586ac0715cb3cbcb6384834f98a33383d",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "awesome-seedance",
+      "url": "https://github.com/ZeroLu/awesome-seedance",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "仅在目标为Seedance时优化动作和运镜提示；不代替GPT/Gemini双提示词",
+      "local_path": "modules/upstream/awesome-seedance",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "039716e18547ad5d5b1ba6c70862b33fbecc6bee",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "hypit",
+      "url": "https://github.com/hypit-ai/hypit",
+      "license": "Apache-2.0",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "从参考视频提取语义拍、素材层、锚词和可复用编辑结构，改编到自己的文案",
+      "local_path": "modules/upstream/hypit",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "e26d9142fd8a6f78bf4f3cdb800d6205f4ecca16",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "awesome-opus-5-5-video-prompts",
+      "url": "https://github.com/LeaddeOpenLab/awesome-opus-5-5-video-prompts",
+      "license": "not established from root license",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "动画代码提示与视觉构思来源，按具体案例适配",
+      "local_path": "modules/upstream/awesome-opus-5-5-video-prompts",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "5d5ee7209452070d347da314fb0e14b9fb27010b",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "vimax",
+      "url": "https://github.com/HKUDS/ViMax",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "只吸收多角色规划与角色连续性，交GPT图片提示词和Gemini视频提示词，不运行生成流水线",
+      "local_path": "modules/upstream/vimax",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "fd4b72e7731be6e5f88486206d25ea59849b0285",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "short-video-factory",
+      "url": "https://github.com/YILS-LIN/short-video-factory",
+      "license": "source-specific; see LICENSE",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "按卖点→证据→行动组织镜头；独立桌面程序按需作素材辅助，不接管母版",
+      "local_path": "modules/upstream/short-video-factory",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "5ade9ecfe0feab4c022710140efb3703004691f4",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "claude-code-video-toolkit",
+      "url": "https://github.com/digitalsamba/claude-code-video-toolkit",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "产品演示、发布说明和Sprint叙事；选用组件前处理真实lib依赖，不能当官方Remotion",
+      "local_path": "modules/upstream/claude-code-video-toolkit",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "da3f474c1230d161be1384ef97aec27f73b11636",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "firered-openstoryline",
+      "url": "https://github.com/FireRedTeam/FireRed-OpenStoryline",
+      "license": "Apache-2.0",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "已有素材检索、粗剪与对话回修方法；选段与素材元数据进入本地Remotion工程",
+      "local_path": "modules/upstream/firered-openstoryline",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "c9e945215586f45c12a61c1951ee9a8e9c43a027",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "social-media-skills",
+      "url": "https://github.com/charlie947/social-media-skills",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "LinkedIn语气、Reel脚本和标题方法；不自动发布或发送内容",
+      "local_path": "modules/upstream/social-media-skills",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "10ca79c0ec0be0f7654d19cd4f0c86b6fa6ed23b",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "moneyprinterturbo",
+      "url": "https://github.com/harry0703/MoneyPrinterTurbo",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "脚本、素材、旁白与字幕编排方法；README不能证明具有自动发布能力",
+      "local_path": "modules/upstream/moneyprinterturbo",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "f063a2b95e0f71f60891ac1c7b53add684bc6a46",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "narrator-ai-cli",
+      "url": "https://github.com/NarratorAI-Studio/narrator-ai-cli-skill",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "收费CLI/账号型素材生产；只有实际选择服务时检查账户和额度",
+      "local_path": "modules/upstream/narrator-ai-cli",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "4b17c6f2175bd532c92db778a847f8fb6bdd3177",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "SKILL.md",
+          "url": "https://github.com/NarratorAI-Studio/narrator-ai-cli-skill/blob/4b17c6f2175bd532c92db778a847f8fb6bdd3177/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "openmontage",
+      "url": "https://github.com/9018/openmontage",
+      "license": "source-specific; see LICENSE",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "用户指定9018仓库，README指向calesthio；只纳入适合Remotion的制作方法，不接入其整套双引擎应用",
+      "local_path": "modules/upstream/openmontage",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "4eab34c5cfcccaa4f1970554928feccce73ee930",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "pixelle-video",
+      "url": "https://github.com/zesks/pixelle-video",
+      "license": "Apache-2.0",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "文案分段→配图→旁白→音乐方法，生成资产回到本工程合成",
+      "local_path": "modules/upstream/pixelle-video",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "fd39263dd7bec7410c66d0cfd04846014338be23",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "openstory",
+      "url": "https://github.com/openstory-so/openstory",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "故事拆镜、角色与关键帧连续性；仅需方案时交提示词，不启动外部平台",
+      "local_path": "modules/upstream/openstory",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "1f04946568083782e2689a7ac1105fabad0d0e98",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "handdrawn-story-studio",
+      "url": "https://github.com/masonweb3/handdrawn-story-studio",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "实际来源masonweb3，README说明9:16母版与有限场景实现；按需扩展，不宣称全自动成熟产线",
+      "local_path": "modules/upstream/handdrawn-story-studio",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "50428471c520abe14d32c0f809f4add096a4208b",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "SKILL.md",
+          "url": "https://github.com/masonweb3/handdrawn-story-studio/blob/50428471c520abe14d32c0f809f4add096a4208b/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "story-to-handdrawn-video",
+      "url": "https://github.com/iilovelive/story-to-handdrawn-video",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "Remotion文字→画稿→色彩揭示与翻页；3:4和默认彩铅可按文案改",
+      "local_path": "modules/upstream/story-to-handdrawn-video",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "fbab5b27f4f0db61739d86f78000a39eeaa692d3",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "skill-package/story-to-handdrawn-video/SKILL.md",
+          "url": "https://github.com/iilovelive/story-to-handdrawn-video/blob/fbab5b27f4f0db61739d86f78000a39eeaa692d3/skill-package/story-to-handdrawn-video/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "avatar-forge",
+      "url": "https://github.com/LycheeAILab/avatar-forge",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "仅avatar-only模式输出原始人物MP4，后续由本工程15秒全屏及小窗组织",
+      "local_path": "modules/upstream/avatar-forge",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "48cb3c19ce58e0c2a30eaabb4e39c1a53eef9d5c",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "female-outfit-director",
+      "url": "https://github.com/liyue-aigc/female-outfit-director",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "同一成年主体与服装一致性、拼贴首帧和节奏换装；输出所需素材规划",
+      "local_path": "modules/upstream/female-outfit-director",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "1f96d63ec5ae9d6fdbc7e3b4e95b06138f1449c0",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "liveportrait",
+      "url": "https://github.com/KlingAIResearch/LivePortrait",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "照片+驱动视频生成面部动作；外部模型/依赖按实际需要配置，检查相关模型许可",
+      "local_path": "modules/upstream/liveportrait",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "9b294b3d0536135442ea73cb01e6cb3ca7029dd3",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "wav2lip",
+      "url": "https://github.com/Rudrabha/Wav2Lip",
+      "license": "Non-commercial research model restriction; see upstream README",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "旧版Wav2Lip模型为非商业研究用途；商业任务改选可合法使用的方案",
+      "local_path": "modules/upstream/wav2lip",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "bac9a81e63ecc153202353372e5724b83d9e6322",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "youtube-shorts-generator",
+      "url": "https://github.com/Anil-matcha/AI-Youtube-Shorts-Generator",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "转写、语义高光与竖屏裁切方法，沿用源时码与完整语义",
+      "local_path": "modules/upstream/youtube-shorts-generator",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "70c5fa96984cbc35b3b76a981a81c676117370ec",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "autoclip",
+      "url": "https://github.com/artbyjazi/autoclip",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "本地高光、说话人跟随与字幕；独立应用按需提供片段/EDL，母版统一合成",
+      "local_path": "modules/upstream/autoclip",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "5d0eac36fa615b79dd2104083bf273a96f8d68bb",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "claude-motion",
+      "url": "https://github.com/whaleyxbt/claude-motion",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "缓动、阅读停留、字体尺度、纹理与有动机转场；数值是参考而非配额",
+      "local_path": "modules/upstream/claude-motion",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "e627941543d9988b155dc610bb9cc0115a5e365e",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": ".claude/skills/motion-design/SKILL.md",
+          "url": "https://github.com/whaleyxbt/claude-motion/blob/e627941543d9988b155dc610bb9cc0115a5e365e/.claude/skills/motion-design/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "claude-remotion-skill",
+      "url": "https://github.com/haidrrrry/claude-remotion-skill",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "错峰、遮罩与动作节奏；持续运动、每图推拉等固定规则由文案裁决",
+      "local_path": "modules/upstream/claude-remotion-skill",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "1dcbe5e3fc6cf970bd10d3cc05f0a8a5d19d0383",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "remotion-motion-graphics/SKILL.md",
+          "url": "https://github.com/haidrrrry/claude-remotion-skill/blob/1dcbe5e3fc6cf970bd10d3cc05f0a8a5d19d0383/remotion-motion-graphics/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "remotion",
+      "url": "https://github.com/remotion-dev/remotion",
+      "license": "source-specific; see LICENSE",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "Remotion主工程，包与锁文件统一版本",
+      "local_path": "modules/upstream/remotion",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "263c75b845845f4736e885a993af8697dbff4201",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "remotion-official",
+      "url": "https://github.com/remotion-dev/skills",
+      "license": "not established from root license",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "读取官方动画、字幕、渲染与时间轴规则；与本机同名第三方扩展区分",
+      "local_path": "modules/upstream/remotion-official",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "6c67adcd9cdbe6eb84d76342da89b225f9161cb2",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "motion-skills",
+      "url": "https://github.com/iart-ai/motion-skills",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "实际是55技能/18分包索引；按需要选择独立包，不整套加载商业平台流程",
+      "local_path": "modules/upstream/motion-skills",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "bb5a3ce666110855a3437de2f70e9968c408e005",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "lottiefiles-motion-design",
+      "url": "https://github.com/LottieFiles/motion-design-skill",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "动作目的、曲线、错峰与时长；UI时间值按视频节奏调整",
+      "local_path": "modules/upstream/lottiefiles-motion-design",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "f9a8a041b85185ee4881b3471d3415e939aac772",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "skills/motion-design/SKILL.md",
+          "url": "https://github.com/LottieFiles/motion-design-skill/blob/f9a8a041b85185ee4881b3471d3415e939aac772/skills/motion-design/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "animate",
+      "url": "https://github.com/cth9191/animate",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "代码绘制、形状接力与程序声音；按帧接入Remotion",
+      "local_path": "modules/upstream/animate",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "7e5eb56feb2dd573f890e1b7b34748af43d58263",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "plugins/animate/skills/animate/SKILL.md",
+          "url": "https://github.com/cth9191/animate/blob/7e5eb56feb2dd573f890e1b7b34748af43d58263/plugins/animate/skills/animate/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "claude-motion-design",
+      "url": "https://github.com/howseen-ai/claude-motion-design",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "HTML/Canvas镜头与声音事件方法；可采样后合成或移植为Remotion组件",
+      "local_path": "modules/upstream/claude-motion-design",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "3d90d349ef3fdde9b7e89de4df4a2159c9e8697f",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "gsap",
+      "url": "https://github.com/greensock/GSAP",
+      "license": "not established from root license",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "暂停timeline按母版时间seek；不以实时ticker推进导出",
+      "local_path": "modules/upstream/gsap",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "13e2b790546426a1a2e0e9b409f3f8dc6d6611f2",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "lottie-web",
+      "url": "https://github.com/airbnb/lottie-web",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "矢量动画与图标，按统一时间采样或用同版本@remotion/lottie",
+      "local_path": "modules/upstream/lottie-web",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "bede03d25d232826e0c9dca1733d542d8a7754fb",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "wise-motion",
+      "url": "https://github.com/WiseWong6/wise-motion",
+      "license": "Apache-2.0",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "动作需求→主体/关系/起末状态→匹配源码；组合、字幕、配色由本模型按文案决定",
+      "local_path": "modules/upstream/wise-motion",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "ee0e33b9ee3fe6c3bf8c9c6de0711851e423a989",
+      "copied_code": true,
+      "reviewed_documents": [
+        {
+          "path": "SKILL.md",
+          "url": "https://github.com/WiseWong6/wise-motion/blob/ee0e33b9ee3fe6c3bf8c9c6de0711851e423a989/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "motion",
+      "url": "https://github.com/motiondivision/motion",
+      "license": "MIT",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "暂停动画并设置time，或使用纯函数求值；不让浏览器真实时间控制导出",
+      "local_path": "modules/upstream/motion",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "fa2079f101353f1fa1c9463f5ba9709a0ca3d3bf",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    },
+    {
+      "id": "mapshaper",
+      "url": "https://github.com/mbloch/mapshaper",
+      "license": "source-specific; see LICENSE",
+      "verified_on": "2026-10-24",
+      "integration": "local_production_module",
+      "adoption": "本地矢量边界清理、简化、裁切和SVG/GeoJSON导出",
+      "local_path": "modules/upstream/mapshaper",
+      "review_level": "selected text/source cached; no whole-app runtime claim",
+      "audited_commit": "1e90242525b69b8c52e2f3d002687e9628234bf5",
+      "copied_code": false,
+      "reviewed_documents": [
+        {
+          "path": "ADAPTER.md",
+          "scope": "local integration summary; not an upstream verification claim"
+        }
+      ]
+    }
+  ],
+  "aliases": {
+    "motion-design-skill": "lottiefiles-motion-design",
+    "lottie": "lottie-web"
+  },
+  "unresolved": [
+    {
+      "id": "draw-with-code",
+      "reason": "Exact repository not established; unrelated coding-art results are not substituted."
+    },
+    {
+      "id": "ge0-sleuth",
+      "reason": "Exact name and geo-sleuth variant not resolved to the intended repository."
+    },
+    {
+      "id": "skills",
+      "reason": "Bare name is ambiguous; explicit remotion-dev/skills is covered separately."
+    }
+  ],
+  "excluded": [
+    "emil-design-skills",
+    "gathered-scenes-zine-skill",
+    "gc-minimal-zine-poster",
+    "hbg-classical-poem-silk-video",
+    "jizura",
+    "klik-anim",
+    "klik-anim-skill-creation",
+    "klik-cam",
+    "klik-remotion-method",
+    "motion-design-skills",
+    "motion-video-kit",
+    "photo-abstract-editorial",
+    "photo-relic-editorial",
+    "pixel2motion",
+    "product-launch-motion"
+  ]
+}

@@ -1,0 +1,310 @@
+{
+  "schema_version": 1,
+  "materials": [
+    {
+      "id": "evidence-lens",
+      "title": "同源证据镜",
+      "keywords": [
+        "史料",
+        "证据",
+        "放大",
+        "图片"
+      ],
+      "slots": [
+        "source_image",
+        "focus_region",
+        "source_caption",
+        "claim_id"
+      ],
+      "sequence": "全图给出处 → 标记关注区 → 同源局部放大 → 回到全图或延续标记",
+      "token_roles": [
+        "background",
+        "evidence",
+        "annotation",
+        "type.caption",
+        "stroke"
+      ],
+      "implementation": "FocusLens组件要求SVG源对象与clipId；图像放入同源坐标系后再使用。",
+      "status": "component_available; composition_required",
+      "components": [
+        "assets/remotion-kit/src/style-directions.tsx#FocusLens"
+      ],
+      "cards": [
+        "evidence-focus"
+      ],
+      "ownership": "Original recipe; no third-party media bundled",
+      "timing": "Choose durations from narration and actual reading/motion needs; no fixed seconds"
+    },
+    {
+      "id": "comparison-stage",
+      "title": "共基线图表／表格舞台",
+      "keywords": [
+        "对比",
+        "表格",
+        "图表",
+        "数据",
+        "税收"
+      ],
+      "slots": [
+        "rows_with_units",
+        "source_url",
+        "highlight_key",
+        "claim_id"
+      ],
+      "sequence": "先呈现比较维度 → 突出当前论点的行或数据 → 留出查值 → 回收结论",
+      "token_roles": [
+        "background",
+        "evidence",
+        "comparison",
+        "type.label",
+        "type.number"
+      ],
+      "implementation": "选择SVG/D3或原生表格；几何和数值从同一数据计算，缺数据改用定性对照。",
+      "status": "recipe_only; chart_implementation_required",
+      "components": [],
+      "cards": [
+        "quantitative-comparison"
+      ],
+      "ownership": "Original recipe; no third-party media bundled",
+      "timing": "Choose durations from narration and actual reading/motion needs; no fixed seconds"
+    },
+    {
+      "id": "flow-to-map",
+      "title": "关系线转地理路线",
+      "keywords": [
+        "地图",
+        "路线",
+        "流向",
+        "地点"
+      ],
+      "slots": [
+        "relation_nodes",
+        "coordinates",
+        "route_evidence",
+        "claim_id"
+      ],
+      "sequence": "节点关系 → 地理锚点匹配 → 路径展开 → 全局定位",
+      "token_roles": [
+        "route",
+        "evidence",
+        "type.place",
+        "stroke"
+      ],
+      "implementation": "TracePath只负责描线；地理投影和GeoJSON按数据实现，不从示意图猜坐标。",
+      "status": "component_available; projection_required",
+      "components": [
+        "assets/remotion-kit/src/motion.tsx#TracePath"
+      ],
+      "cards": [
+        "geography-route",
+        "causal-model"
+      ],
+      "ownership": "Original recipe; no third-party media bundled",
+      "timing": "Choose durations from narration and actual reading/motion needs; no fixed seconds"
+    },
+    {
+      "id": "causal-flow",
+      "title": "机制对象流",
+      "keywords": [
+        "因果",
+        "机制",
+        "结构",
+        "流程"
+      ],
+      "slots": [
+        "actors",
+        "relations",
+        "result",
+        "claim_id"
+      ],
+      "sequence": "起始状态 → 原句动词驱动变化 → 结果落定",
+      "token_roles": [
+        "actor",
+        "relation",
+        "emphasis",
+        "type.label"
+      ],
+      "implementation": "SharedElement承载对象，TracePath描关系；对象位置与因果依据由文案配置。",
+      "status": "components_available; composition_required",
+      "components": [
+        "assets/remotion-kit/src/motion.tsx#SharedElement",
+        "assets/remotion-kit/src/motion.tsx#TracePath"
+      ],
+      "cards": [
+        "causal-model"
+      ],
+      "ownership": "Original recipe; no third-party media bundled",
+      "timing": "Choose durations from narration and actual reading/motion needs; no fixed seconds"
+    },
+    {
+      "id": "collage-inquiry",
+      "title": "证据拼贴层",
+      "keywords": [
+        "拼贴",
+        "纸张",
+        "照片",
+        "档案",
+        "证据"
+      ],
+      "slots": [
+        "evidence_assets",
+        "reading_order",
+        "masks",
+        "claim_id"
+      ],
+      "sequence": "主证据 → 次证据接入 → 关系标记 → 主论点聚焦",
+      "token_roles": [
+        "paper",
+        "shadow",
+        "annotation",
+        "type.caption",
+        "light.direction"
+      ],
+      "implementation": "TornMatte与MediaCard可作起点；边缘、卡片圆角、阴影需重设以匹配本片，原图与遮罩另提供。",
+      "status": "components_available; assets_and_layout_required",
+      "components": [
+        "assets/remotion-kit/src/motion.tsx#TornMatte",
+        "assets/remotion-kit/src/motion.tsx#MediaCard"
+      ],
+      "cards": [
+        "editorial-collage"
+      ],
+      "ownership": "Original recipe; no third-party media bundled",
+      "timing": "Choose durations from narration and actual reading/motion needs; no fixed seconds"
+    },
+    {
+      "id": "image-extension",
+      "title": "风格化原创图扩展",
+      "keywords": [
+        "生成图",
+        "生图",
+        "艺术",
+        "插画",
+        "材质"
+      ],
+      "slots": [
+        "claim_id",
+        "subject_identity",
+        "art_direction",
+        "real_layer_masks_optional"
+      ],
+      "sequence": "生成与核对 → 全图定位 → 遮罩揭示／平面运动 → 代码标记接入",
+      "token_roles": [
+        "palette",
+        "material",
+        "lighting",
+        "type"
+      ],
+      "implementation": "用可用imagegen生成或编辑位图；原图无分层则采用平面运动，真实图层就绪才作视差。",
+      "status": "recipe_only; image_tool_and_assets_required",
+      "components": [],
+      "cards": [
+        "art-image-extension"
+      ],
+      "ownership": "Original recipe; no third-party media bundled",
+      "timing": "Choose durations from narration and actual reading/motion needs; no fixed seconds"
+    },
+    {
+      "id": "hero-morph",
+      "title": "可辨识主体接力",
+      "keywords": [
+        "形变",
+        "轮廓",
+        "接力",
+        "转场"
+      ],
+      "slots": [
+        "object_id",
+        "from_shape",
+        "to_shape",
+        "semantic_link"
+      ],
+      "sequence": "先辨识 → 轮廓过渡 → 新状态稳定 → 后续使用",
+      "token_roles": [
+        "object",
+        "emphasis",
+        "motion.curve",
+        "stroke"
+      ],
+      "implementation": "morphContour是有限演示轮廓函数，不是任意SVG形变器；新形状匹配拓扑或用遮罩交接。",
+      "status": "example_component_available; adaptation_required",
+      "components": [
+        "assets/remotion-kit/src/style-directions.tsx#morphContour"
+      ],
+      "cards": [
+        "shape-story"
+      ],
+      "ownership": "Original recipe; no third-party media bundled",
+      "timing": "Choose durations from narration and actual reading/motion needs; no fixed seconds"
+    },
+    {
+      "id": "product-focus",
+      "title": "产品／素材的空间聚焦",
+      "keywords": [
+        "产品",
+        "界面",
+        "运镜",
+        "2.5D",
+        "空间"
+      ],
+      "slots": [
+        "screens_or_evidence",
+        "focal_region",
+        "operation_or_claim",
+        "claim_id"
+      ],
+      "sequence": "上下文 → 聚焦关键操作／细节 → 显示结果 → 拉回关系",
+      "token_roles": [
+        "surface",
+        "depth",
+        "light.direction",
+        "type"
+      ],
+      "implementation": "MediaCard和SharedElement实现有限2.5D起点；真实3D需模型、相机与验证，不把CSS透视称为真实三维。",
+      "status": "components_available; camera_and_content_required",
+      "components": [
+        "assets/remotion-kit/src/motion.tsx#MediaCard",
+        "assets/remotion-kit/src/motion.tsx#SharedElement"
+      ],
+      "cards": [
+        "product-demonstration",
+        "spatial-camera"
+      ],
+      "ownership": "Original recipe; no third-party media bundled",
+      "timing": "Choose durations from narration and actual reading/motion needs; no fixed seconds"
+    },
+    {
+      "id": "event-cues",
+      "title": "声音与画面的共用事件表",
+      "keywords": [
+        "声音",
+        "音效",
+        "旁白",
+        "原声",
+        "踩点",
+        "cue"
+      ],
+      "slots": [
+        "event_id",
+        "source_sentence_id",
+        "time_anchor",
+        "visual_action",
+        "sound_asset_optional"
+      ],
+      "sequence": "事件时间 → 视觉动作 → 可选声音 → 同一锚点检查",
+      "token_roles": [
+        "motion.timing",
+        "audio.role"
+      ],
+      "implementation": "将事件表接到场景与音轨；不附带第三方样本或默认配音，不以固定BPM改写旁白。",
+      "status": "recipe_only; event_and_audio_implementation_required",
+      "components": [],
+      "cards": [
+        "audio-events",
+        "editing-reuse"
+      ],
+      "ownership": "Original recipe; no third-party media bundled",
+      "timing": "Choose durations from narration and actual reading/motion needs; no fixed seconds"
+    }
+  ]
+}

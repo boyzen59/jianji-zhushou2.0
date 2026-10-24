@@ -1,0 +1,416 @@
+import { describe, expect, it } from 'vitest';
+import {
+  IMAGE_TO_VIDEO_MODELS,
+  isValidImageToVideoModel,
+} from '@/models/models';
+import {
+  buildStudioVideoInput,
+  dropStudioAlias,
+  renumberStudioReferences,
+  resolveStudioAliases,
+  unresolvedStudioReferences,
+  snapStudioVideoDuration,
+  studioBillableSeconds,
+  studioCanEditSource,
+  studioEditPrompt,
+  studioUsedUploadedReferenceVideo,
+  studioCombinedRefCap,
+  studioSupportsEndFrame,
+  studioSupportsMode,
+  studioVideoEndpointId,
+  studioVideoEndpointIds,
+  studioVideoSupportsAudio,
+  tagStudioReferences,
+} from './text-to-video';
+
+const SEQUENCE_VIDEO_KEYS = Object.keys(IMAGE_TO_VIDEO_MODELS).filter(
+  isValidImageToVideoModel
+);
+
+describe('studioVideoEndpointId', () => {
+  it('maps every sequence video model to a text-to-video sibling, not image-to-video', () => {
+    const ids = SEQUENCE_VIDEO_KEYS.map((model) =>
+      studioVideoEndpointId(model)
+    );
+    expect(ids).toEqual([
+      'xai/grok-imagine-video/v1.5/text-to-video',
+      'fal-ai/gemini-omni-1.1-flash',
+      'fal-ai/kling-video/v3/pro/text-to-video',
+      'minimax/h3-max/text-to-video',
+      'bytedance/seedance-2.0/enterprise/v2/text-to-video',
+      'bytedance/seedance-2.5/text-to-video',
+      'bytedance/seedance-2.0/mini/text-to-video',
+    ]);
+    expect(ids.some((id) => id.includes('image-to-video'))).toBe(false);
+    // Pricing refresh sees the reference siblings too.
+    expect(studioVideoEndpointIds()).toEqual(
+      expect.arrayContaining([
+        ...ids,
+        'xai/grok-imagine-video/v1.5/reference-to-video',
+        'fal-ai/kling-video/o3/pro/reference-to-video',
+        'fal-ai/gemini-omni-1.1-flash/reference-to-video',
+        'minimax/h3-max/reference-to-video',
+      ])
+    );
+  });
+});
+
+describe('buildStudioVideoInput', () => {
+  const base = {
+    prompt: 'A red fox turns toward camera in morning fog',
+    duration: 5,
+    aspectRatio: '16:9' as const,
+    generateAudio: true,
+  };
+
+  it.each(SEQUENCE_VIDEO_KEYS)('never sends an image field for %s', (model) => {
+    const { modelOptions } = buildStudioVideoInput({ ...base, model });
+    expect(modelOptions).not.toHaveProperty('image_url');
+    expect(modelOptions).not.toHaveProperty('start_image_url');
+    expect(modelOptions).not.toHaveProperty('image_urls');
+  });
+
+  it('encodes Kling duration as a string and includes aspect + audio', () => {
+    const { prompt, modelOptions } = buildStudioVideoInput({
+      ...base,
+      model: 'kling_v3_pro',
+    });
+    expect(prompt).toBe(base.prompt);
+    expect(modelOptions).toMatchObject({
+      duration: '5',
+      aspect_ratio: '16:9',
+      generate_audio: true,
+    });
+  });
+
+  // Studio has no prompt versions, so it refuses instead of shortening —
+  // only the sequences rescue rewrites (#1754).
+  it('refuses a prompt past an enforced ceiling, in our own words', () => {
+    expect(() =>
+      buildStudioVideoInput({
+        ...base,
+        model: 'kling_v3_pro',
+        prompt: 'x'.repeat(2501),
+      })
+    ).toThrow(/Kling 3.0 Omni accepts at most 2500/);
+  });
+
+  it('sends a long prompt whole where nothing enforces a ceiling', () => {
+    const long = 'x'.repeat(9000);
+    const { prompt } = buildStudioVideoInput({
+      ...base,
+      model: 'seedance_v2_5',
+      prompt: long,
+    });
+    expect(prompt).toBe(long);
+  });
+
+  it('resolves the requested tier against the model enum (#1449)', () => {
+    const at = (
+      model: 'seedance_v2' | 'minimax_h3_max',
+      resolution: '1080p' | '4k'
+    ) =>
+      buildStudioVideoInput({ ...base, model, duration: 8, resolution })
+        .modelOptions.resolution;
+    expect(at('seedance_v2', '4k')).toBe('4k');
+    expect(at('seedance_v2', '1080p')).toBe('1080p');
+    // H3 Max stops at 1080P (fal's latent refinement of a native 768P
+    // source), whatever is asked for.
+    expect(at('minimax_h3_max', '4k')).toBe('1080P');
+  });
+
+  it('omits resolution for a model that takes none', () => {
+    expect(
+      buildStudioVideoInput({
+        ...base,
+        model: 'kling_v3_pro',
+        resolution: '4k',
+      }).modelOptions
+    ).not.toHaveProperty('resolution');
+  });
+
+  it('sends Seedance duration as a string and 720p', () => {
+    expect(
+      buildStudioVideoInput({ ...base, model: 'seedance_v2' }).modelOptions
+    ).toMatchObject({
+      duration: '5',
+      aspect_ratio: '16:9',
+      generate_audio: true,
+      resolution: '720p',
+    });
+    expect(
+      buildStudioVideoInput({ ...base, model: 'seedance_v2_5' }).modelOptions
+    ).toMatchObject({
+      duration: '5',
+      aspect_ratio: '16:9',
+      generate_audio: true,
+      resolution: '720p',
+    });
+  });
+
+  it('sends Grok fal T2V duration as an integer, with no generate_audio field', () => {
+    const { modelOptions } = buildStudioVideoInput({
+      ...base,
+      model: 'grok_imagine_video_1_5',
+    });
+    expect(modelOptions).toMatchObject({
+      duration: 5,
+      aspect_ratio: '16:9',
+      resolution: '720p',
+    });
+    expect(modelOptions).not.toHaveProperty('generate_audio');
+  });
+
+  it('sends H3 Max duration, 768P, and balanced prompt expansion', () => {
+    expect(
+      buildStudioVideoInput({ ...base, model: 'minimax_h3_max' }).modelOptions
+    ).toMatchObject({
+      duration: 5,
+      aspect_ratio: '16:9',
+      resolution: '768P',
+      prompt_expansion_mode: 'balanced',
+    });
+  });
+
+  it('omits aspect_ratio when the T2V endpoint does not accept it', () => {
+    expect(
+      buildStudioVideoInput({
+        ...base,
+        model: 'gemini_omni_flash',
+        aspectRatio: '1:1',
+      }).modelOptions
+    ).not.toHaveProperty('aspect_ratio');
+  });
+});
+
+describe('snapStudioVideoDuration', () => {
+  it('snaps H3 Max to 5–15 and Omni Flash to 3–10', () => {
+    expect(snapStudioVideoDuration(4, 'minimax_h3_max')).toBe(5);
+    expect(snapStudioVideoDuration(2, 'gemini_omni_flash')).toBe(3);
+    expect(snapStudioVideoDuration(12, 'gemini_omni_flash')).toBe(10);
+  });
+});
+
+describe('studioVideoSupportsAudio', () => {
+  it('is true only when the T2V sibling exposes generate_audio', () => {
+    expect(studioVideoSupportsAudio('kling_v3_pro')).toBe(true);
+    expect(studioVideoSupportsAudio('seedance_v2')).toBe(true);
+    expect(studioVideoSupportsAudio('seedance_v2_5')).toBe(true);
+    expect(studioVideoSupportsAudio('grok_imagine_video_1_5')).toBe(false);
+    expect(studioVideoSupportsAudio('minimax_h3_max')).toBe(false);
+  });
+});
+
+describe('reference tags', () => {
+  it('turns bare pill tokens into provider @ImageN tags', () => {
+    expect(tagStudioReferences('Image1 walks past Image2, not @Image3')).toBe(
+      '@Image1 walks past @Image2, not @Image3'
+    );
+    expect(tagStudioReferences('Image10x and MyImage1')).toBe(
+      'Image10x and MyImage1'
+    );
+    expect(
+      tagStudioReferences('Audio1 plays under Image2, cut like Video1')
+    ).toBe('@Audio1 plays under @Image2, cut like @Video1');
+    expect(renumberStudioReferences('Audio1 then Audio2', 0, 'Audio')).toBe(
+      ' then Audio1'
+    );
+    expect(
+      tagStudioReferences('Image1 meets Image2', 'grok_imagine_video_1_5')
+    ).toBe('<IMAGE_0> meets <IMAGE_1>');
+    expect(
+      tagStudioReferences('Image1 meets Image2', 'gemini_omni_flash')
+    ).toBe('<IMAGE_REF_0> meets <IMAGE_REF_1>');
+    expect(
+      tagStudioReferences(
+        'Image1 walks with Video1 under Audio1',
+        'minimax_h3_max'
+      )
+    ).toBe('Image 1 walks with Video 1 under Audio 1');
+  });
+
+  it('resolves a token the user typed or pasted, any case, with or without @', () => {
+    expect(tagStudioReferences('@image1 meets image2')).toBe(
+      '@Image1 meets @Image2'
+    );
+    expect(
+      tagStudioReferences('@image1 meets @Image2', 'grok_imagine_video_1_5')
+    ).toBe('<IMAGE_0> meets <IMAGE_1>');
+    expect(tagStudioReferences('@Image1 under @audio1', 'minimax_h3_max')).toBe(
+      'Image 1 under Audio 1'
+    );
+  });
+
+  it('swaps a named reference for its slot on the way to the model', () => {
+    const aliases = [
+      { alias: 'Sienna Blake', token: 'Image1' },
+      { alias: 'Sienna Blake Jr', token: 'Image2' },
+      { alias: 'Bondi Beach', token: 'Image3' },
+    ];
+    expect(
+      resolveStudioAliases(
+        '@Sienna Blake Jr waves at sienna blake on @Bondi Beach',
+        aliases
+      )
+    ).toBe('Image2 waves at Image1 on Image3');
+    // An unattached name is prose, not a slot.
+    expect(resolveStudioAliases('Sienna Blakeley waves', aliases)).toBe(
+      'Sienna Blakeley waves'
+    );
+    expect(resolveStudioAliases('nobody named here', [])).toBe(
+      'nobody named here'
+    );
+  });
+
+  it('drops a named reference when its tile goes away', () => {
+    expect(dropStudioAlias('@Sienna Blake waves', 'Sienna Blake')).toBe(
+      ' waves'
+    );
+    expect(dropStudioAlias('Sienna Blakeley waves', 'Sienna Blake')).toBe(
+      'Sienna Blakeley waves'
+    );
+  });
+
+  it('names slots with nothing attached', () => {
+    const attached = { image: 2, video: 0, audio: 1 };
+    expect(
+      unresolvedStudioReferences(
+        'Image1 meets @image5 while Video1 plays under Audio1',
+        attached
+      )
+    ).toEqual(['@Image5', '@Video1']);
+    expect(
+      unresolvedStudioReferences('Image1 and Image2 only', attached)
+    ).toEqual([]);
+    // Each token is named once however often it appears.
+    expect(unresolvedStudioReferences('Image9 then Image9', attached)).toEqual([
+      '@Image9',
+    ]);
+  });
+
+  it('names an @name that was never attached', () => {
+    const attached = { image: 1, video: 0, audio: 0 };
+    const aliases = ['Sienna Blake'];
+    expect(
+      unresolvedStudioReferences(
+        '@bluesamurai bows to @Sienna Blake',
+        attached,
+        aliases
+      )
+    ).toEqual(['@bluesamurai']);
+    // The bare form the pill stores is not an @name at all.
+    expect(
+      unresolvedStudioReferences('Sienna Blake bows', attached, aliases)
+    ).toEqual([]);
+    // `@` inside a word is an address, not a reference.
+    expect(
+      unresolvedStudioReferences('mail tom@example.com', attached, aliases)
+    ).toEqual([]);
+    // Order follows the prompt, across both shapes.
+    expect(
+      unresolvedStudioReferences('@ghost then Image4', attached, aliases)
+    ).toEqual(['@ghost', '@Image4']);
+  });
+
+  it('drops the removed token and shifts later ones down', () => {
+    expect(renumberStudioReferences('Image1 hands Image2 to Image3.', 1)).toBe(
+      'Image1 hands  to Image2.'
+    );
+    expect(renumberStudioReferences('@Image1 alone', 0)).toBe(' alone');
+  });
+});
+
+describe('studioVideoEndpointId modes', () => {
+  it('routes reference mode to the reference-to-video sibling', () => {
+    expect(studioVideoEndpointId('seedance_v2', 'reference')).toBe(
+      'bytedance/seedance-2.0/enterprise/v2/reference-to-video'
+    );
+    expect(studioVideoEndpointId('seedance_v2_5', 'text')).toBe(
+      'bytedance/seedance-2.5/text-to-video'
+    );
+    expect(studioVideoEndpointId('seedance_v2_5', 'reference')).toBe(
+      'bytedance/seedance-2.5/reference-to-video'
+    );
+    expect(studioVideoEndpointId('seedance_v2_5', 'frames')).toBe(
+      'bytedance/seedance-2.5/image-to-video'
+    );
+    expect(studioVideoEndpointId('kling_v3_pro', 'reference')).toBe(
+      'fal-ai/kling-video/o3/pro/reference-to-video'
+    );
+    expect(studioVideoEndpointId('grok_imagine_video_1_5', 'reference')).toBe(
+      'xai/grok-imagine-video/v1.5/reference-to-video'
+    );
+    expect(studioVideoEndpointId('minimax_h3_max', 'reference')).toBe(
+      'minimax/h3-max/reference-to-video'
+    );
+    expect(studioCombinedRefCap('minimax_h3_max')).toBe(12);
+    expect(studioCombinedRefCap('seedance_v2')).toBeNull();
+    expect(studioSupportsMode('minimax_h3_max', 'reference')).toBe(true);
+    // Every catalog model now has a reference-to-video sibling (#1511).
+  });
+
+  it('routes frames mode to the image-to-video endpoint', () => {
+    expect(studioVideoEndpointId('kling_v3_pro', 'frames')).toBe(
+      IMAGE_TO_VIDEO_MODELS.kling_v3_pro.id
+    );
+    expect(studioSupportsEndFrame('kling_v3_pro')).toBe(true);
+    expect(studioSupportsEndFrame('gemini_omni_flash')).toBe(true);
+    expect(studioSupportsEndFrame('grok_imagine_video_1_5')).toBe(false);
+  });
+});
+
+describe('auto length and edit (#1925)', () => {
+  it('keeps auto on Seedance and snaps it to seconds elsewhere', () => {
+    expect(snapStudioVideoDuration('auto', 'seedance_v2_5')).toBe('auto');
+    expect(snapStudioVideoDuration('auto', 'kling_v3_pro')).toBe(3);
+  });
+
+  it('prices auto at the longest clip', () => {
+    expect(studioBillableSeconds('auto', 'seedance_v2_5')).toBe(30);
+    expect(studioBillableSeconds(7, 'seedance_v2_5')).toBe(7);
+  });
+
+  it('edits only a clip Seedance made', () => {
+    expect(studioCanEditSource('seedance_v2')).toBe(true);
+    expect(studioCanEditSource('seedance_v2_5')).toBe(true);
+    expect(studioCanEditSource('kling_v3_pro')).toBe(false);
+    expect(studioCanEditSource(undefined)).toBe(false);
+  });
+
+  it('flags a run that took an uploaded reference clip', () => {
+    expect(
+      studioUsedUploadedReferenceVideo({
+        referenceVideos: ['/r2/talent/team1/uploads/a.mp4'],
+      })
+    ).toBe(true);
+    expect(
+      studioUsedUploadedReferenceVideo({
+        referenceVideos: ['https://example.com/a.mp4'],
+      })
+    ).toBe(true);
+    // A clip the studio generated passed through gated inputs.
+    expect(
+      studioUsedUploadedReferenceVideo({
+        referenceVideos: ['/r2/teams/team1/studio/asset1/video.mp4'],
+      })
+    ).toBe(false);
+    expect(studioUsedUploadedReferenceVideo({ referenceVideos: [] })).toBe(
+      false
+    );
+    expect(studioUsedUploadedReferenceVideo({})).toBe(false);
+  });
+
+  it('offers edit on Seedance 2.5 only', () => {
+    expect(studioSupportsMode('seedance_v2_5', 'edit')).toBe(true);
+    expect(studioSupportsMode('gemini_omni_flash', 'edit')).toBe(false);
+  });
+
+  it('leads the prompt with the edit instruction once', () => {
+    expect(studioEditPrompt('Make it night')).toBe(
+      'Edit @Video1. Make it night'
+    );
+    expect(studioEditPrompt('Edit @Video1. Make it night')).toBe(
+      'Edit @Video1. Make it night'
+    );
+  });
+});

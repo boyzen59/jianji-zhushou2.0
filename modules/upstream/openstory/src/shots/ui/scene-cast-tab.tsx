@@ -1,0 +1,400 @@
+/**
+ * Scene Cast Tab
+ * Displays characters appearing in the current shot with a cinematic/editorial design
+ */
+
+import { AddCharacterDialog } from './add-character-dialog';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/ui/shadcn/alert-dialog';
+import { Badge } from '@/ui/shadcn/badge';
+import { Button } from '@/ui/shadcn/button';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/ui/shadcn/select';
+import { Skeleton } from '@/ui/shadcn/skeleton';
+import { canonicalBibleTag } from '@/cast/bible-field';
+import { dressForScene } from '@/cast/character-looks';
+import type { SceneWithScript } from './use-scenes';
+import { useUpdateScene } from './use-scene-structure';
+import { facetIdsForShots, useSceneFacetMaps } from './use-scene-facets';
+import {
+  restoreSequenceCharacter,
+  useSequenceCharacters,
+  useSoftDeleteSequenceCharacter,
+} from '@/cast/ui/use-sequence-characters';
+import type { CharacterWithSheet } from '@/platform/server/db/schema';
+import { errorMessage } from '@/platform/errors';
+import { useQueryClient } from '@tanstack/react-query';
+import { Link } from '@tanstack/react-router';
+import { Film, Mic, Trash2, User } from 'lucide-react';
+import { useState } from 'react';
+import { toast } from 'sonner';
+import { sheetSquareImageClassName } from '@/cast/sheet-tile';
+import { cn } from '@/ui/utils';
+import { AppImage } from '@/ui/shadcn/app-image';
+
+type SceneCastTabProps = {
+  sequenceId: string;
+  /** Shots in the current selection. `null` = whole sequence (show all). */
+  shotIds: string[] | null;
+  /**
+   * The scene in focus, at scene scope only (#2015): each character's look
+   * is picked here, and the card shows the sheet of the look it wears.
+   */
+  scene?: SceneWithScript;
+};
+
+type CastCardProps = {
+  character: CharacterWithSheet;
+  sequenceId: string;
+  onDelete: (character: CharacterWithSheet) => void;
+  scene?: SceneWithScript;
+};
+
+/**
+ * Which look a character wears in a scene (#2015). Writes the scene's
+ * `continuity.characterLooks`; the default look is "no pick", so choosing it
+ * removes the character's entry. Shown only when there is a choice to make.
+ */
+const SceneLookPicker: React.FC<{
+  sequenceId: string;
+  scene: SceneWithScript;
+  /** The character as read: `lookId` is its default look. */
+  character: CharacterWithSheet;
+  wornLookId: string;
+}> = ({ sequenceId, scene, character, wornLookId }) => {
+  const update = useUpdateScene(sequenceId);
+  const looks = character.looks.filter(
+    (look) => !look.deletedAt || look.id === wornLookId
+  );
+  if (looks.length < 2) return null;
+  const label = (look: (typeof looks)[number]) =>
+    look.isDefault ? `${look.name} (default look)` : look.name;
+  return (
+    <Select
+      value={wornLookId}
+      // The trigger shows the look's name, not its id.
+      items={Object.fromEntries(looks.map((look) => [look.id, label(look)]))}
+      disabled={update.isPending}
+      onValueChange={(lookId) => {
+        if (!lookId) return;
+        // A patch for this character only; the default look is "no pick".
+        update.mutate(
+          {
+            sceneId: scene.id,
+            continuity: {
+              characterLooks: {
+                [canonicalBibleTag(character)]:
+                  lookId === character.lookId ? null : lookId,
+              },
+            },
+          },
+          {
+            onError: (error) =>
+              toast.error('Could not change the look', {
+                description: errorMessage(error),
+              }),
+          }
+        );
+      }}
+    >
+      <SelectTrigger
+        size="sm"
+        aria-label={`Look ${character.name} wears in this scene`}
+      >
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {looks.map((look) => (
+          <SelectItem key={look.id} value={look.id}>
+            {label(look)}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+};
+
+const CastCard: React.FC<CastCardProps> = ({
+  character: owner,
+  sequenceId,
+  onDelete,
+  scene,
+}) => {
+  // In a scene, the card shows the character as that scene dresses it.
+  const [character = owner] = dressForScene(
+    [owner],
+    scene?.continuity?.characterLooks
+  );
+  return (
+    <div className="group relative flex flex-col gap-2">
+      <Link
+        to="/sequences/$id/cast/$characterId"
+        params={{ id: sequenceId, characterId: character.id }}
+        // Opens beside the inspector: the tab and the selection stay as they are.
+        search
+        className="block overflow-hidden rounded-lg bg-card cursor-pointer"
+      >
+        {/* The portrait drawn from the sheet; a sheet from before portraits
+            is cropped to its close-up (panel 2 of 4). */}
+        <div className="aspect-square relative overflow-hidden bg-muted">
+          {character.sheetImageUrl ? (
+            <AppImage
+              src={character.sheetPortraitUrl ?? character.sheetImageUrl}
+              alt={character.name}
+              width={160}
+              height={160}
+              className={cn(
+                sheetSquareImageClassName(!character.sheetPortraitUrl),
+                'transition-transform duration-500 group-hover:scale-105'
+              )}
+            />
+          ) : (
+            <div className="flex h-full w-full items-center justify-center">
+              {character.voiceOnly ? (
+                <Mic className="h-12 w-12 text-muted-foreground/20" />
+              ) : (
+                <User className="h-12 w-12 text-muted-foreground/20" />
+              )}
+            </div>
+          )}
+
+          {/* Gradient overlay */}
+          <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
+
+          {/* Character info overlay — one line each, never wrap over the still */}
+          <div className="absolute inset-x-0 bottom-0 min-w-0 p-4">
+            <h3
+              className="truncate text-sm font-medium tracking-wider text-white uppercase"
+              title={character.name}
+            >
+              {character.name}
+            </h3>
+            {character.voiceOnly && (
+              <Badge variant="secondary">Voice only</Badge>
+            )}
+            {(character.age || character.gender) && (
+              <p className="mt-1 truncate text-xs text-white/70">
+                {[character.age, character.gender].filter(Boolean).join(' · ')}
+              </p>
+            )}
+          </div>
+        </div>
+
+        {/* Description below card — the voice, for a character never seen */}
+        {(character.voiceOnly
+          ? character.personality
+          : character.physicalDescription) && (
+          <div className="p-3 border-t border-border/50">
+            <p className="text-xs text-muted-foreground line-clamp-2 leading-relaxed">
+              {character.voiceOnly
+                ? character.personality
+                : character.physicalDescription}
+            </p>
+          </div>
+        )}
+      </Link>
+      {/* Sibling of the Link (never nested interactive), floated over the
+          card corner. Soft delete — the confirm + undo toast live in the tab. */}
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="absolute right-1 top-1 z-10 h-7 w-7 bg-black/50 text-white hover:bg-black/70 hover:text-white"
+        aria-label={`Remove ${character.name} from sequence`}
+        onClick={() => onDelete(character)}
+      >
+        <Trash2 className="h-3.5 w-3.5" />
+      </Button>
+      {scene && !owner.voiceOnly ? (
+        <SceneLookPicker
+          sequenceId={sequenceId}
+          scene={scene}
+          character={owner}
+          wornLookId={character.lookId}
+        />
+      ) : null}
+    </div>
+  );
+};
+
+const CastCardSkeleton: React.FC = () => (
+  <div className="overflow-hidden rounded-lg bg-card">
+    <div className="aspect-square relative">
+      <Skeleton className="h-full w-full" />
+    </div>
+    <div className="p-3 border-t border-border/50 space-y-2">
+      <Skeleton className="h-3 w-3/4" />
+      <Skeleton className="h-3 w-1/2" />
+    </div>
+  </div>
+);
+
+export const SceneCastTab: React.FC<SceneCastTabProps> = ({
+  sequenceId,
+  shotIds,
+  scene,
+}) => {
+  const { data: characters, isLoading } = useSequenceCharacters(sequenceId);
+  const { data: facetMaps } = useSceneFacetMaps(sequenceId);
+  const queryClient = useQueryClient();
+  const softDelete = useSoftDeleteSequenceCharacter();
+  const [pendingDelete, setPendingDelete] = useState<CharacterWithSheet | null>(
+    null
+  );
+
+  const handleConfirmDelete = (character: CharacterWithSheet) => {
+    softDelete.mutate(
+      { sequenceId, characterId: character.id },
+      {
+        onSuccess: () => {
+          setPendingDelete(null);
+          toast(`Removed ${character.name}`, {
+            duration: 60_000,
+            action: {
+              label: 'Undo',
+              onClick: () =>
+                void restoreSequenceCharacter(queryClient, {
+                  sequenceId,
+                  characterId: character.id,
+                }).catch((error: Error) =>
+                  toast.error('Failed to restore character', {
+                    description: errorMessage(error),
+                  })
+                ),
+            },
+          });
+        },
+        onError: (error) =>
+          toast.error('Failed to remove character', {
+            description: errorMessage(error),
+          }),
+      }
+    );
+  };
+
+  const scopedIds = facetIdsForShots(facetMaps?.characterIdsByShot, shotIds);
+  const scopedCast = !characters
+    ? []
+    : scopedIds === null
+      ? characters
+      : characters.filter((c) => scopedIds.has(c.id));
+
+  // Loading state
+  if (isLoading) {
+    return (
+      <div className="grid grid-cols-2 gap-4 @[360px]/inspector:grid-cols-3">
+        <CastCardSkeleton />
+        <CastCardSkeleton />
+        <CastCardSkeleton />
+      </div>
+    );
+  }
+
+  // Add is only offered unscoped. A character belongs to the SEQUENCE, and
+  // this list is filtered by which characters the selected shots reference —
+  // so a newly added one (referenced by no scene yet) would not appear here,
+  // and the click would read as a no-op.
+  const canAdd = shotIds === null;
+  const castIds = new Set((characters ?? []).map((c) => c.id));
+
+  if (scopedCast.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+        <div className="rounded-full bg-muted p-4">
+          <Film className="h-8 w-8 text-muted-foreground/50" />
+        </div>
+        <p className="text-sm text-muted-foreground">
+          {canAdd
+            ? 'No cast yet'
+            : 'No cast in this selection — clear the selection to add one'}
+        </p>
+        {canAdd && (
+          <AddCharacterDialog
+            sequenceId={sequenceId}
+            castCharacterIds={castIds}
+          />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-xs uppercase tracking-wider text-muted-foreground">
+          <span>{canAdd ? 'All Cast' : 'Cast'}</span>
+          <span className="text-muted-foreground/50">·</span>
+          <span>
+            {scopedCast.length}{' '}
+            {scopedCast.length === 1 ? 'character' : 'characters'}
+          </span>
+        </div>
+        {canAdd && (
+          <AddCharacterDialog
+            sequenceId={sequenceId}
+            castCharacterIds={castIds}
+          />
+        )}
+      </div>
+
+      <div className="grid grid-cols-2 gap-4 @[360px]/inspector:grid-cols-3">
+        {scopedCast.map((character) => (
+          <CastCard
+            key={character.id}
+            character={character}
+            sequenceId={sequenceId}
+            onDelete={setPendingDelete}
+            scene={scene}
+          />
+        ))}
+      </div>
+
+      <AlertDialog
+        open={pendingDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingDelete(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Remove {pendingDelete?.name} from this sequence?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              The character is hidden from the cast and prompt context. You can
+              undo from the toast right after removing.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={softDelete.isPending}
+              // Radix's Action closes the dialog on click; hold it open so the
+              // pending state is reachable and a second click can't double-submit.
+              // `onSuccess` clears `pendingDelete`, which closes it.
+              onClick={(event) => {
+                event.preventDefault();
+                if (pendingDelete) handleConfirmDelete(pendingDelete);
+              }}
+            >
+              {softDelete.isPending ? 'Removing…' : 'Remove'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+};

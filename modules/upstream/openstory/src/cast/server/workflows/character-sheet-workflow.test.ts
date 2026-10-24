@@ -1,0 +1,331 @@
+/**
+ * CharacterSheetWorkflow: generating a sheet from the character bible and
+ * look, and landing through the sheet claim (#1113).
+ *
+ * The result lands through the trigger's claim: promoted while held, parked
+ * (with `stale:detected`) when it moved; a pre-#1113 payload lands
+ * unconditionally.
+ */
+
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { CharacterBibleEntry } from '@/shots/scene-analysis.schema';
+import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
+import type { CharacterSheetWorkflowInput } from '@/platform/server/workflow/types';
+import type { WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
+import { asStub } from '@/test/as-stub';
+
+const mockGenerateImageWithProvider = vi.fn();
+const mockStoreGeneratedPng = vi.fn();
+const mockDeductWorkflowCredits = vi.fn();
+const mockRecordFalUsageStep = vi.fn();
+const mockRecordProvenance = vi.fn();
+const mockEmit = vi.fn();
+const mockTriggerSheetPortrait = vi.fn();
+
+vi.doMock('@/stills/server/image-generation', () => ({
+  generateImageWithProvider: mockGenerateImageWithProvider,
+}));
+vi.doMock('@/stills/server/image-storage', () => ({
+  storeGeneratedPng: mockStoreGeneratedPng,
+}));
+vi.doMock('@/billing/server/workflow-deduction', () => ({
+  deductWorkflowCredits: mockDeductWorkflowCredits,
+  extractImageCost: () => 0,
+  recordFalUsageStep: mockRecordFalUsageStep,
+}));
+vi.doMock('@/platform/server/compliance/provenance', () => ({
+  recordProvenance: mockRecordProvenance,
+}));
+vi.doMock('@/cast/server/sheets/sheet-portrait-trigger', () => ({
+  triggerSheetPortrait: mockTriggerSheetPortrait,
+}));
+vi.doMock('@/platform/realtime', () => ({
+  getGenerationChannel: () => ({ emit: mockEmit }),
+}));
+
+const { CharacterSheetWorkflow } = await import('./character-sheet-workflow');
+const { computeCharacterSheetHashFromDto } = await import('./sheet-snapshots');
+
+class Probe extends CharacterSheetWorkflow {
+  runBody(
+    event: Readonly<WorkflowEvent<CharacterSheetWorkflowInput>>,
+    step: WorkflowStep,
+    scopedDb: WorkflowScopedDb
+  ) {
+    return this.runImpl(event, step, scopedDb);
+  }
+  failBody(
+    event: Readonly<WorkflowEvent<CharacterSheetWorkflowInput>>,
+    scopedDb: WorkflowScopedDb
+  ) {
+    return this.onFailure({ event, error: 'boom', scopedDb });
+  }
+}
+
+function makeWorkflow(): Probe {
+  type Ctor = ConstructorParameters<typeof Probe>;
+  // tests construct the entrypoint directly; runImpl never reads ctx
+  const ctx = asStub<Ctor[0]>(undefined);
+  // minimal env stub; runImpl never reads bindings
+  const env = asStub<Ctor[1]>({});
+  return new Probe(ctx, env);
+}
+
+function makeStep(): WorkflowStep {
+  // minimal WorkflowStep stub: runImpl only uses `do`
+  return asStub<WorkflowStep>({
+    do: vi.fn((_name: string, fn: () => Promise<unknown>) => fn()),
+  });
+}
+
+const mockPromoteIfPending = vi.fn();
+const mockUpdateSheetStatus = vi.fn();
+const mockFailSheetClaim = vi.fn();
+const mockFailSheetClaimByVersion = vi.fn();
+
+function makeScopedDb(): WorkflowScopedDb {
+  // stub covering only the scoped-db surface runImpl touches
+  return asStub<WorkflowScopedDb>({
+    characters: { updateSheetStatus: mockUpdateSheetStatus },
+    characterLooks: {
+      failSheetClaim: mockFailSheetClaim,
+      failSheetClaimByVersion: mockFailSheetClaimByVersion,
+    },
+    characterSheetVariants: { promoteIfPending: mockPromoteIfPending },
+    provenance: {},
+    liveRead: {
+      compliance: { listEnforcementFor: vi.fn().mockResolvedValue([]) },
+    },
+    credentials: {},
+  });
+}
+
+const characterMetadata: CharacterBibleEntry = {
+  characterId: 'sam',
+  name: 'Sam',
+  age: '30s',
+  gender: '',
+  ethnicity: '',
+  physicalDescription: '',
+  standardClothing: 'duster',
+  looks: [],
+  personality: '',
+  movement: '',
+  voiceDescription: '',
+  voiceOnly: false,
+  isPerson: true,
+  rendering: 'Photoreal live action',
+  consistencyTag: 'sam',
+};
+
+async function makeEvent(
+  overrides: Partial<CharacterSheetWorkflowInput> = {}
+): Promise<Readonly<WorkflowEvent<CharacterSheetWorkflowInput>>> {
+  const fields = {
+    userId: 'u1',
+    teamId: 'team-1',
+    sequenceId: 'seq-1',
+    characterDbId: 'char-1',
+    lookId: 'look-1',
+    lookVersionId: 'lookver-1',
+    lookStyling: null,
+    face: null,
+    bibleVersionId: null,
+    characterName: 'Sam',
+    characterMetadata,
+    sheetVersionId: 'ver-1',
+    ...overrides,
+  };
+  return {
+    payload: {
+      ...fields,
+      snapshotInputHash: await computeCharacterSheetHashFromDto(fields),
+    },
+    instanceId: 'run-1',
+    workflowName: 'character-sheet',
+    timestamp: new Date(0),
+  };
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockGenerateImageWithProvider.mockResolvedValue({
+    imageUrls: ['https://fal.example/out.png'],
+    metadata: { usedOwnKey: false, requestId: 'req-1' },
+    via: 'fal',
+  });
+  mockStoreGeneratedPng.mockResolvedValue({
+    url: '/r2/characters/team-1/seq-1/char-1/out.png',
+    path: 'team-1/seq-1/char-1/out.png',
+  });
+  mockRecordFalUsageStep.mockResolvedValue({});
+  mockDeductWorkflowCredits.mockResolvedValue(undefined);
+  mockRecordProvenance.mockResolvedValue(undefined);
+  mockEmit.mockResolvedValue(undefined);
+  mockPromoteIfPending.mockResolvedValue('promoted');
+});
+
+describe('CharacterSheetWorkflow looks', () => {
+  it('draws a look from the default sheet (#2015)', async () => {
+    await makeWorkflow().runBody(
+      await makeEvent({
+        lookId: 'gala',
+        face: {
+          url: '/r2/characters/team-1/char-1/default.png',
+          versionId: 'char-1',
+        },
+      }),
+      makeStep(),
+      makeScopedDb()
+    );
+
+    expect(mockGenerateImageWithProvider).toHaveBeenCalledTimes(1);
+    const params = mockGenerateImageWithProvider.mock.calls[0]?.[0];
+    expect(params.referenceImageUrls).toEqual([
+      '/r2/characters/team-1/char-1/default.png',
+    ]);
+    expect(params.prompt).toContain("this character's default look");
+
+    // The sheet lands first; its portrait run is started after, for the
+    // version that landed.
+    expect(mockTriggerSheetPortrait).toHaveBeenCalledTimes(1);
+    expect(mockTriggerSheetPortrait.mock.calls[0]?.[0]).toMatchObject({
+      subject: { kind: 'character', characterId: 'char-1', lookId: 'gala' },
+      versionId: 'ver-1',
+      sheetUrl: '/r2/characters/team-1/seq-1/char-1/out.png',
+    });
+    expect(mockPromoteIfPending.mock.invocationCallOrder[0] ?? 0).toBeLessThan(
+      mockTriggerSheetPortrait.mock.invocationCallOrder[0] ?? 0
+    );
+  });
+});
+
+describe('CharacterSheetWorkflow sheet claim (#1113)', () => {
+  it('lands through the claim the trigger took', async () => {
+    const result = await makeWorkflow().runBody(
+      await makeEvent(),
+      makeStep(),
+      makeScopedDb()
+    );
+
+    expect(mockPromoteIfPending).toHaveBeenCalledWith(
+      expect.objectContaining({
+        characterId: 'char-1',
+        versionId: 'ver-1',
+        claimed: true,
+        url: '/r2/characters/team-1/seq-1/char-1/out.png',
+      })
+    );
+    expect(result.sheetVersionId).toBe('ver-1');
+  });
+
+  it('parks and reports stale when the claim moved mid-run', async () => {
+    mockPromoteIfPending.mockResolvedValue('parked');
+
+    const result = await makeWorkflow().runBody(
+      await makeEvent(),
+      makeStep(),
+      makeScopedDb()
+    );
+
+    expect(result.diverged).toBe(true);
+    expect(mockEmit).toHaveBeenCalledWith(
+      'generation.stale:detected',
+      expect.objectContaining({
+        entityType: 'character',
+        entityId: 'char-1',
+        divergedVariantId: 'ver-1',
+      })
+    );
+  });
+
+  it('lands a run queued before #1113 (no claim) only while no run holds one', async () => {
+    const legacy = await makeEvent();
+    // a pre-#1113 payload lacks the field
+    delete asStub<Partial<CharacterSheetWorkflowInput>>(legacy.payload)
+      .sheetVersionId;
+
+    const result = await makeWorkflow().runBody(
+      legacy,
+      makeStep(),
+      makeScopedDb()
+    );
+
+    expect(mockPromoteIfPending).toHaveBeenCalledWith(
+      expect.objectContaining({ characterId: 'char-1', claimed: false })
+    );
+    // The minted id is what the run reports as its sheet.
+    expect(mockPromoteIfPending.mock.lastCall?.[0]).toMatchObject({
+      versionId: result.sheetVersionId,
+    });
+  });
+
+  it('fails a run queued before #1113 without touching a newer claim', async () => {
+    const legacy = await makeEvent();
+    // a pre-#1113 payload lacks the field
+    delete asStub<Partial<CharacterSheetWorkflowInput>>(legacy.payload)
+      .sheetVersionId;
+    await makeWorkflow().failBody(legacy, makeScopedDb());
+    expect(mockFailSheetClaim).toHaveBeenCalledWith('look-1', null, 'boom');
+    expect(mockUpdateSheetStatus).not.toHaveBeenCalled();
+  });
+
+  it('fails only its own claim, on its own look', async () => {
+    await makeWorkflow().failBody(await makeEvent(), makeScopedDb());
+    expect(mockFailSheetClaim).toHaveBeenCalledWith('look-1', 'ver-1', 'boom');
+    expect(mockUpdateSheetStatus).not.toHaveBeenCalled();
+  });
+
+  it('lands on the look the payload names, stamping its version (#2015)', async () => {
+    mockPromoteIfPending.mockResolvedValue('promoted');
+    const result = await makeWorkflow().runBody(
+      await makeEvent(),
+      makeStep(),
+      makeScopedDb()
+    );
+    expect(mockPromoteIfPending).toHaveBeenCalledWith(
+      expect.objectContaining({
+        characterId: 'char-1',
+        lookId: 'look-1',
+        lookVersionId: 'lookver-1',
+      })
+    );
+    expect(result.lookId).toBe('look-1');
+  });
+
+  it('fails a run queued before every look carried a face, at the top', async () => {
+    const legacy = await makeEvent({ lookId: 'gala' });
+    const payload = asStub<Partial<CharacterSheetWorkflowInput>>(
+      legacy.payload
+    );
+    delete payload.face;
+
+    await expect(
+      makeWorkflow().runBody(legacy, makeStep(), makeScopedDb())
+    ).rejects.toThrow(
+      'Queued before looks were drawn from the default look. Run it again.'
+    );
+    expect(mockGenerateImageWithProvider).not.toHaveBeenCalled();
+    expect(mockPromoteIfPending).not.toHaveBeenCalled();
+  });
+
+  it('fails a run queued before #2015, and clears its claim by the claim id', async () => {
+    const legacy = await makeEvent();
+    // a pre-#2015 payload names no look
+    const payload = asStub<Partial<CharacterSheetWorkflowInput>>(
+      legacy.payload
+    );
+    delete payload.lookId;
+    delete payload.lookVersionId;
+    delete payload.lookStyling;
+
+    await expect(
+      makeWorkflow().runBody(legacy, makeStep(), makeScopedDb())
+    ).rejects.toThrow('Queued before character looks shipped. Run it again.');
+    expect(mockPromoteIfPending).not.toHaveBeenCalled();
+    // No look is guessed: the claim is found by its own id.
+    await makeWorkflow().failBody(legacy, makeScopedDb());
+    expect(mockFailSheetClaim).not.toHaveBeenCalled();
+    expect(mockFailSheetClaimByVersion).toHaveBeenCalledWith('ver-1', 'boom');
+  });
+});

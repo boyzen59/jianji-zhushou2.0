@@ -1,0 +1,1019 @@
+# Prompt & artifact staleness — the dependency graph
+
+> Issue [#867](https://github.com/openstory-so/openstory/issues/867): _"When
+> generating a new sequence, image and motion prompts always appear stale.
+> Validate the dependency graph and hash calculation across all areas, create a
+> doc that graphs it out clearly, then correct inconsistencies."_
+
+This doc is the map. It graphs **what input, when changed, makes which artifact
+stale**, and then pins down the places where the graph is computed
+_inconsistently_ between the moment an artifact is generated (**stamp**) and the
+moment the UI checks it (**verify**) — which is what produces the false-positive
+"out of sync" dots on a brand-new sequence.
+
+It is the operational companion to
+[workflow-snapshots-and-content-hash-staleness.md](./workflow-snapshots-and-content-hash-staleness.md)
+(the design) — read that first for _why_ we hash inputs at all.
+
+## Status — implemented in #867, re-fixed on a new path in #1732
+
+All three defects below are now **fixed**; §5/§6 are kept as the rationale.
+The doc pre-dates the frames→shots redesign, so it still says "frame" where the
+code now says "shot"; the file map in §7 is current.
+
+1. **Membership moved upstream.** Scene-split now emits each scene's `continuity`
+   (`response-schemas.ts`); the visual-prompt LLM no longer authors it. The
+   prompt hashes **narrow their bible input** (`narrowShotPromptContext`) so
+   the hash reads only what can change the prompt. #867 narrowed to the
+   scene. #2012 narrows per shot and per prompt channel:
+   `resolveShotReferences` keeps the characters, locations and elements the
+   prompt's own text names, so a visual digest reads the visual prompt and a
+   motion digest the motion prompt. Continuity tags pick the bibles only
+   while that prompt is unwritten. Every stamp site passes the text it
+   writes (`ShotPromptView` is required), and verify passes the selected
+   text, so stamp and verify hash the same set. Causes, the clip's
+   `referenceKeys` compare and the motion render's reference attachment use
+   the same resolution. A digest stamped on the scene roster before #2012 is
+   still accepted at verify until `LEGACY_HASH_UNTIL`, with every roster
+   character and location the prompt does not name read as its bible (and,
+   for a character, its default look's clothing, #2015) stood at the stamp, so an off-shot edit to either cannot stale it (elements keep
+   no history, so an off-shot element still can). Still sheets keep the
+   scene-tag fallback when the visual prompt names nobody, so an off-camera
+   sheet can stale a still.
+2. **Cast bible fed into prompt generation.** `analyze-script-workflow.ts`
+   computes the cast bible (`buildCastCharacterBible`) right after the bibles are persisted
+   and hands it to the prompt branches, so the stamped hash equals the cast DB row
+   read at verify time.
+3. **Hash scoped to real drivers.** `input-hash.ts` projects each bible entry to
+   its prompt-driving fields (drops `characterId`/`locationId`/`consistencyTag`/
+   `firstMention`) and uses an allowlist scene surface;
+   `PROMPT_INPUT_HASH_VERSION` went to 4. It is **5** today — v5 additionally
+   dropped every display label (`name`, `metadata.title`) and `sceneNumber`,
+   with v4 kept as a verify fallback.
+
+### The same defect, again, on a path #867 predates (#1732)
+
+#1517 added a **second** visual-prompt stamp site: `persist-derived-visual-prompts`
+in `analyze-script-workflow.ts` writes the image prompt for every clip of a
+**2+ shot scene** without an LLM child. It passed the raw pre-cast
+`characterBible` — defect A below, reintroduced — so every clip of every
+multi-shot scene read stale from birth whenever a character bible was rewritten between stamp and verify,
+and with no `Changed:` line, because no input row was newer than the artifact.
+Fixed by handing it `castCharacterBible`, the same bible the prompt children
+get.
+
+**The rule this leaves behind:** a new stamp site takes the cast bible, never
+the payload bible. `buildCastCharacterBible` is computed once in
+`analyze-script-workflow.ts` and is the only character bible any hash may see
+inside that run. A stamp↔verify test whose bible is empty cannot catch this —
+cast and raw are then identical — so the round-trip test (§6-4) must use a
+character the shot names, tagged in `continuity.characterTags` so narrowing
+keeps it.
+
+---
+
+> Interactive version: `/docs/dependency-graph` in the app (#1595), data in
+> `src/ui/docs/dependency-graph.ts`. It shows this same graph.
+>
+> **Update both together.** A change to what a hash or a pointer compare reads
+> updates `src/ui/docs/dependency-graph.ts` and this doc in the same PR. The
+> interactive graph is the one people open; leaving it on the old rule is how
+> #2012 shipped with the page still saying continuity tags pick the bibles.
+
+## 1. The model in one paragraph
+
+Every generated artifact stores a **SHA-256 hash of its inputs** next to the
+version row that carries it (`frame_prompt_versions.inputHash`,
+`shot_prompt_versions.inputHash`, `frame_variants.inputHash`,
+`characters.sheetInputHash`, …). Staleness is a **derived read**, never a stored
+flag:
+
+```
+stored hash == null            → "untracked"  (never generated / legacy — no opinion)
+stored hash == recompute(now)  → "fresh"
+stored hash != recompute(now)  → "stale"      (an input changed → show "regenerate")
+```
+
+Two verdicts sit outside that compare, both in `ArtifactStaleness`
+(`shot-staleness.ts`): **`generating`** short-circuits a shot with a run in
+flight (#1121 — the reason a fresh sequence must not be judged mid-run) and
+**`updating`** a shot with a pending Update-all claim (#1085); `unknown` is the
+no-context case.
+
+`recompute(now)` reads the **current persisted state** and re-derives the hash.
+Helpers live in [`src/shots/input-hash.ts`](../../src/shots/input-hash.ts). The
+compare is not `stored === live`: `visualPromptInputHashMatches` /
+`motionPromptInputHashMatches` also accept the previous digest shapes (v4, the
+v5 named / titled variants, and `pre-2065`: the current body with each
+character's features under their own key) until `LEGACY_HASH_UNTIL`
+(2026-12-31, #1371), so a version bump doesn't re-stale the world.
+
+**The invariant that must hold:** the hash computed at **stamp time** (inside the
+generating workflow) and the hash computed at **verify time** (inside
+`computeShotStaleness`) must be byte-identical _whenever nothing the user cares
+about has changed_. Every false-positive in this doc is a place where stamp ≠
+verify even though nothing changed.
+
+---
+
+## 2. The generation DAG
+
+What feeds what, top to bottom. Each box is a durable workflow; each arrow is a
+data dependency. Boxes that **stamp an input-hash** are marked `⊟`.
+
+```mermaid
+flowchart TD
+    script[/"script + style + aspectRatio + models"/]
+
+    script --> split["scene-split-workflow<br/>LLM → scenes + continuity<br/>+ characterBible + locationBible + elementBible"]
+
+    split --> cbib["character-bible-workflow ⊟<br/>persists characters (CAST)<br/>→ character-sheet ⊟"]
+    split --> locmatch["location-matching-workflow<br/>script location ↔ team location<br/>a match is a link (#1695)"]
+    locmatch --> lbib["location-bible-workflow<br/>persists locations, links the matched<br/>→ location-sheet ⊟ for the ones made here"]
+    split --> elem["element-sheet-workflow ⊟<br/>auto-detected elements"]
+
+    split --> dvprompt["persist-shot-specs ⊟<br/>every shot's spec v1 + derived prompts (#1915, #1923)<br/>assembled, no prompt LLM"]
+    split --> rewrite["shot-spec-rewrite-workflow ⊟<br/>Rewrite shot when the spec is stale or missing"]
+
+    dvprompt --> mmprompt["motion-music-prompts-workflow<br/>music only"]
+    mmprompt --> musicp["music-prompt-workflow<br/>→ sequence musicDesign + prompt"]
+
+    cbib --> img["shot-images-workflow ⊟<br/>thumbnail + variant images"]
+    lbib --> img
+    elem --> img
+    dvprompt --> img
+    rewrite --> img
+
+    img --> motion["motion-batch / motion-workflow ⊟<br/>per-shot video"]
+    dvprompt --> motion
+    rewrite --> motion
+    musicp --> audio["audio / music-workflow ⊟<br/>per-frame + sequence music"]
+
+    motion --> export["sequence-export-workflow<br/>on-demand MP4 (container)"]
+    audio --> export
+
+    classDef stamp fill:#1f6feb,stroke:#1f6feb,color:#fff;
+    class cbib,lbib,elem,dvprompt,rewrite,img,motion,audio,split stamp;
+```
+
+**`prompts.visual`** and **`prompts.motion`** are derived from the shot spec (#1923). The stamp sites are `persist-shot-specs` and Rebuild (`completeDerivedPrompts`). Rewrite shot is the LLM that changes the spec; the text is still derived afterwards. The hash includes the spec's canonical content on `current` digests, so the version id stays provenance. The current motion digest omits the starting-frame URL. Both prompts hash the same narrowed bible (#1732).
+
+> **Ordering detail (inconsistency C below):** the frame-prompt batch and
+> `character-bible-workflow` are still spawned **in parallel** in Phase 3 of
+> [`analyze-script-workflow.ts`](../../src/sequences/server/workflows/analyze-script-workflow.ts)
+> (one `Promise.allSettled`). That race is harmless _only_ because the cast
+> bible is computed **before** the spawn, from the same inputs
+> `create-cast-records` persists — the prompts hash the value the bible
+> workflow is concurrently writing, not the value it started from. Defused by
+> construction, not by ordering, which is why a new stamp site that reaches for
+> `characterBible` instead reopens it (#1732).
+
+---
+
+## 3. The staleness dependency graph (the answer to "what causes staleness")
+
+Read every arrow as: **"if this input changes, the target artifact becomes
+stale."** Diamonds are inputs; rounded boxes are hashed artifacts.
+
+```mermaid
+flowchart LR
+    subgraph inputs["upstream inputs"]
+        scene{{"scene input surface<br/>originalScript<br/>· metadata location/timeOfDay/storyBeat<br/>· per shot: prompts name the bibles (#2012)<br/>· continuity tags only while prompts are empty"}}
+        style{{"styleConfig"}}
+        cbible{{"character bible<br/>(age, physicalDescription, …)<br/>name is a display label"}}
+        look{{"character look (#2015)<br/>clothing · styling<br/>the one the scene picks"}}
+        lbible{{"location bible<br/>rendering reaches the sheet only"}}
+        ebible{{"element bible"}}
+        eimage{{"element image"}}
+        ar{{"aspectRatio"}}
+        amodel{{"analysisModel<br/>(pinned per prompt)"}}
+        lines{{"shot lines<br/>(shot_dialogue_versions)"}}
+        refonly{{"shot reference-only"}}
+        dur{{"shot durations"}}
+        tags{{"music tags"}}
+        voice{{"character voiceId<br/>(ElevenLabs or Seed voice)"}}
+        lphotos{{"location reference photos<br/>(#1695)"}}
+    end
+
+    scene --> VP(["visual prompt hash"])
+    style --> VP
+    cbible --> VP
+    look --> VP
+    lbible --> VP
+    ebible --> VP
+    ar --> VP
+    amodel --> VP
+
+    scene --> MP(["motion prompt hash"])
+    style --> MP
+    cbible --> MP
+    look --> MP
+    lbible --> MP
+    ebible --> MP
+    ar --> MP
+    amodel --> MP
+    lines --> MP
+    refonly --> MP
+    TH -. "still URL" .-> MP
+
+    VP -. "fullPrompt text" .-> TH(["still hash"])
+    ar --> TH
+    CS(["character sheet<br/>one per look"]) -. "selected version id<br/>of the scene's look" .-> TH
+    scene -. "look pick" .-> TH
+    LS(["location sheet"]) -. "selected version id" .-> TH
+    eimage --> TH
+
+    cbible --> CS
+    look --> CS
+    style --> CS
+
+    lbible --> LS
+    lphotos --> LS
+
+    TH -. "still version id" .-> VID(["clip manifest"])
+    MP -. "prompt version id" .-> VID
+    dur --> VID
+    lines --> VID
+    voice --> VID
+    refonly --> VID
+    CS -. "sheet sent" .-> VID
+    LS -. "sheet sent" .-> VID
+    eimage -. "image sent" .-> VID
+
+    scene --> MUSIC(["sequence music-prompt hash"])
+    dur --> MUSIC
+    amodel --> MUSIC
+    MUSIC -. "prompt text" .-> AUD(["music track hash"])
+    tags --> AUD
+    dur --> AUD
+```
+
+Key consequences of the shape:
+
+- **Prompts depend on the _text_ of the bibles**, not on the sheet images. Edit a
+  character's `physicalDescription` and the visual + motion **prompts** go stale;
+  the rendered thumbnail goes stale only because the **character-sheet hash**
+  changes and feeds the thumbnail hash.
+- **The style snapshot is versioned (#1600).** Each create, switch and
+  automatic derivation appends a `sequence_style_versions` row, so a stale
+  prompt names the knobs that moved (`Style: lighting`).
+- **A scene's narrative is versioned with its script (#1600).** Heading, time
+  of day, story beat, title and continuity tags live on the selected
+  `scene_script_versions` row, so an edit to any of them appends a row, and a
+  stale prompt names the field: `Scene: time of day`. The title stays a label
+  (never hashed, never a cause); continuity is named as "cast and tags",
+  because it decides which bible entries a scene's prompts hash.
+- **Bibles are versioned (#1600).** Each edit, recast or re-analysis
+  appends a `character_bible_versions` / `location_bible_versions` row, and
+  sheets record the version they read. The edges above are unchanged — the
+  hashes still read the bible's values — but a stale artifact's cause now
+  names the fields that moved (`Character "Jack": clothing`) instead of any
+  row touched after it.
+- **A sheet reads the bible's `rendering`, not the sequence's style
+  (#2017).** The one thing a sheet took from a style is what the character
+  is rendered as, so that is a bible field now and the style is out of the
+  sheet hash; a style change stales no character sheet. The shot still
+  reads the style.
+- **A character is the team's, and every sequence reads its current
+  version (#2017).** The bible a shot's hashes read, the voice its clips
+  bind, and a look's clothing, styling and sheet are the character's own,
+  whichever sequence made the shot. An edit from any sequence stales the
+  shots of every sequence by derivation, with no pointer of the sequence's
+  to move. A cause finds the version a shot was made from the way it does
+  for a location: the newest version created at or before the artifact.
+- **Clothing belongs to a look, and a scene picks the look (#2015).** A
+  character has one or more looks (`character_looks`, versioned in
+  `character_look_versions`), each with its own sheet; a scene's
+  `continuity.characterLooks` picks one per character, and a character with no
+  pick wears its default. Every reader of a shot's cast — the prompt hashes,
+  the still's `characterSheetHashes`, the clip's `referenceKeys`, the cause
+  list and the renders — gets the characters already dressed for the scene
+  (`dressForScene`, applied inside `resolveShotReferences` and
+  `matchCharactersToShotImage`, and in `loadShotPromptContext` for the bible
+  entries). So:
+  - editing a look re-stales that look's sheet and the prompts of the scenes
+    that wear it; their stills follow once the sheet is redrawn. A scene in
+    another look does not move;
+  - switching one scene's look re-stales that scene's stills, prompts and
+    clips, and nothing else;
+  - the cause names the look: `Character "Mia" (Gala gown): clothing`.
+    The sheet hash keeps the bible's old key for the clothing
+    (`characterBible.standardClothing`, now fed from the look) and adds
+    `styling` only when it is set, so the #2015 backfill — which copies each
+    bible's clothing onto a default look — moved no stored digest. The scene's
+    pick is not hashed on its own: it acts through the sheet and the clothing
+    it selects, so a scene stored before looks (no `characterLooks` at all)
+    reads exactly as it did.
+- **The default look owns the features (#2065).** The bible has no
+  `distinguishingFeatures`: that text is the default look's `styling`.
+  Nothing was migrated. A bible version from before #2065 still holds the
+  text (`legacyDistinguishingFeatures`), and every look read resolves the
+  default look's styling as its own joined with it (`effectiveStyling`,
+  `src/cast/character-looks.ts`). So:
+  - the current digests hash that effective styling and no features key;
+  - a sheet or prompt stamped before #2065 verifies against the `pre-2065`
+    shape, rebuilt from the two STORED parts (the look version's own
+    `styling`, the bible version's legacy text): the default look and every
+    other look stay fresh on deploy;
+  - the first edit of the default look's styling moves the text: the look
+    version takes what was submitted and a bible version without the legacy
+    text is appended in the same batch. That is a real edit, so the default
+    look's sheet and the shots that read it go stale. So do sheets and
+    prompts of the character's OTHER looks that were stamped before #2065,
+    because the features they were stamped with are gone from the bible;
+    one stamped since never read them and stays fresh;
+  - a save that submits what the field showed writes nothing; a rename or a
+    clothing edit keeps the look's own styling as stored; an unrelated bible
+    edit carries the legacy text to its new version;
+  - a cause compares the styling as resolved then and now, so text that only
+    changed where it is stored is never named.
+    After `LEGACY_HASH_UNTIL` a follow-up backfills the remaining text into the
+    default looks and drops the column with the `pre-2065` shape.
+- **Voice ids bind on the clip**, not the motion prompt. A voice id (an
+  ElevenLabs id, or a `seed:` id for a Seed voice, #1765) is in
+  `VideoManifestEntry.audioSourceKey` (shape-stable: omitted when
+  voiceless), the sheet analogue of `characterSheetHashes` on the still. The
+  LLM never sees it, so swapping a voice re-stales the render, not the prompt.
+- **A shot line edit re-stales the motion prompt and the clip (#1784).** The
+  lines live on the shot (`shot_dialogue_versions`), not the script, so the
+  motion prompt hash and the motion LLM read them through
+  `shotDialogueResolver` (the `dialogue` channel), and the clip manifest
+  records every line its render prompt quoted (`dialogueKey`), voiced or not.
+  The visual prompt still reads the scene script: a still has no dialogue.
+- **A token rename re-stales what names the token (#1786).** The token
+  reaches the model: an image prompt keeps it beside its tag
+  (`LOGO (Image 2)`), and every reference description starts with it. So the
+  prompts and still read stale through their hashes (the element bible hashes
+  `token`). The rename appends `renamed` prompt and scene-script rows and moves
+  each pointer, so the clip reads stale through its motion-prompt pointer too.
+  Before #1786 the rename rewrote the selected row in place and the clip's
+  pointer never moved. The rename popover says how many shots go out of date.
+- **A reference-only shot has no still verdict (#2165).** `computeShotStaleness`
+  leaves `thumbnail` and `visualPrompt` `'untracked'` while
+  `rendersReferenceOnly` is true, even when those rows exist and their hashes
+  diverge. Chips, badges, dots, Update all and `get_shot_staleness` all read
+  that result. The motion prompt and the clip still compare.
+- **Still → clip is a pointer, not a hash cascade.** The clip manifest records
+  the still version and motion-prompt version it was rendered from, and the
+  compare (`isSelectedVersionStale`) checks them against the shot's current
+  selections. A stale still does not stale the clip; selecting a new still
+  does. The same holds for the sheets and element images a render sent
+  (`referenceKeys`): re-selecting one re-stales the clip. A stamped key for
+  an entity that still exists but the motion prompt no longer names is not
+  compared (#2012): a re-render would not send it. A prop close-up rendered
+  with a scene-mate's sheet does not go stale when that sheet changes. A
+  stamped entity that was deleted always reads stale.
+- **A new still re-stales the motion prompt.** The motion prompt is written
+  looking at the still, so its hash reads the still's URL (unless the shot
+  renders reference-only).
+- **Duration deliberately feeds the clip and music but NOT the shot prompts** —
+  it's a generation parameter, not a prompt driver. (Fixed in #767; see §5-B.)
+  The music brief does carry each scene's length.
+- **A model switch never stales anything (#1785).** Model ids are in the
+  hashes (not drawn above), but verify always recomputes with the model the
+  artifact was made with: a still with its own `frame_variants.model`, a prompt with its latest
+  version's `analysisModel`, a generated sheet with its selected version's
+  `model` (`resolveSheetImageModel`), and the clip pointer compare ignores the
+  video model entirely. So a model id only ever differs when the artifact
+  itself was re-made. A sequence switch applies to
+  the next generation. `findStalenessCauses` therefore never names "Image
+  model" or "Script model" (they are not in `SETTINGS_CHANGED_LABELS`). One
+  exception: an uploaded sheet has no model of its own, so its verify uses
+  the sequence model and a switch does re-stale it.
+
+---
+
+## 4. Per-artifact hash inputs (authoritative reference)
+
+Source of truth: [`src/shots/input-hash.ts`](../../src/shots/input-hash.ts).
+
+Listed in generation order (matching §4.1):
+
+| Artifact                                  | Stamp site                                                                              | Verify site                                              | Hashed inputs                                                                                                                                                                                                                                                                                                                                                    |
+| ----------------------------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Character sheet** (one per look, #2015) | `character-sheet-workflow`                                                              | `readReferenceStaleness`                                 | character bible fields, the look's clothing (as `standardClothing`) and styling (only when set), the default look's sheet version on every other look (the selected version, or that look's id when the pointer is still null; only when set, in every digest shape), talentSheetHash (always null, so stored digests still verify), styleConfigHash, imageModel |
+| **Location sheet**                        | `location-sheet-workflow`                                                               | `readReferenceStaleness`                                 | every location bible field the sheet prompt reads (`rendering` included), referencePhotoHashes (sorted set), imageModel. No style (#1695)                                                                                                                                                                                                                        |
+| **Visual prompt**                         | `persist-shot-specs` · Rebuild (`rebuild-shot-prompts.ts`, `regenerate-shot-prompt.ts`) | `computeShotStaleness`                                   | scene input surface, styleConfig, narrowed cast bibles, aspectRatio, analysisModel, canonical spec content (`current` only), `PROMPT_INPUT_HASH_VERSION`                                                                                                                                                                                                         |
+| **Motion prompt**                         | `persist-shot-specs` · Rebuild                                                          | `computeShotStaleness`                                   | _same as visual_, plus `referenceOnly`. A `current` digest omits the starting-frame URL. Voice ids are **not** a prompt channel.                                                                                                                                                                                                                                 |
+| **Sequence music prompt**                 | `music-prompt-workflow`                                                                 | `readMusicPromptStaleness`                               | sceneSummaries, analysisModel                                                                                                                                                                                                                                                                                                                                    |
+| **Thumbnail / variant image**             | `shot-images-workflow.ts` / `image-workflow-snapshot.ts`                                | `computeShotStaleness` via the regenerate-shots snapshot | effective visual prompt text, imageModel, aspectRatio, size, seed, characterSheetHashes, locationSheetHashes, elementReferenceHashes                                                                                                                                                                                                                             |
+| **Shot video**                            | `motion-workflow*`                                                                      | pointer compare in `src/shots/scene-segments.ts`         | manifest pointers (motion-prompt / frame version ids, `usesStartFrame`, durationMs, `audioClipIds`, `audioSourceKey`, `dialogueKey`, `referenceKeys`)                                                                                                                                                                                                            |
+| **Sequence music track**                  | `music-workflow`                                                                        | `musicTrackStaleness`                                    | music prompt text, tags, durationSeconds (clamped), audioModel                                                                                                                                                                                                                                                                                                   |
+
+Two cross-cutting normalizations make the hash order-insensitive and
+default-stable:
+
+- `canonicalize()` sorts object keys and **throws** on `undefined` (callers must
+  pass `null` / `''`).
+- Set-like fields (sheet-hash lists, music tags, bibles) are sorted before
+  hashing — bibles by their identity field (`characterId` / `locationId` /
+  `token`).
+
+### 4.1 The exact bytes hashed, per artifact (in generation order)
+
+Every helper builds **one plain object** and runs it through
+`canonicalize()` (recursively sort keys, **throw** on `undefined`) →
+`JSON.stringify` → `crypto.subtle.digest('SHA-256')` → hex. The literal object
+below _is_ the hash input — nothing else is mixed in. Two shared normalizers
+appear throughout:
+
+```ts
+const trim = (s) => (s ?? '').trim(); // nullish → '', then trim
+const sortedRefs = (refs) => [...(refs ?? [])].sort(); // order-insensitive set
+```
+
+> **The staleness graph is narrower than the generation DAG.** The **script**
+> and the **scene** are not hashed as standalone artifacts — they enter the
+> graph only as _inputs_ to the **prompt** hashes (the prompt's `scene` surface
+> embeds `originalScript`). Each artifact below hashes its **direct** inputs —
+> the _persisted entities_ (bibles, sheets, style, models), **not** the upstream
+> script those entities were derived from.
+>
+> **Concretely:** editing a scene's script flips the **visual + motion prompt**
+> hashes (script text is in `scene.originalScript`), but does **NOT** flip the
+> **character bible / sheet** — the sheet hash contains the character's own
+> persisted fields, not the script. There is no `script → bible` edge in the
+> staleness graph today. The same is true for `script → location/element bible`.
+> If we want a script edit to flag the bibles, that edge has to be added
+> explicitly (it isn't a hash input today).
+
+The hashed artifacts, ordered by when they are produced in the pipeline (§2):
+
+#### 1. Character sheet — `computeCharacterSheetInputHash`
+
+Generated in the references wave from the character bible and one look of the
+character (#2015). One digest per look. The sheet hash keeps
+`talentSheetHash: null` so stored digests still verify.
+
+```ts
+sha256Hex({
+  artifact: 'character:sheet',
+  characterBible: {
+    // a SUBSET of the bible entry — no id/firstMention, and no `name`:
+    // `characterSheetHashBody(input, includeName: false)`. The named body
+    // survives as a legacy verify fallback only.
+    age: trim(age),
+    gender: trim(gender),
+    ethnicity: trim(ethnicity),
+    physicalDescription: trim(physicalDescription),
+    // #2015 — the LOOK's clothing. The key and its place in the body are the
+    // bible's old ones, so a default look backfilled from the bible hashes to
+    // the digest its sheet was stamped with.
+    standardClothing: trim(standardClothing),
+    // No `distinguishingFeatures` (#2065). The `pre-2065` verify shape and
+    // the older ones still carry it, from the bible version's legacy column.
+    consistencyTag: trim(consistencyTag),
+  },
+  // #2015 — the look's hair / makeup / injury notes, as `effectiveStyling`
+  // resolves them (#2065: on the default look, its own joined with the
+  // bible's legacy features). Joined only when set. A legacy shape hashes
+  // the look's own stored styling here instead.
+  styling: trim(styling),
+  talentSheetHash: null, // always null; kept so stored digests verify
+  styleConfigHash, // hash of the StyleConfig, not the object
+  imageModel,
+});
+```
+
+Pre-#1785 digests (no `talentSheetHash` channel) and pre-#2065 digests
+(the features under their own key) still verify until `LEGACY_HASH_UNTIL`
+(2026-12-31, #1371). A verify passes the look's stored parts
+(`legacyStylingParts`) as a required argument.
+
+#### 2. Location sheet — `computeLocationSheetInputHash`
+
+```ts
+sha256Hex({
+  artifact: 'location:sheet',
+  version: 3, // #1695: the place is the team's; no sequence style.
+  // Every field `buildLocationSheetPrompt` reads (#1785): the projection the
+  // prompt hashes use (`projectLocationForPrompt`) plus `rendering`, which
+  // only the sheet reads. `name` is a label.
+  locationBible: {
+    type,
+    description: trim(description),
+    architecturalStyle: trim(architecturalStyle),
+    keyFeatures: trim(keyFeatures),
+    ambiance: trim(ambiance),
+    rendering: trim(rendering),
+  },
+  referencePhotoHashes: sortedRefs(referencePhotoHashes), // unordered set of the uploaded photos
+  imageModel,
+});
+```
+
+A location belongs to the team (#1695, `team-locations.md`), so this digest
+reads nothing of a sequence:
+
+- **No style.** The bible's required `rendering` is the only thing the sheet
+  takes from one. A sequence style change does not stale a location sheet.
+- **No library hash.** The library is gone. The photos uploaded for the
+  location are hashed as a set: adding or removing one stales the sheet,
+  reordering does not. Today the hash of a photo is its URL
+  (`buildRegenerateLocationSheetPayload`).
+- **One digest for every sequence.** A bible edit made from one sequence
+  stales the sheet, and the shots set there, in every sequence that uses the
+  location.
+
+Digests stamped before #1695 still verify until `LEGACY_HASH_UNTIL`
+(2026-12-31, #1371), through `locationSheetInputHashMatches`: `pre-1695`
+(the sequence style's digest and the library reference's hash, no
+`rendering`), `pre-1785` (that with the description alone), `named` (the
+pre-#1108 digest) and `library` (what a library location's own sheet was
+stamped with). The verify takes the legacy parts as a required argument:
+the library reference hash kept on the location
+(`legacyLibraryReferenceHash`) and the style of the sequence the check is
+made from. From no sequence there is no style, so the three shapes that read
+one are not checked and such a sheet reads stale there.
+
+The gap that stood here (#1835: a library location's description and image
+reached the sheet only through a regenerated library reference) is resolved
+by removal.
+
+#### 3. Visual prompt — `computeVisualPromptInputHash`
+
+Generated in Phase 3 from the scene + the bibles. This and the motion prompt are
+the artifacts #867 is about.
+
+```ts
+sha256Hex({
+  artifact: 'shot:visual-prompt',
+  hashVersion: 5, // PROMPT_INPUT_HASH_VERSION — v4 survives only as a verify fallback
+  scene: sceneInputContext(scene), // allowlist — see expansion below
+  styleConfig: styleConfigHashBody(styleConfig), // a projection, not the whole object
+  characterBible, // sorted by characterId, then PROJECTED to driving fields
+  locationBible, //  sorted by locationId,  then PROJECTED to driving fields
+  elementBible, //   sorted by description, projected, or null if absent
+  aspectRatio: trim(aspectRatio),
+  analysisModel: trim(analysisModel), // e.g. 'anthropic/claude-haiku-4.5'
+});
+```
+
+**What `sceneInputContext(scene)` keeps (post-#867: an allowlist)** — only the
+genuine pre-prompt inputs, so no downstream field can leak in:
+
+```ts
+{
+  originalScript,                                  // ← hashed verbatim; dialogue is filtered to this shot upstream (sceneForShot / dialogueForShot), not here
+  metadata: { location, timeOfDay, storyBeat },    // no durationSeconds, no title
+}
+// v5 also dropped `sceneId` / `sceneNumber` (identity) and `metadata.title`
+// (a display label). Everything else on the scene — prompts, continuity,
+// musicDesign, audioDesign, sourceImageUrl — is downstream output and is NOT
+// in the allowlist.
+```
+
+> The **motion** body swaps these lines for what the shot says now
+> (`sceneWithShotDialogue`, #1784) — see §4. The visual body keeps them.
+>
+> **The dialogue filtering happens upstream of the hash**, so it is the one
+> part of the hashed surface the hasher cannot enforce. Both sides go through
+> `scriptForShot` (`shot-list-pass.ts`) — `sceneForShot` at stamp time,
+> `composeSceneForShot` at verify time — and a `shotNumber` / `voiceToken` that
+> reached the hasher unstripped **would** be hashed. Anything added to this
+> view goes in that one function, never in a caller.
+
+**Bible entries are projected to their prompt-driving fields (post-#867)** —
+entries are still sorted by their identity field, but only the fields that shape
+the prose are hashed; identity / provenance / image-gen tags are dropped:
+
+```ts
+// character → 5 driving fields (drops characterId, name, consistencyTag),
+// plus the worn look's effective `styling` when set (#2015, #2065)
+{
+  (age, gender, ethnicity, physicalDescription, standardClothing);
+}
+
+// + MOTION only (#1561): personality, movement — each joined only when non-empty,
+//   so a character with neither moves no stored digest. A still does not walk,
+//   so the visual prompt and the sheet never hash them.
+
+// location → 8 driving fields (drops locationId, name, consistencyTag, firstMention)
+{
+  (type,
+    timeOfDay,
+    description,
+    architecturalStyle,
+    keyFeatures,
+    colorPalette,
+    lightingSetup,
+    ambiance);
+}
+
+// element → 1 driving field (drops token, consistencyTag, firstMention)
+{
+  description;
+}
+```
+
+`name` is a **display label**, dropped in v5 along with `metadata.title`: a
+rename must not flag every prompt stale. The `*ForPromptV4` projections re-add
+it for legacy verify only.
+
+The LLM still receives the full, narrowed entries; only the **hash** is the
+projection. Combined with the cast bible feeding generation, a casting rewrite no
+longer flips the prompt hash (`physicalDescription` is now identical on both
+sides; `consistencyTag` is no longer hashed at all).
+
+> The bibles are first **narrowed to what this prompt's text names**
+> (`resolveShotReferences` in `narrowShotPromptContext`, #2012; the scene-tag
+> narrow was `narrowFramePromptContext`) and then **sorted** by identity
+> field, but the entries themselves are hashed field-for-field. A single
+> differing character field (e.g. a cast `physicalDescription`) flips the
+> whole digest when that character is one the prompt names. Because the set
+> depends on the text, a rebuild hashes the text it is about to write and
+> stamps that digest, never the claim's pending hash.
+
+#### 4. Motion prompt — `hashMotionPromptInput`
+
+Generated in Phase 4. Same scene surface, bibles, style, aspectRatio,
+analysisModel and hashVersion as the visual body, plus `startingFrameImageUrl`,
+`referenceOnly` (the flag joins the body only when true) and each character's
+`personality` / `movement` (#1561). Discriminator is
+`artifact: 'shot:motion-prompt'`.
+
+The scene's script lines are **replaced** by the shot's own lines — the
+required `dialogue` channel, resolved by `shotDialogueResolver` at every
+stamp and verify (#1784). `sceneWithShotDialogue` builds that scene for both
+the LLM and this hash, dropping `voiceToken`. So a shot line edit re-stales
+the motion prompt and a regenerate quotes the edit. An unedited shot whose
+node row holds the script's lines hashes to the same digest as before #1784.
+Verify still accepts a digest hashed over the script's lines, but only for a
+shot with no node row (`legacyScriptDialogue`, until `LEGACY_HASH_UNTIL`):
+there the difference is the resolver reading old data (unstamped pre-#1585
+lines, a pre-#1657 prompt row), not an edit.
+
+Voice ids are **not** in this hash. They bind on the clip
+(`VideoManifestEntry.audioSourceKey`), the sheet analogue of
+`characterSheetHashes` on the still — the LLM never sees the voice id, so
+swapping a voice must not rewrite the prompt.
+
+#### 5. Sequence music prompt — `computeMusicPromptInputHash`
+
+Generated in Phase 4 alongside motion prompts.
+
+```ts
+sha256Hex({
+  artifact: 'sequence:music-prompt',
+  hashVersion: 6,
+  // One row per scene with shots, in scene order: storyBeat, location,
+  // timeOfDay, and the scene's shot durations summed. Scene id and title
+  // are dropped (order is the key; the title is a label).
+  sceneSummaries,
+  analysisModel: trim(analysisModel),
+});
+```
+
+The summaries have ONE builder (`src/audio/server/workflows/music-scene-summaries.ts`),
+fed the scene's narrative and its shots' durations on both sides (#1783). The
+pipeline stamp reaches it through `musicSceneSummariesFromAnalysis`, which runs
+the analysis scenes through `buildSceneNarrative` and `sceneShotSpecs` — the
+builders that wrote the split script version and the shot rows (#1600) — so it
+needs no mid-run read. Verify,
+regenerate, Update all and smart retry use `musicSceneSummariesFromRows`.
+Before #1783 the pipeline stamped per-scene summaries with the analysis scene
+id, the snapped scene label and the visual prompt, while verify hashed one row
+per shot with the row id and an empty visual prompt, so every pipeline music
+prompt read stale from birth. The visual prompt is no longer part of the brief:
+no regenerate path ever sent it, and hashing it would re-stale the track on
+every still-prompt tweak.
+
+Legacy: until `LEGACY_HASH_UNTIL`, verify also accepts the pre-#1783 per-shot
+digests (`musicSceneSummariesFromRows`' `legacyShotSummaries`), so prompts
+stamped by a regenerate stay fresh on deploy. Pipeline stamps from before
+#1783 never matched and stay stale; Update all regenerates them.
+
+#### 6. Thumbnail / variant image — `computeShotImageInputHash`
+
+Rendered from the visual prompt text + the character/location sheet hashes.
+
+```ts
+sha256Hex({
+  artifact: `shot:${kind}`, // 'shot:thumbnail' | 'shot:variant-image'
+  visualPrompt: trim(visualPrompt), // the composed fullPrompt TEXT (not the prompt hash)
+  imageModel,
+  aspectRatio,
+  size: size ?? null,
+  seed: seed ?? null,
+  // Each = the selected sheet version id, else the sheet's input hash, so a
+  // re-selected sheet re-stales the still even with identical inputs.
+  characterSheetHashes: sortedRefs(characterSheetHashes),
+  locationSheetHashes: sortedRefs(locationSheetHashes),
+  elementReferenceHashes: sortedRefs(elementReferenceHashes), // element image URLs
+});
+```
+
+#### 7. Clip / frame video — `computeVideoManifestInputHash`
+
+The stamp is over the render manifest (motion-prompt / still version ids,
+`usesStartFrame`, duration, `audioClipIds`, `audioSourceKey`, `dialogueKey`). The UI compare
+(`isSelectedVersionStale`) is pointer-based: stored entries vs the shot's
+current prompt / still version ids **and** the live `audioSourceKey` (voice
+id, line, tone and TTS model, omitted when voiceless). A voice change therefore
+re-stales the clip, not the motion prompt. A new selected motion-prompt
+version — an edit, a regeneration, a token rename — re-stales it too. A rescue
+rewrite (soften, shorten) is the exception by construction: the clip's
+manifest pins the rewrite, and the rewrite takes the selection only with that
+clip's promote. The TTS model follows the voice
+(`eleven_v3` for an ElevenLabs voice, `seed-audio-1.0` for a Seed voice,
+#1765), so it moves only when the voice does.
+
+`dialogueKey` (#1784) is every line the render prompt quoted, voiced or not,
+with its bound voice token (`dialogueLinesKey`). `audioSourceKey` sees voiced
+lines only, and is null on a model without dialogue-audio input, yet every
+audio-capable model splices all lines into its prompt. It is null when nothing
+was quoted — no lines, no motion prompt, or a model without audio — and the
+compare applies the same rule to the live side. A manifest from before #1784
+has no key and is not compared.
+
+```ts
+sha256Hex({
+  artifact: 'video:manifest',
+  model,
+  manifest: entries.map(canonicalizeManifestEntry),
+  // each entry: shotId, motionPromptVersionId, frameVersionId,
+  // usesStartFrame, durationMs, audioClipIds (dropped when []),
+  // audioSourceKey (dropped when null), dialogueKey (dropped when null),
+  // referenceKeys (sorted, dropped when [])
+});
+// A manifest whose pointers are ALL null hashes to `null`, not a digest (#1380):
+// no provenance is not the same claim as "generated from nothing".
+```
+
+#### 8. Sequence music track — `computeSequenceMusicInputHash`
+
+```ts
+sha256Hex({
+  artifact: 'sequence:music',
+  prompt: trim(prompt),
+  tags: trim(tags), // comma-joined string from the selected music prompt version
+  durationSeconds,
+  audioModel,
+});
+```
+
+### 4.2 Hashed surface vs. actual prompt inputs — are we over-hashing? (history)
+
+> **This subsection is the #867 analysis as written, kept for the reasoning.**
+> Its two 🔴 findings shipped and no longer describe the code: the per-entry
+> over-hash is gone (entries are projected — §4.1), and the LLM now receives the
+> **narrowed** bibles, narrowed further per artifact (`voiceOnly` characters and
+> the performance fields are kept out of the still prompt, #1585 / #1561). Only
+> the neighbour-scene under-hash is still open; it is restated under §6.
+
+A correct staleness hash should cover **exactly** the inputs that, if changed,
+would change the regenerated prompt — no more (over-hash → false "stale"), no
+less (under-hash → missed staleness). Here is the visual-prompt hash as it stood
+in #867, measured against what the prompt LLM was handed
+([`frame-prompt-workflow.ts`](../../src/stills/server/workflows/frame-prompt-workflow.ts),
+`getChatPrompt('phase/visual-prompt-scene-generation-chat', …)`):
+`sceneBefore`, `sceneAfter`, `scene`, `characterBible`, `locationBible`,
+`elementBible`, `styleConfig`, `aspectRatio`.
+
+| LLM receives                                                                                                                                                                              | Real prompt driver?                                        | In the hash?                            | Verdict                                                                |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | --------------------------------------- | ---------------------------------------------------------------------- |
+| `scene` appearance surface (`originalScript`, metadata `title`/`location`/`timeOfDay`/`storyBeat`)                                                                                        | yes                                                        | yes                                     | ✅ aligned                                                             |
+| `scene.metadata.durationSeconds`                                                                                                                                                          | no (video param)                                           | no — stripped                           | under-hash, intentional (#767)                                         |
+| `sceneBefore` / `sceneAfter` (neighbour scenes)                                                                                                                                           | **yes** (continuity context)                               | **no**                                  | under-hash, **deliberate** (#1785, see §6; no longer sent since #1903) |
+| **all** character / location / element entries                                                                                                                                            | yes (LLM sees the full set as context)                     | **narrowed** to referenced entries      | ⚠️ under-hash on unreferenced entries (intentional, #683)              |
+| referenced entry → appearance fields (`name`, `age`, `gender`, `ethnicity`, `physicalDescription`, `standardClothing`, the worn look's `styling`; location `description`/`keyFeatures`/…) | yes                                                        | yes (whole entry)                       | ✅ aligned                                                             |
+| referenced entry → **provenance / identity / tags** (`characterId`, `locationId`, `consistencyTag`, `firstMention`)                                                                       | **no** — internal IDs, an image-gen tag, script provenance | **yes** (rides in the whole-entry hash) | 🔴 **over-hash**                                                       |
+| `styleConfig` (all fields)                                                                                                                                                                | mostly                                                     | yes (full)                              | ✅ (possible minor over-hash if the template ignores a field)          |
+| `aspectRatio`, `analysisModel`                                                                                                                                                            | yes                                                        | yes                                     | ✅ aligned                                                             |
+
+**Net:** the hash is **narrower** than the real LLM input in scope (it drops
+`sceneBefore`/`sceneAfter`, `durationSeconds`, and unreferenced entries) but
+**wider** per-entry — it carries bible fields that don't drive the prompt prose.
+
+**Why the over-hash matters for #867:** `consistencyTag` is one of the two fields
+`buildCastingAttributes` rewrites (the other is `physicalDescription`). So even
+setting aside the raw-vs-cast _source_ asymmetry (§5-A), the prompt hash flips
+when casting rewrites the tag — a field the prompt text doesn't use. The same
+shape bites on benign churn: re-extracting continuity can shift
+`firstMention.lineNumber`, and that alone would flag every location-bearing
+prompt stale. Hashing only the **prompt-driving projection** of each bible entry
+(appearance/description fields; drop IDs, `consistencyTag`, `firstMention`)
+removes this whole false-positive class.
+
+> This does **not** fully resolve #867 by itself — `physicalDescription` is _also_
+> cast-rewritten and _is_ a genuine driver, so it would still flip under the
+> source asymmetry. The source fix (§6-1) remains primary; the projection (§6-5)
+> is a complementary tightening that also fixes the `firstMention` /
+> `consistencyTag` churn classes.
+
+This becomes **correction #5** in §6.
+
+---
+
+## 5. Where stamp ≠ verify — the inconsistencies (as found in #867)
+
+The symmetry contract from §1 says: _for the same logical inputs, the stamp-time
+hash and the verify-time hash must be identical._ The two sides reconstruct the
+hash from **different sources**, and that is where it breaks. **A and B are
+shipped fixes; C is defused rather than removed** — the diagram below is the
+_broken_ state, kept because #1732 proved a new stamp site can walk straight
+back into it.
+
+The stamp and the verify still build their scene from different rows — an
+in-memory analysis `Scene` at trigger time, the selected
+`scene_script_versions` row (script and narrative, #1600) afterwards — but the **narrowing they apply to it is
+one function**, `scriptForShot` (#1732). `scene-script.test.ts` hashes the two
+builders against each other for the same underlying script, so a one-sided
+change to the hashed script view fails there rather than in a user's sequence.
+
+```mermaid
+flowchart TD
+    subgraph stamp["STAMP — inside the generating workflow"]
+        s1["payload bibles<br/>= scene-split LLM output<br/>(RAW, pre-casting)"]
+        s2["scene = enrichedScene<br/>(no musicDesign yet)"]
+        s1 --> sh["computeVisualPromptInputHash"]
+        s2 --> sh
+        sh --> col["frame_prompt_versions.inputHash"]
+    end
+
+    subgraph verify["VERIFY — computeShotStaleness"]
+        v1["DB bibles<br/>= charactersToBible(listWithSheets)<br/>(CAST / enriched)"]
+        v2["scene = frame.metadata<br/>(final persisted)"]
+        v1 --> vh["computeVisualPromptInputHash"]
+        v2 --> vh
+    end
+
+    col -. "compared" .-> vh
+    vh -->|"≠ → STALE"| out["false 'out of sync' dot"]
+
+    classDef bad fill:#cf222e,stroke:#cf222e,color:#fff;
+    class out bad;
+```
+
+### A. Casting / enrichment asymmetry — **the #867 root cause** ✅ fixed (twice: #867, #1732)
+
+The visual & motion prompt hashes were stamped from the **raw scene-split
+character bible** carried in the workflow payload. The
+`character-bible-workflow` used to rewrite several of those fields when a
+character was cast to library talent. That library is gone (#2135): a
+character's face, sheet and voice live on the character. The old mismatch
+was:
+
+| field                          | raw scene-split value (hashed at stamp) | persisted value (hashed at verify)                                            |
+| ------------------------------ | --------------------------------------- | ----------------------------------------------------------------------------- |
+| `physicalDescription`          | script-derived text                     | `"Match the real-world appearance of {talent} exactly…"` (or talent metadata) |
+| `consistencyTag`               | LLM tag e.g. `detective_sarah_blonde`   | `{characterId}_{slugify(talentName)}`                                         |
+| `age` / `gender` / `ethnicity` | script values                           | talent metadata when present                                                  |
+
+```mermaid
+flowchart LR
+    raw["raw character<br/>physicalDescription = 'tall, brown hair'<br/>consistencyTag = 'alice_brown'"]
+    raw --> vp["visual/motion prompt hash<br/>(STAMP)"]
+    raw --> cast["buildCastingAttributes()"]
+    cast --> db["persisted character<br/>physicalDescription = 'Match … Jane Doe …'<br/>consistencyTag = 'alice_jane_doe'"]
+    db --> verify["recompute hash (VERIFY)"]
+    vp -. "hash A" .-> cmp{compare}
+    verify -. "hash B" .-> cmp
+    cmp -->|"A ≠ B forever"| stale["permanently STALE"]
+
+    classDef bad fill:#cf222e,stroke:#cf222e,color:#fff;
+    class stale bad;
+```
+
+Because that rewrite was applied at **persist** time but not at **stamp** time,
+the two hashes could never agree — the prompt was reported stale immediately,
+with nothing edited.
+
+The same shape (stamp = raw payload, verify = transformed DB row) is latent for
+any future bible enrichment. It does not arise for a matched location (#1695):
+a match links the script location to the team's and no bible is rewritten.
+
+> **Fixed by computing the cast bible once, before any stamp site is reached**
+> (`analyze-script-workflow.ts`, `buildCastCharacterBible`). Every prompt
+> payload downstream carries that bible; the raw one goes only to
+> `character-bible-workflow` and `createCastRecords`, which apply casting
+> themselves. #1732 is what happens when a stamp site added later reaches for
+> the raw name that is still in scope.
+
+> Note: `#683` already made both sides call `narrowFramePromptContext` so that
+> _unreferenced_ entities don't poison the hash. That fixed a real bug but is
+> orthogonal: narrowing selects the same _set_ of entities; this issue is that
+> the selected entities have **different field values** on each side.
+
+### B. Denylist scene-input surface — latent fragility ✅ fixed (#867: now an allowlist)
+
+`sceneInputContext()` in `input-hash.ts` strips downstream LLM output from the
+scene before hashing, but it does so with a **denylist**:
+
+```ts
+// strips: prompts, continuity, metadata.durationSeconds
+// LEAVES IN: musicDesign, audioDesign, sourceImageUrl
+```
+
+Those left-in fields are _also_ downstream outputs. They aren't written back into
+`frame.metadata` today (so this isn't currently firing), but the moment any code
+path persists a "complete scene" — e.g. writing `musicDesign` or a generated
+`sourceImageUrl` onto the frame — every prompt hash silently flips stale. This is
+exactly the failure mode of #767 (`durationSeconds`), one field over. A
+**denylist invites the next #767**; an **allowlist** closes the class.
+
+### C. Visual-parallel vs motion-sequential ordering 🟡 defused, not removed
+
+The frame-prompt batch still runs **in parallel** with the bible workflows that
+persist the cast characters, while the motion prompts run a phase later, after
+those bibles are persisted. The race is harmless only because both branches are
+handed the **same pre-computed cast bible**, so neither is reading a row the
+other is mid-write. The ordering itself was never fixed (§6-3 is still open),
+which is why the bible must keep arriving by payload rather than by re-reading
+D1 — the same rule the workflow-snapshot doc states for every mid-run read.
+
+---
+
+## 6. Recommended corrections
+
+Ordered by value / risk. **1, 2, 4 and 5 shipped; 3 is still open** (see C).
+
+1. ✅ **Stamp prompt hashes from the same representation verify reads (fixes A).**
+   The persisted character/location bible is the canonical "current inputs"; the
+   transient scene-split payload is not. Feed the **cast** character bible (the
+   output of `buildCastingAttributes`, computed once in `analyze-script-workflow`
+   before any stamp) to the visual + motion prompt workflows, so the value
+   hashed at stamp time equals the value persisted and re-hashed at verify time.
+   This also means the prompt LLM sees the cast character — arguably more correct.
+   _Single source of truth for the bible removes the asymmetry by construction._
+
+2. ✅ **Convert `sceneInputContext` to an allowlist (fixes B).** Hash only the genuine
+   pre-prompt scene inputs — `originalScript` and
+   `metadata.{location, timeOfDay, storyBeat}` (no `sceneId`/`sceneNumber`/
+   `title`: identity and display labels) — so no future downstream
+   field can poison the prompt hash. Backward-compatible: for a scene with none of
+   `musicDesign`/`audioDesign`/`sourceImageUrl`, the allowlist output is identical
+   to today's denylist output, so existing fresh hashes stay fresh.
+
+3. ⏳ **Re-order the DAG so prompts depend on finalized bibles (addresses C).** Make
+   the frame-prompt batch consume the persisted/cast bibles rather than racing
+   their persistence. Larger change; do it once 1–2 land if any residual flake
+   remains.
+
+4. ✅ **Add a stamp↔verify round-trip test.** Today's `prompt-context.test.ts` reuses
+   the _same_ bible objects on both sides, so it can't catch a source-asymmetry.
+   Add a test that stamps from a raw payload bible and verifies from a
+   `charactersToBible(persistedCastRow)` bible and asserts the hashes match.
+
+5. ✅ **Hash only the prompt-driving projection of each bible entry (tightens §4.2).**
+   The prompt hash currently embeds whole bible entries, including fields the
+   prompt prose never uses — `characterId`, `locationId`, `consistencyTag`,
+   `firstMention`. Project each entry to its appearance/description fields before
+   hashing. This removes a class of false positives (`consistencyTag` casting
+   churn, `firstMention.lineNumber` drift on re-extraction) independent of the
+   source fix. Mirror the projection on both stamp and verify sides so they stay
+   symmetric.
+
+### Deliberately not hashed (#1785)
+
+- **Neighbour scenes.** No longer sent to the visual or motion prompt LLMs
+  (#1903). A shot's continuity comes from its own scene's other shot
+  prompts; the scene before and after were mostly the same scene again, and
+  hashing them would have re-staled neighbours on every script edit or
+  reorder. The hash input has no neighbour channel.
+- **A voice-only character's look** (visual prompt only). The visual LLM
+  never sees a voice-only character (#1585), so the visual hash drops it too
+  (#1785). The motion hash keeps it (delivery), and marks it
+  `voiceOnly: true` because the motion LLM is sent the flag (#1787). The mark
+  joins only when set, so a cast with no voice-only character hashes as
+  before. Every digest before `pre-2065` (`v5-voiced` and older)
+  ignores the flag, so it would equal the stamp after a toggle. Verify
+  therefore accepts those digests only while no character's `voiceOnly`
+  moved since the prompt was made (`voiceOnlyMovedSince` over the character
+  bible versions). An untouched pre-#1785 stamp stays fresh on deploy; a
+  toggle after it stales both prompts. The regenerate bail uses the same
+  guard.
+- **Model switches.** See §3: verify pins each artifact to its own model.
+
+---
+
+## 7. Quick reference — file map
+
+| Concern                                  | File                                                                                                                              |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Hash helpers + `sceneInputContext`       | `src/shots/input-hash.ts`                                                                                                         |
+| Prompt context load + narrowing          | `src/shots/server/prompt-context.ts`                                                                                              |
+| Bible builders (DB → bible, verify side) | `src/cast/server/bibles-from-scoped.ts`                                                                                           |
+| Casting transform                        | `src/cast/character-prompt.ts` (`buildCastingAttributes`, `buildCastCharacterBible`)                                              |
+| Prompt stamp — derived                   | `src/shots/server/persist-shot-spec.ts`, `src/shots/server/rebuild-shot-prompts.ts`, `src/shots/server/regenerate-shot-prompt.ts` |
+| Rewrite shot                             | `src/shots/server/workflows/shot-spec-rewrite-workflow.ts`                                                                        |
+| Spec edit (inspector)                    | `src/shots/shot-spec.fn.ts` (`saveShotSpecFn`)                                                                                    |
+| Bible persistence (cast)                 | `src/cast/server/workflows/character-bible-workflow.ts`, `location-bible-workflow.ts`                                             |
+| Pipeline orchestration                   | `src/sequences/server/workflows/analyze-script-workflow.ts`                                                                       |
+| Staleness verify (prompts + still)       | `src/shots/server/shot-staleness.ts` (`computeShotStaleness`, `findStalenessCauses`)                                              |
+| Staleness verify (clip)                  | `src/shots/scene-segments.ts` (`isSelectedVersionStale`)                                                                          |
+| Staleness verify (sheets)                | `src/cast/server/production-staleness.ts` (`readReferenceStaleness`)                                                              |
+| Staleness verify (music)                 | `src/audio/server/music-staleness.ts` (`readMusicPromptStaleness`)                                                                |
+| Verdict matrix (every edge, as verdicts) | `src/shots/server/staleness-matrix.test.ts`                                                                                       |
+| Still snapshot hash                      | `src/stills/server/workflows/image-workflow-snapshot.ts`, `src/shots/server/workflows/regenerate-shots-snapshot.ts`               |
+| Design rationale                         | `docs/architecture/workflow-snapshots-and-content-hash-staleness.md`                                                              |
+
+### Field ownership update (#1889)
+
+Location bible projections no longer contain timeOfDay, colorPalette or
+lightingSetup. Location sheet hashes carry explicit version 2. Those columns
+are retained physically until #1890 has its own deploy. Scene prompt hash
+inputs now include nonempty continuity.lightingSetup and continuity.colorPalette:
+they are editable inputs, not generated output. Empty palette means the
+sequence style; the custom migration clears prior analysis palettes. See
+[scene direction ownership](reference-only-motion.md#scene-direction-ownership-1889).

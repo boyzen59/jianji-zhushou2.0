@@ -1,0 +1,330 @@
+
+import { findCommandTargets, findMatchingLayers } from '../dataset/mapshaper-target-utils';
+import { stop } from '../utils/mapshaper-logging';
+import { assertCatalogCanAddDatasets } from '../furniture/mapshaper-frame-utils';
+import { ensureDatasetId, rekeyIncomingDatasets } from '../dataset/mapshaper-dataset-ids';
+import {
+  getFrameByName,
+  getFrameForDataset,
+  getFrameMemberLayers
+} from '../furniture/mapshaper-frame-resolver';
+import {
+  getUndoId,
+  getUndoRevision,
+  markCatalogChanged,
+  markDatasetChanged,
+  noteDatasetWillChange,
+  noteCatalogWillChange
+} from '../undo/mapshaper-undo-tracking';
+
+// Catalog contains zero or more multi-layer datasets
+// One layer is always "active", corresponding to the currently selected
+//   layer in the GUI or the current target in the CLI
+export function Catalog() {
+  var datasets = [],
+      defaultTargets = [];// saved default command targets [{layers:[], dataset}, ...]
+
+  this.getUndoId = function() {
+    return getUndoId(this);
+  };
+
+  this.getUndoRevision = function() {
+    return getUndoRevision(this);
+  };
+
+  this.captureCatalogBefore = function(detail) {
+    noteCatalogWillChange(this, detail);
+  };
+
+  this.markCatalogChanged = function(detail) {
+    return markCatalogChanged(this, detail);
+  };
+
+  this.forEachLayer = function(cb) {
+    var i = 0;
+    datasets.forEach(function(dataset) {
+      dataset.layers.forEach(function(lyr) {
+        cb(lyr, dataset, i++);
+      });
+    });
+  };
+
+  // remove a layer from a dataset
+  this.deleteLayer = function(lyr, dataset) {
+    this.captureCatalogBefore({operation: 'deleteLayer'});
+    // if deleting first target layer (selected in gui) -- switch to some other layer
+    if (this.getActiveLayer().layer == lyr) {
+      defaultTargets = [];
+    }
+
+    // remove layer from its dataset
+    noteDatasetWillChange(dataset, {operation: 'deleteLayer', unit: 'layers'});
+    dataset.layers.splice(dataset.layers.indexOf(lyr), 1);
+    if (dataset.layers.length === 0) {
+      removeDatasetRaw(dataset);
+    }
+    markDatasetChanged(dataset, {operation: 'deleteLayer', unit: 'layers'});
+
+    // remove layer from defaultTargets
+    defaultTargets = defaultTargets.filter(function(targ) {
+      var i = targ.layers.indexOf(lyr);
+      if (i == -1) return true;
+      targ.layers.splice(i, 1);
+      return targ.layers.length > 0;
+    });
+    this.markCatalogChanged({operation: 'deleteLayer'});
+  };
+
+  // @arg: a layer object or a test function
+  this.findLayer = function(arg) {
+    var test = typeof arg == 'function' ? arg : null;
+    var found = null;
+    this.forEachLayer(function(lyr, dataset) {
+      if (test ? test(lyr, dataset) : lyr == arg) {
+        found = layerObject(lyr, dataset);
+      }
+    });
+    return found;
+  };
+
+  this.findCommandTargets = function(pattern, type) {
+    if (!pattern) return this.getDefaultTargets() || [];
+    return findCommandTargets(this.getLayers(), pattern, type, getQualifiedLayers.bind(this));
+  };
+
+  // Layers matching a target= style pattern, as [{layer, dataset}]. Unlike
+  // findCommandTargets(), does not mark the layers' order for export.
+  // @layers (optional) layers to search, as [{layer, dataset}] (default: all);
+  //   layer numbers in the pattern count from 1 in this list
+  // @optional return [] instead of stopping if a part of the pattern is unmatched
+  this.findLayers = function(pattern, layers, optional) {
+    return findMatchingLayers(layers || this.getLayers(), pattern, !optional,
+      getQualifiedLayers.bind(this));
+  };
+
+  // frame1:roads, if lyr is in frame1 and no other layer in frame1 is named roads
+  this.getQualifiedLayerName = function(lyr) {
+    var o = this.findLayer(lyr);
+    var frame = o ? getFrameForDataset(this, o.dataset) : null;
+    var members = frame ? getFrameMemberLayers(this, frame) : [];
+    var count = members.filter(function(m) { return m.layer.name == lyr.name; }).length;
+    if (!lyr.name || !frame || !frame.layer.name || count != 1 ||
+        members.every(function(m) { return m.layer != lyr; })) {
+      return null;
+    }
+    return frame.layer.name + ':' + lyr.name;
+  };
+
+  function getQualifiedLayers(frameName) {
+    var frame = getFrameByName(this, frameName);
+    return frame ? getFrameMemberLayers(this, frame) : null;
+  }
+
+  this.findSingleLayer = function(pattern) {
+    var matches = findMatchingLayers(this.getLayers(), pattern, false, getQualifiedLayers.bind(this));
+    if (matches.length > 1) {
+      stop('Ambiguous pattern (multiple layers were matched):', pattern);
+    }
+    return matches[0] || null;
+  };
+
+  this.clear = function() {
+    this.captureCatalogBefore({operation: 'clear'});
+    datasets = [];
+    defaultTargets = [];
+    this.markCatalogChanged({operation: 'clear'});
+  };
+
+  this.removeDataset = function(dataset) {
+    this.captureCatalogBefore({operation: 'removeDataset'});
+    removeDatasetRaw(dataset);
+    this.markCatalogChanged({operation: 'removeDataset'});
+  };
+
+  this.getDatasets = function() {
+    return datasets;
+  };
+
+  // Adds a dataset next to another one, so that a dataset split off from
+  // another keeps its place in catalog order (which sets the order of layers
+  // matched by a target= pattern), or at the end if @neighbor is null. Does
+  // not change the default target.
+  this.insertDatasetAfter = function(dataset, neighbor, before) {
+    var i = datasets.indexOf(neighbor);
+    if (datasets.includes(dataset)) return;
+    assertCatalogCanAddDatasets(this, [dataset]);
+    this.captureCatalogBefore({operation: 'insertDataset'});
+    ensureDatasetId(dataset);
+    datasets.splice(i == -1 ? datasets.length : before ? i : i + 1, 0, dataset);
+    this.markCatalogChanged({operation: 'insertDataset'});
+  };
+
+  // Puts @replacement in the place of the first of @arr and removes the
+  // others, e.g. when datasets are merged. Default targets follow.
+  this.replaceDatasets = function(arr, replacement) {
+    var i = datasets.findIndex(function(d) { return arr.includes(d); });
+    var merged = null;
+    if (i == -1) return;
+    this.captureCatalogBefore({operation: 'replaceDatasets'});
+    ensureDatasetId(replacement);
+    datasets = datasets.map(function(d, j) {
+      return j == i ? replacement : d;
+    }).filter(function(d, j) {
+      return j == i || !arr.includes(d) && d != replacement;
+    });
+    defaultTargets = defaultTargets.reduce(function(memo, targ) {
+      if (!arr.includes(targ.dataset)) {
+        memo.push(targ);
+      } else if (merged) {
+        merged.layers = merged.layers.concat(targ.layers);
+      } else {
+        merged = {dataset: replacement, layers: targ.layers.concat()};
+        memo.push(merged);
+      }
+      return memo;
+    }, []);
+    this.markCatalogChanged({operation: 'replaceDatasets'});
+  };
+
+  this.getLayers = function() {
+    var layers = [];
+    this.forEachLayer(function(lyr, dataset) {
+      layers.push(layerObject(lyr, dataset));
+    });
+    return layers;
+  };
+
+  this.addDataset = function(dataset, opts) {
+    this.setDefaultTarget(dataset.layers, dataset, opts);
+    return this;
+  };
+
+  // for loading datasets from files and snapshots
+  this.addDatasets = function(datasets) {
+    assertCatalogCanAddDatasets(this, datasets);
+    rekeyIncomingDatasets(datasets, this.getDatasets());
+    datasets.forEach(function(dataset) {
+      this.addDataset(dataset);
+    }, this);
+  };
+
+  this.findNextLayer = function(lyr) {
+    var layers = this.getLayers(),
+        idx = indexOfLayer(lyr, layers);
+    return idx > -1 ? layers[(idx + 1) % layers.length] : null;
+  };
+
+  this.findPrevLayer = function(lyr) {
+    var layers = this.getLayers(),
+        idx = indexOfLayer(lyr, layers);
+    return idx > -1 ? layers[(idx - 1 + layers.length) % layers.length] : null;
+  };
+
+  this.isEmpty = function() {
+    return datasets.length === 0;
+  };
+
+  this.getDefaultTargets = function() {
+    if (defaultTargets.length === 0 && !this.isEmpty()) {
+      defaultTargets = [{dataset: datasets[0], layers: datasets[0].layers.slice(0, 1)}];
+    }
+    return defaultTargets;
+  };
+
+  this.setDefaultTarget = function(layers, dataset, opts) {
+    this.setDefaultTargets([{
+      // Copy layers array, in case layers is a reference to dataset.layers.
+      // This prevents layers that are added to the dataset inside a command from
+      //  being added to the next command's target, e.g. debugging layers added
+      //  by '-join unmatched unjoined'.
+      layers: layers.concat(),
+      dataset: dataset
+    }], opts);
+  };
+
+  // arr: array of target objects {layers:[], dataset:{}}
+  this.setDefaultTargets = function(arr, opts) {
+    if (targetsAreSame(defaultTargets, arr)) return;
+    var newDatasets = arr.reduce(function(memo, target) {
+      if (!datasets.includes(target.dataset) && !memo.includes(target.dataset)) {
+        memo.push(target.dataset);
+      }
+      return memo;
+    }, []);
+    assertCatalogCanAddDatasets(this, newDatasets, opts && opts.removeLayers);
+    this.captureCatalogBefore({operation: 'setDefaultTargets'});
+    arr.forEach(function(target) {
+      if (datasets.indexOf(target.dataset) == -1) {
+        ensureDatasetId(target.dataset);
+        datasets.push(target.dataset);
+      }
+    });
+    defaultTargets = arr;
+    this.markCatalogChanged({operation: 'setDefaultTargets'});
+  };
+
+  // should be in gui-model.js, moved here for testing
+  this.getActiveLayer = function() {
+    var targ = (this.getDefaultTargets() || [])[0];
+    // var lyr = targ.layers[0];
+    // Reasons to select the last layer of a multi-layer target:
+    // * This layer was imported last
+    // * This layer is displayed on top of other layers
+    // * This layer is at the top of the layers list
+    // * In TopoJSON input, it makes sense to think of the last object/layer
+    //   as the topmost one -- it corresponds to the painter's algorithm and
+    //   the way that objects are ordered in SVG.
+    var lyr = targ?.layers[targ.layers.length - 1];
+    return targ ? {layer: lyr, dataset: targ.dataset} : null;
+  };
+
+  function layerObject(lyr, dataset) {
+    return {
+      layer: lyr,
+      dataset: dataset
+    };
+  }
+
+  function targetsAreSame(a, b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i].dataset != b[i].dataset || !layersAreSame(a[i].layers, b[i].layers)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function layersAreSame(a, b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  function indexOfLayer(lyr, layers) {
+    var idx = -1;
+    layers.forEach(function(o, i) {
+      if (o.layer == lyr) idx = i;
+    });
+    return idx;
+  }
+
+  function removeDatasetRaw(dataset) {
+    defaultTargets = defaultTargets.filter(function(targ) {
+      return targ.dataset != dataset;
+    });
+    datasets = datasets.filter(function(d) {
+      return d != dataset;
+    });
+  }
+}
+
+export function getFormattedLayerList(catalog) {
+  var lines = [];
+  catalog.forEachLayer(function(lyr, dataset, i) {
+    lines.push('  [' + (i+1) + ']  ' + (lyr.name || '[unnamed]'));
+  });
+  return lines.length > 0 ? lines.join('\n') : '[none]';
+}

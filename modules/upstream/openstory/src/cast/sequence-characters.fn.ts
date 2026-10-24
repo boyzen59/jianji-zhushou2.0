@@ -1,0 +1,568 @@
+/**
+ * Sequence Characters Server Functions
+ * Functions for sequence-specific character operations
+ */
+
+import { createServerFn } from '@tanstack/react-start';
+import { zodValidator } from '@tanstack/zod-adapter';
+import { z } from 'zod';
+
+import { isValidTextToImageModel } from '@/models/models';
+import { markPreviewUnusable, previewListWithChosenTake } from '@/cast/voice';
+import { characterBibleFieldsSchema } from './bible-field';
+import {
+  attachLibraryCharacter,
+  createCharacter,
+  deleteCharacter,
+  requireCharacter,
+  restoreCharacter,
+  selectCharacterVoiceVersion,
+  setCharacterVoiceEnabled,
+  updateCharacter,
+} from '@/cast/server/cast-edit';
+import { ulidSchema } from '@/platform/server/schemas/id.schemas';
+import { releaseReplacedVoice } from '@/cast/server/voice/release-voice';
+import {
+  getElevenLabsApiKey,
+  isElevenLabsConfigured,
+} from '@/models/server/elevenlabs-config';
+import {
+  elevenLabsDetail,
+  elevenLabsStatus,
+  isElevenLabsVoiceAlreadyCreated,
+  isElevenLabsVoiceMissing,
+  resolveAssignableVoiceId,
+  saveDesignedVoice,
+  type AssignableVoicePick,
+} from '@/cast/server/voice/elevenlabs-voice';
+import { voiceProviderOf, SEED_VOICE_MAX_TAKES } from '@/cast/seed-voice';
+import { readLookSheetStaleness } from '@/cast/server/production-staleness';
+import type { SheetStaleness } from '@/cast/server/sheets/sheet-staleness';
+
+import { NotFoundError, ValidationError } from '@/platform/errors';
+import type {
+  CastCharacterWithSheet,
+  CharacterWithSheet,
+} from '@/platform/server/db/schema';
+import type { PersonLock } from './likeness';
+import { personLocksOf } from '@/cast/server/person-lock';
+import {
+  cancelCharacterVoice,
+  generateCharacterVoice,
+  regenerateCharacterSheet,
+} from '@/cast/server/cast-generation';
+import {
+  castAccessMiddleware,
+  sequenceAccessMiddleware,
+} from '@/platform/middleware.fn';
+
+/** A cast member as the cast panel reads it. */
+export type SequenceCharacter = CastCharacterWithSheet & {
+  /** Why it must stay a person; null leaves `isPerson` editable. */
+  personLock: PersonLock | null;
+};
+
+/**
+ * One character as its detail page reads it (#2017): through a sequence,
+ * or from none, when it is the same character without the link.
+ */
+export type CharacterDetail = CharacterWithSheet & {
+  personLock: PersonLock | null;
+};
+
+/** `sequenceId` null is the Characters page: the character at its current version. */
+const castCharacterInput = z.object({
+  sequenceId: ulidSchema.nullable(),
+  characterId: ulidSchema,
+});
+
+export const getCharacterFn = createServerFn({ method: 'GET' })
+  .middleware([castAccessMiddleware])
+  .validator(zodValidator(castCharacterInput))
+  .handler(async ({ context, data }): Promise<CharacterDetail | null> => {
+    const character = await context.scopedDb.characters.getCastOrCurrent(
+      context.sequence?.id ?? null,
+      data.characterId
+    );
+    if (!character) return null;
+    const [personLock = null] = await personLocksOf(context.scopedDb, [
+      character,
+    ]);
+    return { ...character, personLock };
+  });
+
+/** Get all characters for a sequence with their sheets. */
+export const getSequenceCharactersFn = createServerFn({ method: 'GET' })
+  .middleware([sequenceAccessMiddleware])
+  .handler(async ({ context }) => {
+    const characters = await context.scopedDb.characters.list(
+      context.sequence.id
+    );
+    // Why `isPerson` cannot be turned off, for the bible form (#2065).
+    const locks = await personLocksOf(context.scopedDb, characters);
+    return characters.map((character, index): SequenceCharacter => ({
+      ...character,
+      personLock: locks[index] ?? null,
+    }));
+  });
+
+// ============================================================================
+// Manual character CRUD (#1108 Phase 2)
+// ============================================================================
+
+/**
+ * Create a character by hand (no storyboard run) — starts sheet-less
+ * (`sheetStatus: 'pending'`); the sheet comes later via the sheet workflow.
+ * `characterId` is a shortened name (`char_maya`) in the
+ * same family as script-extracted `char_001` / `char_girl_one`, uniqued
+ * against existing rows on the `(sequenceId, characterId)` index.
+ */
+export const createSequenceCharacterFn = createServerFn({ method: 'POST' })
+  .middleware([sequenceAccessMiddleware])
+  .validator(
+    zodValidator(
+      characterBibleFieldsSchema.extend({
+        sequenceId: ulidSchema,
+        name: z.string().trim().min(1).max(255),
+      })
+    )
+  )
+  .handler(async ({ context, data }) => {
+    const { sequenceId, ...fields } = data;
+    return await createCharacter(
+      context.scopedDb,
+      { userId: context.user.id },
+      sequenceId,
+      fields
+    );
+  });
+
+/**
+ * Cast a team character into the sequence (#2050). Idempotent for a
+ * character the sequence already casts; refused while a live cast member has
+ * the same name.
+ */
+export const attachLibraryCharacterFn = createServerFn({ method: 'POST' })
+  .middleware([sequenceAccessMiddleware])
+  .validator(
+    zodValidator(z.object({ sequenceId: ulidSchema, characterId: ulidSchema }))
+  )
+  .handler(
+    async ({ context, data }) =>
+      await attachLibraryCharacter(
+        context.scopedDb,
+        { userId: context.user.id },
+        data.sequenceId,
+        data.characterId
+      )
+  );
+
+/**
+ * Edit a character's bible fields. Only provided fields change; prompts and
+ * the character sheet that project them re-stale purely by hash derivation
+ * (no flag written). `voiceOnly` is
+ * required (#1585): it is the way back from a bible call that misfiled an
+ * on-screen character as a voice, so the form always states it.
+ */
+export const updateSequenceCharacterFn = createServerFn({ method: 'POST' })
+  .middleware([sequenceAccessMiddleware])
+  .validator(
+    zodValidator(
+      characterBibleFieldsSchema.extend({
+        sequenceId: ulidSchema,
+        characterId: ulidSchema,
+        name: z.string().trim().min(1).max(255).optional(),
+        voiceOnly: z.boolean(),
+      })
+    )
+  )
+  .handler(async ({ context, data }) => {
+    const { sequenceId, characterId, ...fields } = data;
+    return await updateCharacter(
+      context.scopedDb,
+      { userId: context.user.id },
+      sequenceId,
+      characterId,
+      fields
+    );
+  });
+
+const characterIdInput = z.object({
+  sequenceId: ulidSchema,
+  characterId: ulidSchema,
+});
+
+/**
+ * Soft-remove a character (undoable; toast Undo calls the restore fn). Scene
+ * continuity tags are NOT stripped — undo is lossless; prompts referencing
+ * the character read stale because the bible reads exclude deleted rows.
+ */
+export const softDeleteSequenceCharacterFn = createServerFn({ method: 'POST' })
+  .middleware([sequenceAccessMiddleware])
+  .validator(zodValidator(characterIdInput))
+  .handler(async ({ context, data }) => {
+    return await deleteCharacter(
+      context.scopedDb,
+      { userId: context.user.id },
+      data.sequenceId,
+      data.characterId
+    );
+  });
+
+/**
+ * Design (or re-design) a character's voice (#1553 / #1715). Inserts a
+ * generating husk and keeps the current voice until that husk promotes.
+ * A second Generate while a live husk exists no-ops (`alreadyInFlight`).
+ */
+export const generateCharacterVoiceFn = createServerFn({ method: 'POST' })
+  .middleware([castAccessMiddleware])
+  .validator(
+    zodValidator(
+      castCharacterInput.extend({
+        takes: z.number().int().min(1).max(SEED_VOICE_MAX_TAKES),
+      })
+    )
+  )
+  .handler(({ context, data }) =>
+    generateCharacterVoice(
+      context.scopedDb,
+      { userId: context.user.id },
+      context.sequence,
+      data
+    )
+  );
+
+/**
+ * Cancel a voice still generating: the husk fails as cancelled and the
+ * character keeps the voice it had. Data-only: the run is not terminated
+ * (it may be a parent's awaited child, and a stop between save-voice and
+ * persist-voice would leak the provider voice). It lands, finds its claim
+ * no longer live, releases the voice and promotes nothing.
+ */
+export const cancelCharacterVoiceFn = createServerFn({ method: 'POST' })
+  .middleware([castAccessMiddleware])
+  .validator(zodValidator(castCharacterInput))
+  .handler(({ context, data }) =>
+    cancelCharacterVoice(context.scopedDb, data.sequenceId, data.characterId)
+  );
+
+/**
+ * Per-character voice switch (#1553): an explicit override of the sequence
+ * default. Off releases the saved voice.
+ */
+export const setCharacterVoiceEnabledFn = createServerFn({ method: 'POST' })
+  .middleware([castAccessMiddleware])
+  .validator(zodValidator(castCharacterInput.extend({ enabled: z.boolean() })))
+  .handler(async ({ context, data }) => {
+    return await setCharacterVoiceEnabled(
+      context.scopedDb,
+      { userId: context.user.id },
+      data.sequenceId,
+      data.characterId,
+      data.enabled
+    );
+  });
+
+/**
+ * Make one of the parked Voice Design takes the saved voice (#1553). Order:
+ * save the take, write the row, then release the old voice — a failed save
+ * leaves the row untouched, and a failed release leaves the new id on the
+ * row with the old one still on the account for the next release to retry
+ * (never two slots with no pointer). The chosen take moves to the front:
+ * while `voiceId` is set, `voicePreviews[0]` is the saved voice. Take
+ * numbers are stamped (and kept) so the In use card can show Take 2
+ * after promoting the second preview (#1709). A gone preview is HTTP 400
+ * `voice_not_found` (not 404); any other 4xx carries the provider's
+ * reason (already created, slot limit, description rejected).
+ */
+export const chooseCharacterVoiceTakeFn = createServerFn({ method: 'POST' })
+  .middleware([castAccessMiddleware])
+  .validator(
+    zodValidator(castCharacterInput.extend({ generatedVoiceId: z.string() }))
+  )
+  .handler(async ({ context, data }) => {
+    const character = await requireCharacter(
+      context.scopedDb,
+      data.sequenceId,
+      data.characterId
+    );
+    const previews = previewListWithChosenTake(
+      character.voicePreviews ?? [],
+      data.generatedVoiceId
+    );
+    const take = previews?.[0];
+    if (!previews || !take) throw new NotFoundError('Take not found');
+    if (
+      character.voicePreviews?.[0]?.generatedVoiceId ===
+        take.generatedVoiceId &&
+      character.voiceId
+    ) {
+      return { characterId: character.id, voiceId: character.voiceId };
+    }
+    if (take.unusable === 'expired') {
+      throw new ValidationError(
+        'This take has expired. Regenerate the voice for fresh takes.'
+      );
+    }
+    if (take.unusable === 'saved') {
+      throw new ValidationError(
+        'This take was already saved. Regenerate the voice for fresh takes.'
+      );
+    }
+    // A Seed take IS its voice (#1765): nothing to save, no slot to spend.
+    if (voiceProviderOf(take.generatedVoiceId) === 'seed') {
+      await context.scopedDb.characters.updateVoice(
+        character.id,
+        { voiceId: take.generatedVoiceId, voicePreviews: previews },
+        'generated',
+        context.user.id,
+        null
+      );
+      await releaseReplacedVoice(
+        context.scopedDb,
+        character.voiceId,
+        take.generatedVoiceId
+      );
+      return { characterId: character.id, voiceId: take.generatedVoiceId };
+    }
+    const apiKey = getElevenLabsApiKey();
+    if (!apiKey || !isElevenLabsConfigured()) {
+      throw new ValidationError('Voice design is not configured');
+    }
+    let voiceId: string;
+    try {
+      voiceId = await saveDesignedVoice(apiKey, {
+        voiceName: `${character.name} · ${character.id.slice(-6)}`,
+        voiceDescription: character.voiceDescription ?? '',
+        generatedVoiceId: take.generatedVoiceId,
+      });
+    } catch (error) {
+      const status = elevenLabsStatus(error);
+      if (isElevenLabsVoiceMissing(error)) {
+        await context.scopedDb.characters.stampPreviewUnusable(
+          character.id,
+          take.generatedVoiceId,
+          'expired'
+        );
+        throw new ValidationError(
+          'This take has expired. Regenerate the voice for fresh takes.'
+        );
+      }
+      if (isElevenLabsVoiceAlreadyCreated(error)) {
+        await context.scopedDb.characters.stampPreviewUnusable(
+          character.id,
+          take.generatedVoiceId,
+          'saved'
+        );
+        throw new ValidationError(
+          'This take was already saved. Regenerate the voice for fresh takes.'
+        );
+      }
+      // 429 is not the user's doing and clears on retry, so it stays a
+      // plain error rather than a "could not save" verdict.
+      if (
+        status !== undefined &&
+        status >= 400 &&
+        status < 500 &&
+        status !== 429
+      ) {
+        throw new ValidationError(
+          `Could not save this take: ${elevenLabsDetail(error) ?? `ElevenLabs returned ${status}`}`
+        );
+      }
+      throw error;
+    }
+    await context.scopedDb.characters.updateVoice(
+      character.id,
+      {
+        voiceId,
+        voicePreviews:
+          markPreviewUnusable(previews, take.generatedVoiceId, 'saved') ??
+          previews,
+      },
+      'generated',
+      context.user.id,
+      null
+    );
+    await releaseReplacedVoice(context.scopedDb, character.voiceId, voiceId);
+    return { characterId: character.id, voiceId };
+  });
+
+/**
+ * Assign a premade or Voice Library voice (#1629). Premade ids are used
+ * as-is (no slot). Library voices are copied onto the platform account,
+ * then the old designed/library slot is released. Designed takes stay
+ * parked so the user can switch back.
+ */
+export const assignCharacterVoiceFn = createServerFn({ method: 'POST' })
+  .middleware([castAccessMiddleware])
+  .validator(
+    zodValidator(
+      castCharacterInput.extend({
+        source: z.enum(['premade', 'library']),
+        voiceId: z.string().min(1).max(128),
+        publicOwnerId: z.string().min(1).max(128).optional(),
+        name: z.string().trim().min(1).max(255).optional(),
+        description: z.string().trim().max(2000).optional(),
+      })
+    )
+  )
+  .handler(async ({ context, data }) => {
+    const apiKey = getElevenLabsApiKey();
+    if (!apiKey || !isElevenLabsConfigured()) {
+      throw new ValidationError('Voice design is not configured');
+    }
+    const character = await requireCharacter(
+      context.scopedDb,
+      data.sequenceId,
+      data.characterId
+    );
+    let pick: AssignableVoicePick;
+    if (data.source === 'library') {
+      if (!data.publicOwnerId || !data.name) {
+        throw new ValidationError(
+          'Library voices need a public owner id and a name'
+        );
+      }
+      pick = {
+        source: 'library',
+        voiceId: data.voiceId,
+        publicOwnerId: data.publicOwnerId,
+        name: `${data.name} · ${character.name}`,
+      };
+    } else {
+      pick = { source: 'premade', voiceId: data.voiceId };
+    }
+    let voiceId: string;
+    try {
+      voiceId = await resolveAssignableVoiceId(apiKey, pick);
+    } catch (error) {
+      const status = elevenLabsStatus(error);
+      if (isElevenLabsVoiceMissing(error)) {
+        throw new ValidationError('This voice is no longer available.');
+      }
+      if (
+        status !== undefined &&
+        status >= 400 &&
+        status < 500 &&
+        status !== 429
+      ) {
+        throw new ValidationError(
+          `Could not use this voice: ${elevenLabsDetail(error) ?? `ElevenLabs returned ${status}`}`
+        );
+      }
+      throw error;
+    }
+    if (character.voiceId === voiceId) {
+      return { characterId: character.id, voiceId };
+    }
+    const voiceDescription = (data.description ?? data.name)?.trim();
+    await context.scopedDb.characters.updateVoice(
+      character.id,
+      { voiceId, ...(voiceDescription ? { voiceDescription } : {}) },
+      'library',
+      context.user.id,
+      null
+    );
+    await releaseReplacedVoice(context.scopedDb, character.voiceId, voiceId);
+    return { characterId: character.id, voiceId };
+  });
+
+/**
+ * Voice history (#1657): every voice this character has held, newest first.
+ * `characters.selectedVoiceVersionId` names the live one; a row carrying `releasedAt`
+ * names an id that no longer exists at ElevenLabs and can never come back.
+ */
+export const listCharacterVoiceVersionsFn = createServerFn({ method: 'GET' })
+  .middleware([castAccessMiddleware])
+  .validator(zodValidator(castCharacterInput))
+  .handler(async ({ context, data }) => {
+    const character = await requireCharacter(
+      context.scopedDb,
+      data.sequenceId,
+      data.characterId
+    );
+    return await context.scopedDb.characters.listVoiceVersions(character.id);
+  });
+
+/**
+ * Point the character back at an earlier voice (#1657). Same order as
+ * choosing a take: the pointer moves first, then the voice the
+ * row was holding is released if nothing else uses it. A failed release is
+ * logged, not thrown (`releaseReplacedVoice`): the switch already happened.
+ * A release stamps the old id's history rows, which is why a voice, once
+ * released, can never be selected again.
+ */
+export const selectCharacterVoiceVersionFn = createServerFn({ method: 'POST' })
+  .middleware([castAccessMiddleware])
+  .validator(zodValidator(castCharacterInput.extend({ versionId: ulidSchema })))
+  .handler(async ({ context, data }) => {
+    return await selectCharacterVoiceVersion(
+      context.scopedDb,
+      data.sequenceId,
+      data.characterId,
+      data.versionId
+    );
+  });
+
+/** Undo a character soft-delete. */
+export const restoreSequenceCharacterFn = createServerFn({ method: 'POST' })
+  .middleware([sequenceAccessMiddleware])
+  .validator(zodValidator(characterIdInput))
+  .handler(async ({ context, data }) => {
+    return await restoreCharacter(
+      context.scopedDb,
+      { userId: context.user.id },
+      data.sequenceId,
+      data.characterId
+    );
+  });
+
+/**
+ * Regenerate the character sheet from the current bible. Does not
+ * regenerate shots — stills go stale by derivation once the new version
+ * is selected.
+ */
+export const regenerateCharacterSheetFn = createServerFn({ method: 'POST' })
+  .middleware([castAccessMiddleware])
+  .validator(
+    zodValidator(
+      castCharacterInput.extend({
+        // A look other than the character's default (#2015).
+        lookId: ulidSchema.optional(),
+        imageModel: z
+          .string()
+          .refine(isValidTextToImageModel, {
+            message: 'Invalid image model',
+          })
+          .optional(),
+      })
+    )
+  )
+  .handler(({ context, data }) =>
+    regenerateCharacterSheet(
+      context.scopedDb,
+      { userId: context.user.id },
+      context.sequence,
+      // No look named: the default look, whose id is the character's.
+      { ...data, lookId: data.lookId ?? data.characterId }
+    )
+  );
+
+/** Live sheet staleness for the character detail banner. */
+export const getCharacterSheetStalenessFn = createServerFn({ method: 'GET' })
+  .middleware([castAccessMiddleware])
+  .validator(
+    zodValidator(castCharacterInput.extend({ lookId: ulidSchema.optional() }))
+  )
+  .handler(
+    async ({ context, data }): Promise<SheetStaleness> =>
+      (
+        await readLookSheetStaleness(
+          context.scopedDb,
+          data.sequenceId,
+          data.characterId,
+          data.lookId ?? data.characterId
+        )
+      ).status
+  );

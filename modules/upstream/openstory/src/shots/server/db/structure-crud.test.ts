@@ -1,0 +1,613 @@
+/**
+ * Acceptance tests for structure CRUD (#1108 Phase 1): scene/shot soft-delete
+ * with cascade + lossless restore, reorder over live rows with deleted rows
+ * renumbered into the tail band, and re-analysis revival — in-memory libSQL
+ * with the real migrations.
+ */
+
+import { persistSceneLooks } from '@/sequences/server/scene-persistence';
+import { dbSceneId } from '@/shots/scene-id';
+import type { Database } from '@/platform/server/db/client';
+import { generateId } from '@/platform/id';
+import {
+  frames,
+  sceneScriptVersions,
+  scenes,
+  sequenceEvents,
+  sequences,
+  shots,
+  styles,
+  teams,
+  user,
+} from '@/platform/server/db/schema';
+import type { SceneRow, Shot } from '@/platform/server/db/schema';
+import { relations } from '@/platform/server/db/schema/relations';
+import { type Client, createClient } from '@libsql/client';
+import { eq } from 'drizzle-orm';
+import { drizzle } from 'drizzle-orm/libsql';
+import { migrate } from 'drizzle-orm/libsql/migrator';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { createScenesMethods } from './scenes';
+import { createSceneScriptVersionsMethods } from './scene-script-versions';
+import { createShotsMethods } from './shots';
+
+let client: Client;
+let db: Database;
+let sequenceId = '';
+let actorId = '';
+
+async function seed() {
+  await db.delete(sequenceEvents);
+  await db.delete(frames);
+  await db.delete(sceneScriptVersions);
+  await db.delete(shots);
+  await db.delete(scenes);
+  await db.delete(sequences);
+  await db.delete(styles);
+  await db.delete(teams);
+  await db.delete(user);
+
+  const teamId = generateId();
+  sequenceId = generateId();
+  actorId = generateId();
+  await db.insert(teams).values({ id: teamId, name: 'T', slug: 't' });
+  await db.insert(user).values({ id: actorId, name: 'U', email: 'u@e.com' });
+  const [style] = await db
+    .insert(styles)
+    .values({
+      teamId,
+      name: 'default',
+      config: {
+        mood: 'neutral',
+        artStyle: 'cinematic',
+        lighting: 'natural',
+        colorPalette: ['#000', '#fff'],
+        cameraWork: 'static',
+        referenceFilms: [],
+        colorGrading: 'neutral',
+      },
+    })
+    .returning();
+  if (!style) throw new Error('test setup: style insert returned nothing');
+  await db
+    .insert(sequences)
+    .values({ id: sequenceId, teamId, title: 'S', styleId: style.id });
+}
+
+/** A scene with `count` live shots (shotNumber 1..count). */
+async function seedScene(
+  orderIndex: number,
+  shotCount = 1
+): Promise<{ scene: SceneRow; sceneShots: Shot[] }> {
+  const sceneMethods = createScenesMethods(db);
+  const shotMethods = createShotsMethods(db);
+  const scene = await sceneMethods.create(
+    { sequenceId, orderIndex },
+    {
+      title: `Scene ${orderIndex}`,
+      location: null,
+      timeOfDay: null,
+      storyBeat: null,
+      continuity: null,
+    },
+    { createdBy: null }
+  );
+  const sceneShots: Shot[] = [];
+  for (let n = 1; n <= shotCount; n++) {
+    sceneShots.push(
+      await shotMethods.create({ sequenceId, sceneId: scene.id, shotNumber: n })
+    );
+  }
+  return { scene, sceneShots };
+}
+
+/** `edit` with a narrative patch only, expecting it to land. */
+async function editNarrative(
+  sceneMethods: ReturnType<typeof createScenesMethods>,
+  sceneId: SceneRow['id'],
+  narrative: Parameters<typeof sceneMethods.edit>[1]['narrative'],
+  opts: { actorId: string }
+): Promise<SceneRow> {
+  const result = await sceneMethods.edit(sceneId, { narrative }, opts);
+  if (result.status === 'conflict') throw new Error('unexpected conflict');
+  return result.scene;
+}
+
+async function eventKinds(): Promise<string[]> {
+  return (await db.select().from(sequenceEvents)).map((r) => r.kind);
+}
+
+beforeAll(async () => {
+  client = createClient({ url: ':memory:' });
+  db = drizzle({ client, relations });
+  await migrate(db, { migrationsFolder: './drizzle/migrations' });
+});
+
+afterAll(() => {
+  client.close();
+});
+
+beforeEach(async () => {
+  await seed();
+});
+
+describe('scene soft-delete cascade + restore', () => {
+  it('hides the scene AND its live shots; restore brings back exactly those shots, even when a separate shot delete shares the same second', async () => {
+    const sceneMethods = createScenesMethods(db);
+    const shotMethods = createShotsMethods(db);
+    const { scene, sceneShots } = await seedScene(0, 2);
+    await seedScene(1, 1);
+
+    // One shot was deleted SEPARATELY, immediately before the scene delete —
+    // NO sleep. `deletedAt` is second-precision, so both writes land on the
+    // identical stored value; the cascade set is resolved from the
+    // `scene.deleted` event's recorded ids, not by comparing timestamps, so
+    // this shot must NOT ride back on the scene restore.
+    const [preDeleted, survivor] = sceneShots;
+    if (!preDeleted || !survivor) throw new Error('setup');
+    await shotMethods.softDelete(preDeleted.id, { actorId });
+
+    const { deletedAt, shotIds } = await sceneMethods.softDeleteCascade(
+      scene.id,
+      { actorId }
+    );
+    // Only the live shot was cascaded.
+    expect(shotIds).toEqual([survivor.id]);
+
+    // Hidden from the default lists (editor, plans, export, theatre).
+    expect(await sceneMethods.listBySequence(sequenceId)).toHaveLength(1);
+    expect(await shotMethods.listBySequence(sequenceId)).toHaveLength(1);
+    // Rows retained, same timestamp on scene + cascaded shot.
+    const [sceneRow] = await db
+      .select()
+      .from(scenes)
+      .where(eq(scenes.id, scene.id));
+    const [shotRow] = await db
+      .select()
+      .from(shots)
+      .where(eq(shots.id, survivor.id));
+    // Integer timestamp columns round-trip at second precision — which is
+    // exactly why the cascade set cannot be derived from them.
+    const seconds = Math.floor(deletedAt.getTime() / 1000);
+    expect(
+      sceneRow?.deletedAt && Math.floor(sceneRow.deletedAt.getTime() / 1000)
+    ).toBe(seconds);
+    expect(
+      shotRow?.deletedAt && Math.floor(shotRow.deletedAt.getTime() / 1000)
+    ).toBe(seconds);
+    expect(sceneRow?.deletedAt?.getTime()).toBe(shotRow?.deletedAt?.getTime());
+
+    const restored = await sceneMethods.restoreCascade(scene.id, { actorId });
+    expect(restored.deletedAt).toBeNull();
+    const liveShots = await shotMethods.listBySequence(sequenceId);
+    // The cascaded shot came back; the separately-deleted one stayed hidden.
+    expect(liveShots.map((s) => s.id)).toContain(survivor.id);
+    expect(liveShots.map((s) => s.id)).not.toContain(preDeleted.id);
+
+    const kinds = await eventKinds();
+    expect(kinds).toContain('scene.deleted');
+    expect(kinds).toContain('scene.restored');
+    expect(kinds).toContain('shot.deleted');
+  });
+
+  it('records prevState (orderIndex + shotIds) on the scene.deleted event', async () => {
+    const sceneMethods = createScenesMethods(db);
+    const { scene, sceneShots } = await seedScene(3, 1);
+    await sceneMethods.softDeleteCascade(scene.id, { actorId });
+    const [event] = await db
+      .select()
+      .from(sequenceEvents)
+      .where(eq(sequenceEvents.kind, 'scene.deleted'));
+    expect(event?.data).toEqual({
+      prevState: { orderIndex: 3, title: 'Scene 3' },
+      shotIds: sceneShots.map((s) => s.id),
+    });
+  });
+
+  it('restoreCascade with restoreShots:false restores the scene only', async () => {
+    const sceneMethods = createScenesMethods(db);
+    const shotMethods = createShotsMethods(db);
+    const { scene } = await seedScene(0, 1);
+    await sceneMethods.softDeleteCascade(scene.id, { actorId });
+    await sceneMethods.restoreCascade(scene.id, {
+      actorId,
+      restoreShots: false,
+    });
+    expect(await sceneMethods.listBySequence(sequenceId)).toHaveLength(1);
+    expect(await shotMethods.listBySequence(sequenceId)).toHaveLength(0);
+  });
+
+  it('refuses to restore a shot while its scene is deleted', async () => {
+    const sceneMethods = createScenesMethods(db);
+    const shotMethods = createShotsMethods(db);
+    const { scene, sceneShots } = await seedScene(0, 1);
+    await sceneMethods.softDeleteCascade(scene.id, { actorId });
+    const [shot] = sceneShots;
+    if (!shot) throw new Error('setup');
+    await expect(shotMethods.restore(shot.id, { actorId })).rejects.toThrow(
+      /restore the scene instead/
+    );
+  });
+});
+
+describe('reorder over live rows (deleted rows renumbered into the tail band)', () => {
+  it('scenes: live rows get 0..n-1 in the requested order; deleted rows follow', async () => {
+    const sceneMethods = createScenesMethods(db);
+    const a = (await seedScene(0, 0)).scene;
+    const b = (await seedScene(1, 0)).scene;
+    const c = (await seedScene(2, 0)).scene;
+    await sceneMethods.softDeleteCascade(b.id, { actorId });
+
+    await sceneMethods.reorder(sequenceId, [c.id, a.id], { actorId });
+
+    const rows = await db
+      .select({ id: scenes.id, orderIndex: scenes.orderIndex })
+      .from(scenes)
+      .where(eq(scenes.sequenceId, sequenceId));
+    const byId = new Map(rows.map((r) => [r.id, r.orderIndex]));
+    expect(byId.get(c.id)).toBe(0);
+    expect(byId.get(a.id)).toBe(1);
+    expect(byId.get(b.id)).toBe(2);
+
+    // Live listing reflects the new order; the deleted scene stays hidden.
+    const live = await sceneMethods.listBySequence(sequenceId);
+    expect(live.map((s) => s.id)).toEqual([c.id, a.id]);
+    expect(await eventKinds()).toContain('scenes.reordered');
+  });
+
+  it('scenes: rejects an order that is not exactly the live set', async () => {
+    const sceneMethods = createScenesMethods(db);
+    const a = (await seedScene(0, 0)).scene;
+    await seedScene(1, 0);
+    await expect(
+      sceneMethods.reorder(sequenceId, [a.id], { actorId })
+    ).rejects.toThrow(/every live scene/);
+  });
+
+  it('shots: live rows get 1..n; a deleted sibling is renumbered after them', async () => {
+    const shotMethods = createShotsMethods(db);
+    const { sceneShots, scene } = await seedScene(0, 3);
+    const [s1, s2, s3] = sceneShots;
+    if (!s1 || !s2 || !s3) throw new Error('setup');
+    await shotMethods.softDelete(s2.id, { actorId });
+
+    await shotMethods.reorderInScene(scene.id, [s3.id, s1.id], { actorId });
+
+    const rows = await db
+      .select({ id: shots.id, shotNumber: shots.shotNumber })
+      .from(shots)
+      .where(eq(shots.sceneId, scene.id));
+    const byId = new Map(rows.map((r) => [r.id, r.shotNumber]));
+    expect(byId.get(s3.id)).toBe(1);
+    expect(byId.get(s1.id)).toBe(2);
+    expect(byId.get(s2.id)).toBe(3);
+    expect(await eventKinds()).toContain('shots.reordered');
+  });
+
+  it('shots: dialogue stamps in every script version follow their shot (#1585)', async () => {
+    const shotMethods = createShotsMethods(db);
+    const { sceneShots, scene } = await seedScene(0, 2);
+    const [s1, s2] = sceneShots;
+    if (!s1 || !s2) throw new Error('setup');
+    const line = (n: number, extra = {}) => ({
+      character: 'A',
+      line: `spoken in ${n}`,
+      tone: '',
+      shotNumber: n,
+      ...extra,
+    });
+    const legacy = { character: 'B', line: 'everywhere', tone: '' };
+    await db.insert(sceneScriptVersions).values([
+      {
+        id: scene.id,
+        sceneId: scene.id,
+        source: 'split',
+        content: { extract: 'x', dialogue: [line(1), line(2), legacy] },
+      },
+      {
+        id: generateId(),
+        sceneId: scene.id,
+        source: 'edit',
+        content: { extract: 'y', dialogue: [line(2, { voiceToken: 'V' })] },
+      },
+    ]);
+
+    await shotMethods.reorderInScene(scene.id, [s2.id, s1.id], { actorId });
+
+    const rows = await db
+      .select()
+      .from(sceneScriptVersions)
+      .where(eq(sceneScriptVersions.sceneId, scene.id));
+    const bySource = new Map(rows.map((r) => [r.source, r.content.dialogue]));
+    expect(bySource.get('split')).toEqual([
+      { ...line(1), shotNumber: 2 },
+      { ...line(2), shotNumber: 1 },
+      legacy,
+    ]);
+    expect(bySource.get('edit')).toEqual([
+      { ...line(2, { voiceToken: 'V' }), shotNumber: 1 },
+    ]);
+  });
+});
+
+describe('re-analysis revival + shot soft-delete details', () => {
+  it('scenes.upsert on a deleted row’s orderIndex slot revives it', async () => {
+    const sceneMethods = createScenesMethods(db);
+    const { scene } = await seedScene(0, 0);
+    await sceneMethods.softDeleteCascade(scene.id, { actorId });
+    await sceneMethods.upsert({ sequenceId, orderIndex: 0 });
+    const live = await sceneMethods.listBySequence(sequenceId);
+    expect(live).toHaveLength(1);
+    expect(live[0]?.id).toBe(scene.id);
+    // The narrative moves only with a script version (#1600), not the upsert.
+    expect(live[0]?.title).toBe('Scene 0');
+  });
+
+  it('shots.upsert on a deleted (sceneId, shotNumber) slot revives it', async () => {
+    const shotMethods = createShotsMethods(db);
+    const { scene, sceneShots } = await seedScene(0, 1);
+    const [shot] = sceneShots;
+    if (!shot) throw new Error('setup');
+    await shotMethods.softDelete(shot.id, { actorId });
+    await shotMethods.upsert({
+      sequenceId,
+      sceneId: scene.id,
+      shotNumber: 1,
+    });
+    const live = await shotMethods.listBySequence(sequenceId);
+    expect(live).toHaveLength(1);
+    expect(live[0]?.id).toBe(shot.id);
+    expect(live[0]?.deletedAt).toBeNull();
+  });
+
+  it('shot softDelete is idempotent, keeps its shotNumber slot, and records prevState', async () => {
+    const shotMethods = createShotsMethods(db);
+    const { scene, sceneShots } = await seedScene(0, 1);
+    const [shot] = sceneShots;
+    if (!shot) throw new Error('setup');
+
+    const deletedAt = await shotMethods.softDelete(shot.id, { actorId });
+    const repeat = await shotMethods.softDelete(shot.id, { actorId });
+    expect(Math.floor(repeat.getTime() / 1000)).toBe(
+      Math.floor(deletedAt.getTime() / 1000)
+    );
+
+    const [row] = await db.select().from(shots).where(eq(shots.id, shot.id));
+    expect(row?.shotNumber).toBe(1);
+
+    const [event] = await db
+      .select()
+      .from(sequenceEvents)
+      .where(eq(sequenceEvents.kind, 'shot.deleted'));
+    expect(event?.data).toEqual({
+      prevState: { sceneId: scene.id, shotNumber: 1 },
+    });
+
+    const restored = await shotMethods.restore(shot.id, { actorId });
+    expect(restored.deletedAt).toBeNull();
+    expect(restored.shotNumber).toBe(1);
+  });
+});
+
+describe('narrative writes carry the live script (#1600)', () => {
+  it('versions scene lighting and palette overrides and allows clearing them', async () => {
+    const sceneMethods = createScenesMethods(db);
+    const { scene } = await seedScene(0);
+    const continuity = {
+      characterTags: ['jack'],
+      environmentTag: 'diner',
+      elementTags: [],
+      colorPalette: 'sepia',
+      lightingSetup: 'moonlight',
+      styleTag: '',
+    };
+    const edited = await editNarrative(
+      sceneMethods,
+      scene.id,
+      {
+        location: 'Diner',
+        timeOfDay: 'night',
+        continuity,
+      },
+      { actorId }
+    );
+    expect(edited).toMatchObject({
+      location: 'Diner',
+      timeOfDay: 'night',
+      continuity,
+    });
+    const cleared = await editNarrative(
+      sceneMethods,
+      scene.id,
+      {
+        continuity: { ...continuity, colorPalette: '', lightingSetup: '' },
+      },
+      { actorId }
+    );
+    expect(cleared.selectedScriptVersionId).not.toBe(
+      edited.selectedScriptVersionId
+    );
+    expect(cleared).toMatchObject({
+      location: 'Diner',
+      timeOfDay: 'night',
+      continuity: {
+        characterTags: ['jack'],
+        environmentTag: 'diner',
+        colorPalette: '',
+        lightingSetup: '',
+      },
+    });
+  });
+
+  it("writes analysed look picks onto the scene ROWS, not the analysis scenes' ids (#2015)", async () => {
+    const sceneMethods = createScenesMethods(db);
+    const { scene: first } = await seedScene(0);
+    const { scene: second } = await seedScene(1);
+    const continuity = {
+      characterTags: ['mia'],
+      environmentTag: '',
+      lightingSetup: '',
+      styleTag: '',
+    };
+    // Analysis scenes carry the ids the parser mints (`scene_1`, …), which
+    // are never the rows' ULIDs: the rows are found by position.
+    const analysed = [
+      { sceneId: 'scene_1', continuity },
+      {
+        sceneId: 'scene_2',
+        continuity: { ...continuity, characterLooks: { mia: 'look-gala' } },
+      },
+    ].map((scene, index) => ({
+      ...scene,
+      sceneNumber: index + 1,
+      originalScript: { extract: '', dialogue: [] },
+    }));
+
+    await persistSceneLooks({ scenes: sceneMethods }, sequenceId, analysed);
+
+    expect(
+      (await sceneMethods.getById(second.id))?.continuity?.characterLooks
+    ).toEqual({ mia: 'look-gala' });
+    // A scene with no pick is not rewritten.
+    expect((await sceneMethods.getById(first.id))?.continuity).toBeNull();
+  });
+
+  it('a continuity write to a scene that is not there throws', async () => {
+    await expect(
+      createScenesMethods(db).updateContinuity(
+        dbSceneId(generateId()),
+        {
+          characterTags: [],
+          environmentTag: '',
+          lightingSetup: '',
+          styleTag: '',
+        },
+        { actorId }
+      )
+    ).rejects.toThrow('not found');
+  });
+
+  it('a continuity rescan keeps the selected script and the other fields; a narrative edit keeps the tags', async () => {
+    const sceneMethods = createScenesMethods(db);
+    const { scene } = await seedScene(0);
+    const edited = generateId();
+    await db.insert(sceneScriptVersions).values({
+      id: edited,
+      sceneId: scene.id,
+      content: { extract: 'Edited text.', dialogue: [] },
+      title: 'Scene 0',
+      location: 'INT. DINER',
+      source: 'edit',
+    });
+    await db
+      .update(scenes)
+      .set({ selectedScriptVersionId: edited })
+      .where(eq(scenes.id, scene.id));
+    const continuity = {
+      characterTags: ['jack'],
+      environmentTag: 'diner',
+      colorPalette: 'warm',
+      lightingSetup: 'neon',
+      styleTag: 'noir',
+    };
+
+    await sceneMethods.updateContinuity(scene.id, continuity, { actorId });
+    await editNarrative(
+      sceneMethods,
+      scene.id,
+      { timeOfDay: 'night' },
+      { actorId }
+    );
+
+    const live = await sceneMethods.getById(scene.id);
+    expect(live).toMatchObject({
+      title: 'Scene 0',
+      location: 'INT. DINER',
+      timeOfDay: 'night',
+      continuity,
+    });
+    const [selected] = await db
+      .select()
+      .from(sceneScriptVersions)
+      .where(eq(sceneScriptVersions.id, live?.selectedScriptVersionId ?? ''));
+    expect(selected).toMatchObject({
+      content: { extract: 'Edited text.' },
+      hasNarrative: true,
+      source: 'edit',
+      createdBy: actorId,
+    });
+    expect(
+      Math.abs((selected?.createdAt.getTime() ?? 0) - Date.now())
+    ).toBeLessThan(60_000);
+  });
+});
+
+describe('scene edit: script text + guard (#1459)', () => {
+  async function sceneWithScript() {
+    const sceneMethods = createScenesMethods(db);
+    const { scene } = await seedScene(0);
+    const dialogue = [{ character: 'ADA', line: 'Hello.', tone: 'warm' }];
+    await createSceneScriptVersionsMethods(db).write({
+      sceneId: scene.id,
+      content: { extract: 'Old text.', dialogue },
+      narrative: {
+        title: scene.title,
+        location: null,
+        timeOfDay: null,
+        storyBeat: null,
+        continuity: null,
+      },
+      source: 'edit',
+    });
+    const live = await sceneMethods.getById(scene.id);
+    if (!live?.selectedScriptVersionId) throw new Error('no selected script');
+    return { sceneMethods, scene: live, dialogue };
+  }
+
+  it('replaces the extract in one new version, keeping dialogue and narrative', async () => {
+    const { sceneMethods, scene, dialogue } = await sceneWithScript();
+    const result = await sceneMethods.edit(
+      scene.id,
+      { extract: 'New text.', narrative: { storyBeat: 'turn' } },
+      { actorId, expectedScriptVersionId: scene.selectedScriptVersionId }
+    );
+    if (result.status !== 'updated') throw new Error(result.status);
+    expect(result.scene.selectedScriptVersionId).not.toBe(
+      scene.selectedScriptVersionId
+    );
+    expect(result.scene).toMatchObject({ title: 'Scene 0', storyBeat: 'turn' });
+    const selected = await createSceneScriptVersionsMethods(db).getSelected(
+      scene.id
+    );
+    expect(selected?.content).toEqual({ extract: 'New text.', dialogue });
+    expect(selected?.createdBy).toBe(actorId);
+    expect(await eventKinds()).toContain('scene.updated');
+  });
+
+  it('writes nothing when the scene no longer selects the expected version', async () => {
+    const { sceneMethods, scene } = await sceneWithScript();
+    const before = await db.select().from(sceneScriptVersions);
+    const result = await sceneMethods.edit(
+      scene.id,
+      { extract: 'Stale edit.', narrative: { title: 'Stale' } },
+      { actorId, expectedScriptVersionId: generateId() }
+    );
+    expect(result.status).toBe('conflict');
+    expect(await db.select().from(sceneScriptVersions)).toHaveLength(
+      before.length
+    );
+    expect(await eventKinds()).not.toContain('scene.updated');
+    expect((await sceneMethods.getById(scene.id))?.title).toBe('Scene 0');
+  });
+
+  it('is unchanged, with no version or event, when nothing moved', async () => {
+    const { sceneMethods, scene } = await sceneWithScript();
+    const result = await sceneMethods.edit(
+      scene.id,
+      { narrative: {} },
+      { actorId, expectedScriptVersionId: scene.selectedScriptVersionId }
+    );
+    expect(result.status).toBe('unchanged');
+    expect(await eventKinds()).not.toContain('scene.updated');
+  });
+});

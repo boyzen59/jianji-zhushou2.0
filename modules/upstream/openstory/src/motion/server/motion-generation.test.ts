@@ -1,0 +1,1375 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { estimateFalCost } from '@/billing/fal-cost';
+import { TEST_FAL_PRICING } from '@/billing/fal-pricing-fixture';
+import type { ArkAssetMap } from '@/models/server/byteplus-asset-steps';
+import { BYTEPLUS_PORTRAIT_FILTER_MESSAGE } from '@/models/server/byteplus-portrait-filter';
+import { micros } from '@/billing/money';
+import {
+  mockFalVideo,
+  mockGenerateVideo,
+  mockGetVideoJobStatus,
+} from '@/motion/server/__mocks__/fal-client.mock';
+
+// Mock DB + env so api-key resolution falls through to platform key
+vi.doMock('#db-client', () => ({
+  getDb: () => ({
+    select: () => ({ from: () => ({ where: () => ({ limit: () => [] }) }) }),
+  }),
+}));
+
+const testEnv: {
+  FAL_KEY: string | undefined;
+  OPENROUTER_KEY: string | undefined;
+  XAI_API_KEY: string | undefined;
+  GEMINI_API_KEY: string | undefined;
+  ARK_API_KEY: string | undefined;
+  ARK_BASE_URL: string | undefined;
+  E2E_TEST: string | undefined;
+} = {
+  FAL_KEY: 'test-fal-key',
+  OPENROUTER_KEY: 'test-or-key',
+  XAI_API_KEY: undefined,
+  GEMINI_API_KEY: undefined,
+  ARK_API_KEY: undefined,
+  ARK_BASE_URL: undefined,
+  E2E_TEST: undefined,
+};
+
+vi.doMock('#env', () => ({
+  getEnv: () => testEnv,
+}));
+
+const mockCreateGrokVideo = vi.fn(() => ({
+  kind: 'video',
+  name: 'grok',
+  model: 'grok-imagine-video-1.5',
+}));
+vi.doMock('@tanstack/ai-grok', () => ({
+  createGrokVideo: mockCreateGrokVideo,
+}));
+
+const mockCreateGeminiVideo = vi.fn(() => ({
+  kind: 'video',
+  name: 'gemini',
+  model: 'gemini-omni-1.1-flash',
+}));
+vi.doMock('@tanstack/ai-gemini', () => ({
+  createGeminiVideo: mockCreateGeminiVideo,
+}));
+
+vi.doMock('@/models/server/byteplus-asset-ingest', () => ({
+  toArkFetchableUrl: async (url: string) => url,
+}));
+
+const mockSubmitFinalRender = vi.fn(async () => ({ jobId: 'ark-final' }));
+vi.doMock('@/models/server/byteplus-final-render', () => ({
+  submitBytePlusFinalRender: mockSubmitFinalRender,
+}));
+
+/** What `ingestArkAssets` would have produced: every still registered. */
+const registeredAssets: ArkAssetMap = new Proxy(
+  {},
+  { get: (_, key) => (typeof key === 'string' ? `asset://${key}` : undefined) }
+);
+
+const {
+  arkStillsForMotion,
+  arkStillsToRegister,
+  submitMotionJob,
+  pollMotionJob,
+  motionCostFromUsage,
+  calculateMotionMetadata,
+  resolveMotionVia,
+} = await import('./motion-generation');
+
+describe('arkStillsForMotion', () => {
+  it('registers the start frame and character sheets that may show a person (#1682)', () => {
+    expect(
+      arkStillsForMotion({
+        imageUrl: 'https://cdn/still.png',
+        referenceImages: [
+          {
+            referenceImageUrl: 'https://cdn/sarah.png',
+            description: 'Sarah',
+            role: 'character',
+            token: 'Sarah',
+            isPerson: true,
+          },
+          {
+            referenceImageUrl: 'https://cdn/elvis.png',
+            description: 'Elvis',
+            role: 'character',
+            token: 'Elvis',
+            isPerson: true,
+          },
+          {
+            referenceImageUrl: 'https://cdn/robot.png',
+            description: 'UNIT-7',
+            role: 'character',
+            token: 'UNIT-7',
+            isPerson: false,
+          },
+          {
+            referenceImageUrl: 'https://cdn/cafe.png',
+            description: 'cafe',
+            role: 'location',
+            token: 'CAFE',
+          },
+          {
+            referenceImageUrl: 'https://cdn/logo.png',
+            description: 'logo',
+            role: 'element',
+            token: 'LOGO',
+          },
+        ],
+      })
+    ).toEqual([
+      { storedUrl: 'https://cdn/still.png', slot: 'frame' },
+      { storedUrl: 'https://cdn/sarah.png', slot: 'library' },
+      { storedUrl: 'https://cdn/elvis.png', slot: 'library' },
+      {
+        storedUrl: 'https://cdn/robot.png',
+        slot: 'library',
+        plain: true,
+      },
+    ]);
+  });
+
+  it('registers every reference clip as a Video asset, and no audio (#1930)', () => {
+    expect(
+      arkStillsForMotion({
+        referenceImages: [
+          {
+            referenceImageUrl: 'https://cdn/walk.mp4',
+            description: 'WALK',
+            role: 'element',
+            kind: 'video',
+            token: 'WALK',
+          },
+          {
+            referenceImageUrl: 'https://cdn/line.mp3',
+            description: 'LINE',
+            role: 'element',
+            kind: 'audio',
+            token: 'LINE',
+          },
+        ],
+      })
+    ).toEqual([
+      { storedUrl: 'https://cdn/walk.mp4', slot: 'library', kind: 'Video' },
+    ]);
+  });
+
+  it('treats a missing isPerson as a face, including in-flight payloads', () => {
+    expect(
+      arkStillsForMotion({
+        referenceImages: [
+          {
+            referenceImageUrl: 'https://cdn/unknown.png',
+            description: 'Someone',
+            role: 'character',
+          },
+        ],
+      })
+    ).toEqual([{ storedUrl: 'https://cdn/unknown.png', slot: 'library' }]);
+  });
+});
+
+describe('arkStillsToRegister', () => {
+  it('budgets only the stills ingest would create: faces, not sets or props (#1756)', () => {
+    const character = (name: string) => ({
+      referenceImageUrl: `https://cdn/${name}.png`,
+      description: name,
+      role: 'character' as const,
+      token: name,
+      isPerson: true,
+    });
+    const location = {
+      referenceImageUrl: 'https://cdn/pub.png',
+      description: 'The pub',
+      role: 'location' as const,
+      token: 'Pub',
+    };
+    const element = {
+      referenceImageUrl: 'https://cdn/ute.png',
+      description: 'The ute',
+      role: 'element' as const,
+      token: 'Ute',
+    };
+    // Reference-only shots: no start frame, the same sheets on every shot.
+    const shot = {
+      referenceImages: [
+        character('Damo'),
+        character('Shazza'),
+        location,
+        element,
+        { ...character('Cockatoo'), isPerson: false },
+      ],
+    };
+    const stills = arkStillsToRegister([shot, shot, shot]);
+    expect(new Set(stills)).toEqual(
+      new Set(['https://cdn/Damo.png', 'https://cdn/Shazza.png'])
+    );
+  });
+
+  it('counts a start frame', () => {
+    expect(
+      arkStillsToRegister([{ imageUrl: 'https://cdn/still.png' }])
+    ).toEqual(['https://cdn/still.png']);
+  });
+});
+
+describe('Motion Service', () => {
+  beforeEach(() => {
+    mockGenerateVideo.mockClear();
+    mockGetVideoJobStatus.mockClear();
+    mockFalVideo.mockClear();
+    mockCreateGrokVideo.mockClear();
+    mockCreateGeminiVideo.mockClear();
+    testEnv.XAI_API_KEY = undefined;
+    testEnv.GEMINI_API_KEY = undefined;
+    testEnv.FAL_KEY = 'test-fal-key';
+    testEnv.ARK_API_KEY = undefined;
+    testEnv.ARK_BASE_URL = undefined;
+    testEnv.E2E_TEST = undefined;
+  });
+
+  describe('submitMotionJob', () => {
+    it('should submit job with Kling v3 Pro model options', async () => {
+      mockGenerateVideo.mockResolvedValue({
+        jobId: 'test-kling-v3-request-id',
+        model: 'fal-ai/kling-video/v3/pro/image-to-video',
+      });
+
+      const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        arkAssets: registeredAssets,
+        imageUrl: 'https://example.com/image.jpg',
+        prompt: 'A person walking',
+        model: 'kling_v3_pro',
+        duration: 5,
+      });
+
+      expect(result.jobId).toBe('test-kling-v3-request-id');
+      expect(result.modelKey).toBe('kling_v3_pro');
+      expect(result.via).toBe('fal');
+      expect(result.usedOwnKey).toBe(false);
+      expect(result.submittedAt).toBeGreaterThan(0);
+
+      expect(mockGenerateVideo).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: 'A person walking',
+          modelOptions: expect.objectContaining({
+            start_image_url: 'https://example.com/image.jpg',
+            duration: '5',
+            cfg_scale: 0.5,
+            negative_prompt:
+              'blur, distort, and low quality, background music, musical score, soundtrack',
+          }),
+        })
+      );
+    });
+
+    it('should submit job with Seedance 2.5 model options', async () => {
+      mockGenerateVideo.mockResolvedValue({
+        jobId: 'test-seedance-request-id',
+        model: 'bytedance/seedance-2.5/image-to-video',
+      });
+
+      const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        arkAssets: registeredAssets,
+        imageUrl: 'https://example.com/image.jpg',
+        prompt: 'Dynamic action sequence',
+        model: 'seedance_v2_5',
+        duration: 5,
+        fps: 25,
+      });
+
+      expect(result.jobId).toBe('test-seedance-request-id');
+      expect(result.modelKey).toBe('seedance_v2_5');
+
+      expect(mockGenerateVideo).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: 'Dynamic action sequence',
+          modelOptions: expect.objectContaining({
+            image_url: 'https://example.com/image.jpg',
+          }),
+        })
+      );
+    });
+
+    it('should handle submission failure', async () => {
+      mockGenerateVideo.mockRejectedValue(new Error('API error'));
+
+      await expect(
+        submitMotionJob({
+          heldSeedanceEditSeconds: null,
+          arkAssets: registeredAssets,
+          imageUrl: 'https://example.com/image.jpg',
+          prompt: 'Test prompt',
+          model: 'kling_v3_pro',
+        })
+      ).rejects.toThrow('API error');
+    });
+
+    it('should submit job with Seedance 2.0 model options', async () => {
+      mockGenerateVideo.mockResolvedValue({
+        jobId: 'test-seedance-request-id',
+        model: 'bytedance/seedance-2.0/enterprise/v2/image-to-video',
+      });
+
+      const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        arkAssets: registeredAssets,
+        imageUrl: 'https://example.com/image.jpg',
+        prompt: 'Smooth camera movement',
+        model: 'seedance_v2',
+        duration: 8,
+      });
+
+      expect(result.jobId).toBe('test-seedance-request-id');
+      expect(result.modelKey).toBe('seedance_v2');
+
+      expect(mockGenerateVideo).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: 'Smooth camera movement',
+          modelOptions: expect.objectContaining({
+            image_url: 'https://example.com/image.jpg',
+          }),
+        })
+      );
+    });
+
+    it('stamps via byteplus for Seedance when Ark is configured', async () => {
+      testEnv.ARK_API_KEY = 'ark-test';
+      mockGenerateVideo.mockResolvedValue({ jobId: 'ark-job-id' });
+
+      const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        arkAssets: registeredAssets,
+        imageUrl: 'https://example.com/image.jpg',
+        prompt: 'Dynamic action sequence',
+        model: 'seedance_v2_5',
+        duration: 5,
+      });
+
+      expect(result.via).toBe('byteplus');
+      expect(result.usedOwnKey).toBe(false);
+      expect(result.jobId).toBe('ark-job-id');
+    });
+
+    it('submits a Seedance 2.5 draft at 480p with draft: true and stamps the task id (#1756)', async () => {
+      testEnv.ARK_API_KEY = 'ark-test';
+      mockGenerateVideo.mockResolvedValue({ jobId: 'ark-draft' });
+
+      const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        arkAssets: registeredAssets,
+        imageUrl: 'https://example.com/image.jpg',
+        prompt: 'Dynamic action sequence',
+        model: 'seedance_v2_5',
+        duration: 5,
+        aspectRatio: '9:16',
+        resolution: '1080p',
+        draft: true,
+      });
+
+      expect(result.draftTaskId).toBe('ark-draft');
+      expect(mockGenerateVideo).toHaveBeenCalledWith(
+        expect.objectContaining({
+          size: expect.stringMatching(/_480p$/),
+          modelOptions: expect.objectContaining({ draft: true }),
+        })
+      );
+    });
+
+    it('ignores draft on a model without draft mode', async () => {
+      testEnv.ARK_API_KEY = 'ark-test';
+      mockGenerateVideo.mockResolvedValue({ jobId: 'ark-full' });
+
+      const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        arkAssets: registeredAssets,
+        imageUrl: 'https://example.com/image.jpg',
+        prompt: 'Dynamic action sequence',
+        model: 'seedance_v2',
+        duration: 5,
+        aspectRatio: '9:16',
+        resolution: '720p',
+        draft: true,
+      });
+
+      expect(result.draftTaskId).toBeUndefined();
+      const call = mockGenerateVideo.mock.calls[0]?.[0];
+      expect(call?.size).toMatch(/_720p$/);
+      expect(call?.modelOptions).not.toHaveProperty('draft');
+    });
+
+    it('refuses a draft when Seedance 2.5 is routed to fal — never a quiet full render', async () => {
+      await expect(
+        submitMotionJob({
+          heldSeedanceEditSeconds: null,
+          arkAssets: registeredAssets,
+          imageUrl: 'https://example.com/image.jpg',
+          prompt: 'Dynamic action sequence',
+          model: 'seedance_v2_5',
+          duration: 5,
+          draft: true,
+        })
+      ).rejects.toThrow(/BytePlus route/);
+      expect(mockGenerateVideo).not.toHaveBeenCalled();
+    });
+
+    it('renders the final from the draft task id alone and never stamps it as a draft (#1756)', async () => {
+      testEnv.ARK_API_KEY = 'ark-test';
+      mockSubmitFinalRender.mockClear();
+
+      const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        arkAssets: {},
+        prompt: 'Dynamic action sequence',
+        model: 'seedance_v2_5',
+        duration: 5,
+        aspectRatio: '9:16',
+        resolution: '1080p',
+        // A stray draft flag on a final payload must not stamp the final's id.
+        draft: true,
+        finalFromDraftTaskId: 'cgt-draft',
+      });
+
+      expect(result).toMatchObject({
+        jobId: 'ark-final',
+        via: 'byteplus',
+        endpointId: 'dreamina-seedance-2-5-260628',
+      });
+      expect(result.draftTaskId).toBeUndefined();
+      expect(mockSubmitFinalRender).toHaveBeenCalledWith(
+        expect.objectContaining({
+          modelId: 'dreamina-seedance-2-5-260628',
+          draftTaskId: 'cgt-draft',
+        })
+      );
+      expect(mockGenerateVideo).not.toHaveBeenCalled();
+    });
+
+    it('registers only character sheets that may show a person; robots go as the mapped plain URL (#1682)', async () => {
+      testEnv.ARK_API_KEY = 'ark-test';
+      mockGenerateVideo.mockResolvedValue({ jobId: 'ark-plain' });
+
+      await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        arkAssets: {
+          'https://example.com/still.jpg': 'asset://still.jpg',
+          'https://example.com/robot.png': 'https://example.com/robot.png',
+        },
+        imageUrl: 'https://example.com/still.jpg',
+        prompt: 'UNIT-7 waves',
+        model: 'seedance_v2_5',
+        duration: 5,
+        referenceImages: [
+          {
+            referenceImageUrl: 'https://example.com/robot.png',
+            description: 'UNIT-7',
+            role: 'character',
+            token: 'UNIT-7',
+            isPerson: false,
+          },
+        ],
+      });
+
+      expect(mockGenerateVideo).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: expect.arrayContaining([
+            expect.objectContaining({
+              type: 'image',
+              source: expect.objectContaining({
+                value: 'asset://still.jpg',
+              }),
+            }),
+            expect.objectContaining({
+              type: 'image',
+              source: expect.objectContaining({
+                value: 'https://example.com/robot.png',
+              }),
+            }),
+          ]),
+        })
+      );
+    });
+
+    it('registers the start frame and character refs as asset://, sends element/location sheets as URLs (#1519)', async () => {
+      testEnv.ARK_API_KEY = 'ark-test';
+      mockGenerateVideo.mockResolvedValue({ jobId: 'ark-assets' });
+
+      await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        arkAssets: registeredAssets,
+        imageUrl: 'https://example.com/still.jpg',
+        prompt: 'SCARLETT waves the LOGO',
+        model: 'seedance_v2_5',
+        duration: 5,
+        referenceImages: [
+          {
+            referenceImageUrl: 'https://example.com/scarlett.png',
+            description: 'Scarlett',
+            role: 'character',
+            token: 'SCARLETT',
+          },
+          {
+            referenceImageUrl: 'https://example.com/logo.png',
+            description: 'a logo',
+            role: 'element',
+            token: 'LOGO',
+          },
+        ],
+      });
+
+      expect(mockGenerateVideo).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: [
+            expect.objectContaining({ type: 'text' }),
+            expect.objectContaining({
+              type: 'image',
+              source: expect.objectContaining({
+                value: 'asset://https://example.com/still.jpg',
+              }),
+            }),
+            expect.objectContaining({
+              type: 'image',
+              source: expect.objectContaining({
+                value: 'asset://https://example.com/scarlett.png',
+              }),
+            }),
+            // An element sheet carries no face; it is not ingested.
+            expect.objectContaining({
+              type: 'image',
+              source: expect.objectContaining({
+                value: 'https://example.com/logo.png',
+              }),
+            }),
+          ],
+        })
+      );
+    });
+
+    it('sends a dialogue audio reference as a plain URL, never through the Ark asset map (#1627)', async () => {
+      testEnv.ARK_API_KEY = 'ark-test';
+      mockGenerateVideo.mockResolvedValue({ jobId: 'ark-audio' });
+
+      await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        // Only the start frame is registered — audio clips are never
+        // ingested by `ingestArkAssets`, so a still-registered check on the
+        // audio ref would throw before this fix (unlike `registeredAssets`,
+        // this map has no entry for the audio URL).
+        arkAssets: {
+          'https://example.com/still.jpg': 'asset://still.jpg',
+        },
+        imageUrl: 'https://example.com/still.jpg',
+        prompt: 'Two people talk',
+        model: 'seedance_v2_5',
+        duration: 5,
+        referenceImages: [
+          {
+            referenceImageUrl: 'https://example.com/dialogue.wav',
+            description: 'Dialogue recorded as @Audio1',
+            kind: 'audio',
+            role: 'character',
+            token: 'DIALOGUE',
+          },
+        ],
+      });
+
+      expect(mockGenerateVideo).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: expect.arrayContaining([
+            expect.objectContaining({
+              type: 'audio',
+              source: expect.objectContaining({
+                value: 'https://example.com/dialogue.wav',
+              }),
+            }),
+          ]),
+        })
+      );
+    });
+
+    it('throws when a face still was not registered before submit (#1519)', async () => {
+      testEnv.ARK_API_KEY = 'ark-test';
+      mockGenerateVideo.mockResolvedValue({ jobId: 'never' });
+
+      await expect(
+        submitMotionJob({
+          heldSeedanceEditSeconds: null,
+          arkAssets: {},
+          imageUrl: 'https://example.com/still.jpg',
+          prompt: 'Dynamic action sequence',
+          model: 'seedance_v2_5',
+          duration: 5,
+        })
+      ).rejects.toThrow(/not registered for BytePlus/);
+      expect(mockGenerateVideo).not.toHaveBeenCalled();
+    });
+
+    it('never falls back to fal when Ark rejects the still as a possible real person (#1519)', async () => {
+      testEnv.ARK_API_KEY = 'ark-test';
+      mockGenerateVideo.mockRejectedValue(
+        new Error(
+          "BytePlus Ark video task creation failed (400 InputImageSensitiveContentDetected.PrivacyInformation): The request failed because the input image 'content[1]' may contain real person."
+        )
+      );
+
+      await expect(
+        submitMotionJob({
+          heldSeedanceEditSeconds: null,
+          arkAssets: registeredAssets,
+          imageUrl: 'https://example.com/image.jpg',
+          prompt: 'Dynamic action sequence',
+          model: 'seedance_v2_5',
+          duration: 5,
+        })
+      ).rejects.toThrow(BYTEPLUS_PORTRAIT_FILTER_MESSAGE);
+      expect(mockGenerateVideo).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not fall back to fal on a different Ark 400', async () => {
+      testEnv.ARK_API_KEY = 'ark-test';
+      mockGenerateVideo.mockRejectedValue(
+        new Error(
+          'BytePlus Ark video task creation failed (400 InvalidParameter): size is malformed'
+        )
+      );
+
+      await expect(
+        submitMotionJob({
+          heldSeedanceEditSeconds: null,
+          arkAssets: registeredAssets,
+          imageUrl: 'https://example.com/image.jpg',
+          prompt: 'Dynamic action sequence',
+          model: 'seedance_v2_5',
+          duration: 5,
+        })
+      ).rejects.toThrow('InvalidParameter');
+      expect(mockGenerateVideo).toHaveBeenCalledTimes(1);
+    });
+
+    it('shows the portrait-filter message when Ark blocks the still and there is no fal key', async () => {
+      testEnv.ARK_API_KEY = 'ark-test';
+      testEnv.FAL_KEY = undefined;
+      mockGenerateVideo.mockRejectedValue(
+        new Error(
+          "BytePlus Ark video task creation failed (400 InputImageSensitiveContentDetected.PrivacyInformation): The request failed because the input image 'content[1]' may contain real person."
+        )
+      );
+
+      await expect(
+        submitMotionJob({
+          heldSeedanceEditSeconds: null,
+          arkAssets: registeredAssets,
+          imageUrl: 'https://example.com/image.jpg',
+          prompt: 'Dynamic action sequence',
+          model: 'seedance_v2_5',
+          duration: 5,
+        })
+      ).rejects.toThrow(BYTEPLUS_PORTRAIT_FILTER_MESSAGE);
+    });
+
+    it('keeps Kling on fal even when Ark is configured', async () => {
+      testEnv.ARK_API_KEY = 'ark-test';
+      mockGenerateVideo.mockResolvedValue({
+        jobId: 'kling-job',
+        model: 'fal-ai/kling-video/v3/pro/image-to-video',
+      });
+
+      const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        arkAssets: registeredAssets,
+        imageUrl: 'https://example.com/image.jpg',
+        prompt: 'A person walking',
+        model: 'kling_v3_pro',
+        duration: 5,
+      });
+
+      expect(result.via).toBe('fal');
+    });
+
+    it('stamps the H3 Max r2v endpoint when refs are attached', async () => {
+      mockGenerateVideo.mockResolvedValue({
+        jobId: 'h3-r2v-job',
+        model: 'minimax/h3-max/reference-to-video',
+      });
+
+      const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        arkAssets: registeredAssets,
+        imageUrl: 'https://example.com/still.jpg',
+        prompt: 'SCARLETT waves',
+        model: 'minimax_h3_max',
+        duration: 5,
+        referenceImages: [
+          {
+            referenceImageUrl: 'https://example.com/scarlett.png',
+            description: 'Scarlett',
+            role: 'character',
+            token: 'SCARLETT',
+          },
+        ],
+      });
+
+      expect(result.endpointId).toBe('minimax/h3-max/reference-to-video');
+      expect(mockFalVideo).toHaveBeenCalledWith(
+        'minimax/h3-max/reference-to-video',
+        expect.anything()
+      );
+    });
+
+    it('stamps the H3 Max i2v endpoint when there are no refs', async () => {
+      mockGenerateVideo.mockResolvedValue({
+        jobId: 'h3-i2v-job',
+        model: 'minimax/h3-max/image-to-video',
+      });
+
+      const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        arkAssets: registeredAssets,
+        imageUrl: 'https://example.com/still.jpg',
+        prompt: 'A person walking',
+        model: 'minimax_h3_max',
+        duration: 5,
+      });
+
+      expect(result.endpointId).toBe('minimax/h3-max/image-to-video');
+    });
+  });
+
+  describe('pollMotionJob', () => {
+    it('polls fal by default so pre-#1216 submissions keep working', async () => {
+      mockGetVideoJobStatus.mockResolvedValue({
+        jobId: 'job-1',
+        status: 'completed',
+        url: 'https://example.com/video.mp4',
+        usage: { unitsBilled: 12 },
+      });
+
+      const result = await pollMotionJob('job-1', 'kling_v3_pro');
+
+      expect(result.status).toBe('completed');
+      expect(result.url).toBe('https://example.com/video.mp4');
+      expect(mockGetVideoJobStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ jobId: 'job-1' })
+      );
+    });
+
+    it('throws on an unknown via stamp', async () => {
+      await expect(
+        pollMotionJob('job-1', 'kling_v3_pro', undefined, 'openai')
+      ).rejects.toThrow('Unknown media via: openai');
+    });
+
+    it('polls xAI when the submission stamped via xai', async () => {
+      testEnv.XAI_API_KEY = 'platform-xai';
+      mockGetVideoJobStatus.mockResolvedValue({
+        jobId: 'xai-job',
+        status: 'completed',
+        url: 'https://example.com/video.mp4',
+        usage: { cost: 0.4 },
+      });
+
+      const result = await pollMotionJob(
+        'xai-job',
+        'grok_imagine_video_1_5',
+        undefined,
+        'xai'
+      );
+
+      expect(result.status).toBe('completed');
+      expect(mockCreateGrokVideo).toHaveBeenCalled();
+    });
+
+    it('polls the BytePlus via when the job was stamped byteplus', async () => {
+      testEnv.ARK_API_KEY = 'ark-test';
+      mockGetVideoJobStatus.mockResolvedValue({
+        jobId: 'ark-job-1',
+        status: 'completed',
+        url: 'https://example.com/video.mp4',
+        usage: { totalTokens: 108_000 },
+      });
+
+      const result = await pollMotionJob(
+        'ark-job-1',
+        'seedance_v2_5',
+        undefined,
+        'byteplus'
+      );
+
+      expect(result.status).toBe('completed');
+      expect(mockGetVideoJobStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ jobId: 'ark-job-1' })
+      );
+    });
+
+    it('polls the stamped H3 Max r2v endpoint, not catalog i2v', async () => {
+      mockGetVideoJobStatus.mockResolvedValue({
+        jobId: 'h3-r2v-job',
+        status: 'completed',
+        url: 'https://example.com/video.mp4',
+      });
+
+      await pollMotionJob(
+        'h3-r2v-job',
+        'minimax_h3_max',
+        undefined,
+        'fal',
+        'minimax/h3-max/reference-to-video'
+      );
+
+      expect(mockFalVideo).toHaveBeenCalledWith(
+        'minimax/h3-max/reference-to-video',
+        expect.anything()
+      );
+    });
+
+    it('falls back to catalog i2v when endpointId is missing (pre-stamp jobs)', async () => {
+      mockGetVideoJobStatus.mockResolvedValue({
+        jobId: 'job-1',
+        status: 'completed',
+        url: 'https://example.com/video.mp4',
+      });
+
+      await pollMotionJob('job-1', 'minimax_h3_max');
+
+      expect(mockFalVideo).toHaveBeenCalledWith(
+        'minimax/h3-max/image-to-video',
+        expect.anything()
+      );
+    });
+  });
+
+  // #1559 — an over-long reference is the user's own file with an obvious fix,
+  // so submit refuses instead of quietly rendering a clip that ignored it.
+  describe('over-long reference guard', () => {
+    it('refuses rather than silently dropping the clip', async () => {
+      await expect(
+        submitMotionJob({
+          heldSeedanceEditSeconds: null,
+          arkAssets: registeredAssets,
+          imageUrl: 'https://example.com/still.jpg',
+          prompt: 'Move like LONG_TAKE',
+          model: 'gemini_omni_flash',
+          duration: 5,
+          referenceImages: [
+            {
+              referenceImageUrl: 'https://example.com/long.mp4',
+              description: 'LONG_TAKE - a long clip',
+              role: 'element',
+              kind: 'video',
+              durationSeconds: 10,
+              token: 'LONG_TAKE',
+            },
+          ],
+        })
+      ).rejects.toThrow("can't use LONG_TAKE — 10s, over its 3s limit");
+
+      expect(mockGenerateVideo).not.toHaveBeenCalled();
+    });
+
+    it('submits when the clip is inside the ceiling', async () => {
+      mockGenerateVideo.mockResolvedValue({
+        jobId: 'omni-ok',
+        model: 'gemini-omni-1.1-flash',
+      });
+
+      await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        arkAssets: registeredAssets,
+        imageUrl: 'https://example.com/still.jpg',
+        prompt: 'Move like SHORT_TAKE',
+        model: 'gemini_omni_flash',
+        duration: 5,
+        referenceImages: [
+          {
+            referenceImageUrl: 'https://example.com/short.mp4',
+            description: 'SHORT_TAKE - a short clip',
+            role: 'element',
+            kind: 'video',
+            durationSeconds: 2,
+            token: 'SHORT_TAKE',
+          },
+        ],
+      });
+
+      expect(mockGenerateVideo).toHaveBeenCalled();
+    });
+
+    it('submits a reference whose length was never measured', async () => {
+      mockGenerateVideo.mockResolvedValue({
+        jobId: 'omni-unknown',
+        model: 'gemini-omni-1.1-flash',
+      });
+
+      await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        arkAssets: registeredAssets,
+        imageUrl: 'https://example.com/still.jpg',
+        prompt: 'Move like MYSTERY',
+        model: 'gemini_omni_flash',
+        duration: 5,
+        referenceImages: [
+          {
+            referenceImageUrl: 'https://example.com/mystery.mp4',
+            description: 'MYSTERY - unknown length',
+            role: 'element',
+            kind: 'video',
+            durationSeconds: null,
+            token: 'MYSTERY',
+          },
+        ],
+      });
+
+      expect(mockGenerateVideo).toHaveBeenCalled();
+    });
+  });
+
+  describe('native xAI submit (issue #1167)', () => {
+    it('submits a Grok clip to xAI when a key is present', async () => {
+      testEnv.XAI_API_KEY = 'platform-xai';
+      mockGenerateVideo.mockResolvedValue({
+        jobId: 'xai-job-1',
+        model: 'grok-imagine-video-1.5',
+      });
+
+      const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        arkAssets: registeredAssets,
+        imageUrl: 'https://example.com/image.jpg',
+        prompt: 'A person walking',
+        model: 'grok_imagine_video_1_5',
+        duration: 5,
+      });
+
+      expect(result.via).toBe('xai');
+      expect(result.jobId).toBe('xai-job-1');
+      expect(mockCreateGrokVideo).toHaveBeenCalled();
+    });
+
+    it('falls back to fal for Grok when no xAI key exists', async () => {
+      mockGenerateVideo.mockResolvedValue({
+        jobId: 'fal-grok-job',
+        model: 'xai/grok-imagine-video/v1.5/image-to-video',
+      });
+
+      const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        arkAssets: registeredAssets,
+        imageUrl: 'https://example.com/image.jpg',
+        prompt: 'A person walking',
+        model: 'grok_imagine_video_1_5',
+        duration: 5,
+      });
+
+      expect(result.via).toBe('fal');
+      expect(mockCreateGrokVideo).not.toHaveBeenCalled();
+    });
+
+    it('sends the start frame as a start_frame image part', async () => {
+      testEnv.XAI_API_KEY = 'platform-xai';
+      mockGenerateVideo.mockResolvedValue({
+        jobId: 'xai-job-frame',
+        model: 'grok-imagine-video-1.5',
+      });
+
+      await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        arkAssets: registeredAssets,
+        imageUrl: 'https://example.com/image.jpg',
+        prompt: 'A person walking',
+        model: 'grok_imagine_video_1_5',
+        duration: 5,
+      });
+
+      expect(mockGenerateVideo).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: [
+            { type: 'text', content: 'A person walking' },
+            {
+              type: 'image',
+              source: { type: 'url', value: 'https://example.com/image.jpg' },
+              metadata: { role: 'start_frame' },
+            },
+          ],
+        })
+      );
+    });
+
+    it('pins the still as the opening frame and tags refs from <IMAGE_0>', async () => {
+      testEnv.XAI_API_KEY = 'platform-xai';
+      mockGenerateVideo.mockResolvedValue({
+        jobId: 'xai-job-refs',
+        model: 'grok-imagine-video-1.5',
+      });
+
+      await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        arkAssets: registeredAssets,
+        imageUrl: 'https://example.com/still.jpg',
+        prompt: 'SCARLETT lifts the CORAL_LIPSTICK',
+        model: 'grok_imagine_video_1_5',
+        duration: 5,
+        referenceImages: [
+          {
+            referenceImageUrl: 'https://example.com/scarlett.png',
+            description: 'Scarlett - athletic',
+            role: 'character',
+            token: 'SCARLETT',
+          },
+          {
+            referenceImageUrl: 'https://example.com/lipstick.png',
+            description: 'CORAL_LIPSTICK - a coral tube',
+            role: 'element',
+            token: 'CORAL_LIPSTICK',
+          },
+        ],
+      });
+
+      // xAI documents `image` + `reference_images` as the matching first-frame
+      // pin, so the still stays a pinned frame instead of being demoted into
+      // reference slot 0 (a reference does not lock the first frame). It rides
+      // modelOptions to get past the SDK's stale guard.
+      expect(mockGenerateVideo).toHaveBeenCalledWith(
+        expect.objectContaining({
+          modelOptions: { image: { url: 'https://example.com/still.jpg' } },
+          prompt: [
+            {
+              type: 'text',
+              content: '<IMAGE_0> lifts the <IMAGE_1>',
+            },
+            {
+              type: 'image',
+              source: {
+                type: 'url',
+                value: 'https://example.com/scarlett.png',
+              },
+              metadata: { role: 'character' },
+            },
+            {
+              type: 'image',
+              source: {
+                type: 'url',
+                value: 'https://example.com/lipstick.png',
+              },
+              metadata: { role: 'reference' },
+            },
+          ],
+        })
+      );
+    });
+  });
+
+  describe('native Google submit', () => {
+    it('submits an Omni Flash clip to Google when a key is present', async () => {
+      testEnv.GEMINI_API_KEY = 'platform-google';
+      mockGenerateVideo.mockResolvedValue({
+        jobId: 'google-job-1',
+        model: 'gemini-omni-1.1-flash',
+      });
+
+      const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        arkAssets: registeredAssets,
+        imageUrl: 'https://example.com/image.jpg',
+        prompt: 'A person walking',
+        model: 'gemini_omni_flash',
+        duration: 5,
+      });
+
+      expect(result.via).toBe('google');
+      expect(result.jobId).toBe('google-job-1');
+      expect(mockCreateGeminiVideo).toHaveBeenCalled();
+    });
+
+    it('falls back to fal for Omni Flash when no Google key exists', async () => {
+      mockGenerateVideo.mockResolvedValue({
+        jobId: 'fal-omni-job',
+        model: 'fal-ai/gemini-omni-1.1-flash/image-to-video',
+      });
+
+      const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        arkAssets: registeredAssets,
+        imageUrl: 'https://example.com/image.jpg',
+        prompt: 'A person walking',
+        model: 'gemini_omni_flash',
+        duration: 5,
+      });
+
+      expect(result.via).toBe('fal');
+      expect(mockCreateGeminiVideo).not.toHaveBeenCalled();
+    });
+
+    it('sends the still + prompt with the task pinned to image_to_video', async () => {
+      testEnv.GEMINI_API_KEY = 'platform-google';
+      mockGenerateVideo.mockResolvedValue({
+        jobId: 'google-job-frame',
+        model: 'gemini-omni-1.1-flash',
+      });
+
+      await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        arkAssets: registeredAssets,
+        imageUrl: 'https://example.com/image.jpg',
+        prompt: 'A person walking',
+        model: 'gemini_omni_flash',
+        duration: 5,
+      });
+
+      expect(mockGenerateVideo).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: [
+            {
+              type: 'image',
+              source: { type: 'url', value: 'https://example.com/image.jpg' },
+            },
+            { type: 'text', content: 'A person walking' },
+          ],
+          modelOptions: {
+            generation_config: { video_config: { task: 'image_to_video' } },
+            response_format: {
+              type: 'video',
+              delivery: 'uri',
+              duration: '5s',
+            },
+          },
+        })
+      );
+      // Top-level duration/size would make the adapter drop delivery:uri.
+      expect(mockGenerateVideo.mock.calls.at(-1)?.[0].duration).toBeUndefined();
+      expect(mockGenerateVideo.mock.calls.at(-1)?.[0].size).toBeUndefined();
+    });
+
+    it('tags library refs as <IMAGE_REF_n> and pins reference_to_video', async () => {
+      testEnv.GEMINI_API_KEY = 'platform-google';
+      mockGenerateVideo.mockResolvedValue({
+        jobId: 'google-job-refs',
+        model: 'gemini-omni-1.1-flash',
+      });
+
+      await submitMotionJob({
+        heldSeedanceEditSeconds: null,
+        arkAssets: registeredAssets,
+        imageUrl: 'https://example.com/still.jpg',
+        prompt: 'SCARLETT lifts the CORAL_LIPSTICK',
+        model: 'gemini_omni_flash',
+        duration: 5,
+        referenceImages: [
+          {
+            referenceImageUrl: 'https://example.com/scarlett.png',
+            description: 'Scarlett - athletic',
+            role: 'character',
+            token: 'SCARLETT',
+          },
+        ],
+      });
+
+      expect(mockGenerateVideo).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: [
+            {
+              type: 'image',
+              source: { type: 'url', value: 'https://example.com/still.jpg' },
+            },
+            {
+              type: 'image',
+              source: {
+                type: 'url',
+                value: 'https://example.com/scarlett.png',
+              },
+            },
+            {
+              type: 'text',
+              content: expect.stringMatching(
+                /Use <IMAGE_REF_0> as the starting frame\.\n<IMAGE_REF_1> lifts the/
+              ),
+            },
+          ],
+          modelOptions: {
+            generation_config: { video_config: { task: 'reference_to_video' } },
+            response_format: {
+              type: 'video',
+              delivery: 'uri',
+              duration: '5s',
+            },
+          },
+        })
+      );
+    });
+  });
+
+  describe('pollMotionJob via google', () => {
+    it('polls Google when the submission stamped via google', async () => {
+      testEnv.GEMINI_API_KEY = 'platform-google';
+      mockGetVideoJobStatus.mockResolvedValue({
+        jobId: 'google-job',
+        status: 'completed',
+        url: 'data:video/mp4;base64,AAAA',
+        usage: { promptTokens: 0, completionTokens: 28_960, totalTokens: 0 },
+      });
+
+      const result = await pollMotionJob(
+        'google-job',
+        'gemini_omni_flash',
+        undefined,
+        'google'
+      );
+
+      expect(result.status).toBe('completed');
+      expect(mockCreateGeminiVideo).toHaveBeenCalled();
+    });
+
+    it('throws when a google-stamped job has no key to poll with', async () => {
+      await expect(
+        pollMotionJob('google-job', 'gemini_omni_flash', undefined, 'google')
+      ).rejects.toThrow(/no Google key is available/);
+    });
+  });
+
+  describe('calculateMotionMetadata', () => {
+    it('gates H3 Max without refs on the i2v row', () => {
+      const { cost, model } = calculateMotionMetadata(
+        {
+          imageUrl: 'https://example.com/still.jpg',
+          prompt: 'A person walking',
+          model: 'minimax_h3_max',
+          duration: 5,
+        },
+        TEST_FAL_PRICING
+      );
+      expect(model).toBe('minimax/h3-max/image-to-video');
+      expect(cost).toBe(micros(200_000));
+    });
+
+    it('gates H3 Max with refs on the r2v row, not i2v', () => {
+      const { cost, model } = calculateMotionMetadata(
+        {
+          imageUrl: 'https://example.com/still.jpg',
+          prompt: 'SCARLETT waves',
+          model: 'minimax_h3_max',
+          duration: 5,
+          referenceImages: [
+            {
+              referenceImageUrl: 'https://example.com/scarlett.png',
+              description: 'Scarlett',
+              role: 'character',
+              token: 'SCARLETT',
+            },
+          ],
+        },
+        TEST_FAL_PRICING
+      );
+      expect(model).toBe('minimax/h3-max/reference-to-video');
+      expect(cost).toBe(micros(400_000));
+    });
+
+    it('prices the final of a draft at 1080p without building a request (#1756)', () => {
+      // A reference-only draft has no still; the final sends only the task
+      // id, so the start-frame guard must not fire here.
+      const base = {
+        prompt: 'Golden hour along the beachfront',
+        model: 'seedance_v2_5' as const,
+        duration: 5,
+        referenceOnly: false,
+        imageUrl: 'https://example.com/still.png',
+      };
+      const final = calculateMotionMetadata(
+        { ...base, imageUrl: undefined, finalFromDraftTaskId: 'cgt-draft' },
+        TEST_FAL_PRICING
+      );
+      expect(final.model).toBe('bytedance/seedance-2.5/image-to-video');
+      expect(final.duration).toBe(5);
+      // Priced exactly as an ordinary 1080p render on the same model.
+      expect(final.cost).toBe(
+        calculateMotionMetadata(
+          { ...base, resolution: '1080p' },
+          TEST_FAL_PRICING
+        ).cost
+      );
+      // And a draft at 480p tokens whatever tier it asked for (an ordinary fal
+      // render cannot ask for 480p on 2.5 — only Ark's draft flag can).
+      expect(
+        calculateMotionMetadata(
+          { ...base, resolution: '1080p', draft: true },
+          TEST_FAL_PRICING
+        ).cost
+      ).toBe(
+        estimateFalCost(
+          'bytedance/seedance-2.5/image-to-video',
+          { durationSeconds: 5, resolution: '480p' },
+          TEST_FAL_PRICING
+        )
+      );
+    });
+  });
+
+  describe('motionCostFromUsage', () => {
+    it('uses xAI’s reported cost and skips fal usage sampling', async () => {
+      const billing = await motionCostFromUsage(
+        'xai',
+        { promptTokens: 0, completionTokens: 0, totalTokens: 0, cost: 0.4 },
+        { modelKey: 'grok_imagine_video_1_5', hasReferenceImages: false }
+      );
+      expect(billing.cost).toBe(400_000);
+      expect(billing.recordFalUsage).toBe(false);
+      expect(billing.endpointId).toBe('grok-imagine-video-1.5');
+    });
+
+    it('prices Google video-output tokens and skips fal usage sampling', async () => {
+      // 5s of 720p video = 28,960 output tokens @ $17.50/1M = $0.5068
+      // plus 120 prompt tokens @ $1.50/1M = $0.00018.
+      const billing = await motionCostFromUsage(
+        'google',
+        { promptTokens: 120, completionTokens: 28_960, totalTokens: 29_080 },
+        { modelKey: 'gemini_omni_flash', hasReferenceImages: false }
+      );
+      expect(billing.cost).toBe(506_980);
+      expect(billing.recordFalUsage).toBe(false);
+      expect(billing.endpointId).toBe('gemini-omni-1.1-flash');
+    });
+
+    // The post-run charge re-resolves the row submit used, so the two must
+    // agree on all three fal routes (#873, #1521).
+    it.each([
+      [false, false, 'bytedance/seedance-2.5/image-to-video'],
+      [true, true, 'bytedance/seedance-2.5/reference-to-video'],
+      [false, true, 'bytedance/seedance-2.5/text-to-video'],
+    ] as const)(
+      'prices the fal row the shot hit (refs=%s, referenceOnly=%s)',
+      async (hasReferenceImages, referenceOnly, endpointId) => {
+        const billing = await motionCostFromUsage(
+          'fal',
+          {
+            promptTokens: 0,
+            completionTokens: 0,
+            totalTokens: 0,
+            unitsBilled: 5,
+          },
+          { modelKey: 'seedance_v2_5', hasReferenceImages, referenceOnly }
+        );
+        expect(billing.endpointId).toBe(endpointId);
+        expect(billing.recordFalUsage).toBe(true);
+      }
+    );
+  });
+
+  describe('resolveMotionVia', () => {
+    it('claims Google for Omni Flash when a Google key is present', async () => {
+      testEnv.GEMINI_API_KEY = 'platform-google';
+      await expect(resolveMotionVia('gemini_omni_flash')).resolves.toBe(
+        'google'
+      );
+    });
+
+    it('falls back to fal for Omni Flash when no Google key exists', async () => {
+      await expect(resolveMotionVia('gemini_omni_flash')).resolves.toBe('fal');
+    });
+  });
+});

@@ -1,0 +1,31 @@
+{
+  "id": "xilo-opus-video",
+  "url": "https://github.com/Kianzzz/xilo-opus-video.git",
+  "revision": "f2cd828e2692e7186186408ee01a936707c2c38d",
+  "checked_at": "2026-10-24T03:01:23.781471+00:00",
+  "package_complete": true,
+  "scope": "Complete selected Git package except video files, generated dependencies, private env files and excluded runtime directories.",
+  "files": {
+    ".gitignore": "62a55a9a49090bff1c33b6f91df8d5b1f8986976004e909a4bde9ca9a7207eab",
+    "LICENSE": "10a0a00cd4293a00186940ffb4f6224fe4bb81ddafea274e6571900bedb153a1",
+    "README.md": "ff49ae1cb030261353d0628e97e0c4cdce54821f37b587e4ae6a99f1cf3b8dcd",
+    "examples/plan-a-ui.png": "a0679fd21ebaede8c50d173a8de4ff8bfb91abeab058f1d3c3217e653f483e72",
+    "examples/plan-b-pixel-crt.png": "0ace8ed0844fbb7767163a03c174b5f084e6973179b6516c4a417bff55870ecd",
+    "examples/plan-c-one-line-sheet.png": "ac1bf0f8684594f6b341991a0dc898efa88ea462e431c19f5ce83dbef7687f96",
+    "skills/xilo-opus-video/SKILL.md": "2e061cfcf017c3a6fc5b6d56f2cee0d9b9e5a97bdc6945520b9956ae02543401",
+    "skills/xilo-opus-video/references/brief-template.md": "9bf1f3f142978bac38f74da5d93edddd2da4be2c16b0aaab5d62f4cd0ab46c04",
+    "skills/xilo-opus-video/references/code-stack.md": "154e6de672035029f649149240f479c6aadd8cfc791a827d0a1e146b7da3dc68",
+    "skills/xilo-opus-video/references/craft-rules.md": "926b949c3f673b6920ee59effcc6b0901cf93fc68d96597fd5e17f3ecce44646",
+    "skills/xilo-opus-video/references/plan-format.md": "bf570a6b4463308cc2d5a6d3f9c89ff20fbc2df6d01605d630f30e7b4e2d1bae",
+    "skills/xilo-opus-video/scripts/analyze_video.py": "b6cf8cf65b4975948e6c46349d6f23614aaf0f900ce67d30fa92702d6f7c6d70",
+    "skills/xilo-opus-video/scripts/audio_tools.py": "49b9f0a8ac8dd2d3ea18c8f54183b34fa6cb4ec4e4d5fee0c6054176a83a0a76",
+    "skills/xilo-opus-video/scripts/check_env.py": "3b424d9381964c5011f89de6de62035cdec6ae54465a4893d0d1b2fabf223f71",
+    "skills/xilo-opus-video/scripts/render.py": "1424bcbd6a5312a6bc42679b120cf13e43d0a80a6e429bfc363df982b4b5a1d3"
+  },
+  "omitted_paths": [],
+  "missing_paths": [],
+  "git_submodules": [],
+  "git_lfs_assets": [],
+  "local_edits_retained": [],
+  "retired_paths_archived": []
+}

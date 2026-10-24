@@ -1,0 +1,291 @@
+/**
+ * Public input schema for `POST /api/v1/sequences`. Deliberately ergonomic and
+ * lenient: callers pass human-friendly references (style by id or name, cast and
+ * locations by id/name or an inline create object). The orchestrator resolves
+ * these into the strict `CreateSequenceInput`, which re-validates model keys
+ * etc. — so this schema only needs to police shape, not model validity.
+ *
+ * Every field carries `.meta({...})` so `z.toJSONSchema(apiCreateSequenceSchema)`
+ * yields a fully-described OpenAPI component (titles/descriptions/examples)
+ * without hand-writing the spec. Uses Zod 4 top-level formats (`z.url`, `z.int`).
+ */
+
+import { PORTRAIT_RIGHTS_V1 } from '@/platform/compliance/attestations';
+import { aspectRatioSchema } from '@/models/aspect-ratios';
+import {
+  DEFAULT_IMAGE_MODEL,
+  DEFAULT_MUSIC_MODEL,
+  DEFAULT_VIDEO_MODEL,
+} from '@/models/models';
+import { DEFAULT_ANALYSIS_MODEL } from '@/models/models.config';
+import { DEFAULT_RESOLUTION, resolutionSchema } from '@/models/resolutions';
+import {
+  GENERATION_STAGES,
+  NEW_SEQUENCE_STOP_AT,
+  generationStageSchema,
+  stopAtFromFlags,
+  type GenerationStage,
+} from '@/sequences/pipeline';
+import { MUSIC_REQUIRES_MOTION_ERROR } from '@/sequences/server/sequence.schemas';
+import { z } from 'zod';
+
+const entityName = z
+  .string()
+  .min(1)
+  .max(255)
+  .meta({ description: 'Display name.' });
+const entityDescription = z
+  .string()
+  .max(2000)
+  .optional()
+  .meta({ description: 'Optional description used to guide generation.' });
+const referenceImageUrls = z.array(z.url()).optional().meta({
+  description:
+    'Optional hosted reference image URLs; ingested and used to generate the reference sheet.',
+});
+
+/**
+ * The portrait sign-off for an item's images (#1581). Every ingested image is
+ * checked for a real person server-side; this is required only when one is
+ * found, and covers each image of the item it sits on.
+ */
+const portraitAttestationSchema = z
+  .object({
+    statementVersion: z.literal(PORTRAIT_RIGHTS_V1.version).meta({
+      description: 'The portrait-rights statement version being affirmed.',
+    }),
+    authorizationBasis: z.string().trim().min(1).max(500).meta({
+      description:
+        'Basis for the authorization: a release reference, "self", a contract id.',
+    }),
+  })
+  .meta({ id: 'PortraitAttestation' });
+const portraitAttestation = portraitAttestationSchema.optional().meta({
+  description:
+    'Required when an image shows a real, identifiable person (checked server-side): portrait-rights statement version and authorization basis.',
+});
+
+/**
+ * Inline request to create a team character and cast it into the sequence.
+ * Strict: a character has no reference images (#2135), so a client still
+ * sending `referenceImageUrls` gets a 400, not a silent drop.
+ */
+const createCharacterSchema = z
+  .strictObject({
+    name: entityName,
+    description: entityDescription,
+    isHuman: z.boolean().optional().meta({
+      description: 'Whether the character is a human (vs creature/object).',
+    }),
+  })
+  .meta({ id: 'CreateCharacter' });
+
+/** Inline request to create a new team location (#1695). */
+const createLocationSchema = z
+  .object({
+    name: entityName,
+    description: entityDescription,
+    rendering: z.string().trim().min(1).max(2000).optional().meta({
+      description:
+        'What the place is rendered as, e.g. "Photoreal live action" or "3D animated, Pixar-like". Left out, it takes the sequence style’s.',
+    }),
+    referenceImageUrls,
+    portraitAttestation,
+  })
+  .meta({ id: 'CreateLocation' });
+
+/**
+ * One cast member / location: a **reference** to an existing team character
+ * or team location (string = id or name), or an inline **create** request
+ * (object). A single list per kind keeps the "some exist, some are new"
+ * mental model. An inline character takes no images; the sequence draws its
+ * sheet.
+ */
+const characterRefSchema = z
+  .union([z.string().min(1), createCharacterSchema])
+  .meta({
+    id: 'CharacterRef',
+    description:
+      'Existing team character by id or name (string), or an inline create object. The character is cast into the sequence. A name two team characters share is a conflict that asks for the id. An inline create whose name a team character already has is a conflict too. The sequence draws the sheet.',
+  });
+const locationRefSchema = z
+  .union([z.string().min(1), createLocationSchema])
+  .meta({
+    id: 'LocationRef',
+    description:
+      'One of the team’s locations by id or name (string), or an inline create object, which makes a new team location (or reuses the team location of that name). A name two team locations share is a conflict that asks for the id.',
+  });
+
+export const apiCreateSequenceSchema = z
+  .object({
+    script: z
+      .string()
+      .min(10)
+      .max(50000)
+      .meta({
+        description:
+          'Raw script, or — when enhancement runs — a one-liner / brief to expand.',
+        examples: ['A lighthouse keeper befriends a stranded whale.'],
+      }),
+    title: z
+      .string()
+      .min(1)
+      .max(500)
+      .optional()
+      .meta({
+        description: 'Optional sequence title.',
+        examples: ['Sea Tale'],
+      }),
+
+    enhance: z.enum(['auto', 'always', 'off']).default('auto').meta({
+      description:
+        "Script enhancement mode. 'auto' (default) enhances only a short/thin script (mirrors the new-sequence short-script nudge); 'always' forces it; 'off' uses the script verbatim. When enhancement runs, the enhanced script is returned in the response.",
+    }),
+    targetSeconds: z
+      .int()
+      .min(5)
+      .max(300)
+      .optional()
+      .meta({
+        description:
+          'Target video length in seconds (max 5 minutes), applied whenever enhancement runs. Omit to match the script.',
+        examples: [30],
+      }),
+
+    style: z
+      .string()
+      .min(1)
+      .optional()
+      .meta({
+        description:
+          'Style by id, name, or slugified name. Omit (or "auto") for Match script: a style derived from the script.',
+        examples: ['Cinematic Noir'],
+      }),
+    aspectRatio: aspectRatioSchema.optional().meta({
+      description:
+        "Aspect ratio. Defaults to the resolved style's recommendation, else 16:9.",
+    }),
+
+    resolution: resolutionSchema.optional().meta({
+      description: `Output resolution tier, resolved per model to the nearest thing it serves. Defaults to ${DEFAULT_RESOLUTION}.`,
+    }),
+
+    analysisModels: z
+      .array(z.string())
+      .min(1)
+      .optional()
+      .meta({
+        description: `Analysis model id(s); one sequence is created per model. Validated against the model registry. Defaults to ${DEFAULT_ANALYSIS_MODEL}.`,
+      }),
+    imageModels: z
+      .array(z.string())
+      .min(1)
+      .optional()
+      .meta({
+        description: `Image model key(s); first is primary. Defaults to ${DEFAULT_IMAGE_MODEL}.`,
+      }),
+    videoModels: z
+      .array(z.string())
+      .min(1)
+      .optional()
+      .meta({
+        description: `Video (image-to-video) model key(s); first is primary. Defaults to seedance_v2_5 where the team can reach it, otherwise ${DEFAULT_VIDEO_MODEL}.`,
+      }),
+
+    motion: z
+      .boolean()
+      .default(false)
+      .meta({
+        description: `Generate motion (video) for each shot. Default false: the run stops at ${NEW_SEQUENCE_STOP_AT}.`,
+      }),
+    music: z
+      .boolean()
+      .default(false)
+      .meta({ description: 'Generate sequence music. Default false.' }),
+    stopAt: generationStageSchema.optional().meta({
+      description: `How far the run goes, in order: ${GENERATION_STAGES.join(', ')}. Overrides motion and music when set. Omitted, the run stops at ${NEW_SEQUENCE_STOP_AT} unless motion or music is true.`,
+      examples: ['dialogue'],
+    }),
+    startFrames: z.boolean().default(false).meta({
+      description:
+        'Render a still per shot and animate it. Default false: shots render straight to video from the reference sheets, no stills are made, and every video model must support that.',
+    }),
+    draftMotion: z.boolean().default(true).meta({
+      description:
+        'Render motion as low-resolution drafts first, to be rendered at quality once approved. Only Seedance 2.5 honours it; other video models render finished clips. Default true.',
+    }),
+    audioModels: z
+      .array(z.string())
+      .min(1)
+      .optional()
+      .meta({
+        description: `Audio model key(s) for music; first is primary. Defaults to ${DEFAULT_MUSIC_MODEL}.`,
+      }),
+
+    characters: z.array(characterRefSchema).optional().meta({
+      description:
+        'Cast: each item is an existing ref (id/name) or an inline create object.',
+    }),
+    locations: z.array(locationRefSchema).optional().meta({
+      description:
+        'Locations the script may be set in: each item is one of the team’s locations (id/name) or an inline create object. Script analysis links the sequence to the ones the script uses.',
+    }),
+
+    elements: z
+      .array(
+        z
+          .object({
+            url: z.url().meta({ description: 'Hosted image URL to ingest.' }),
+            token: z
+              .string()
+              .min(1)
+              .max(100)
+              .optional()
+              .meta({
+                description:
+                  'Optional UPPERCASE token to reference the element in prompts; derived by vision when omitted.',
+                examples: ['LOGO'],
+              }),
+            filename: z
+              .string()
+              .min(1)
+              .optional()
+              .meta({ description: 'Optional original filename.' }),
+            portraitAttestation,
+          })
+          .meta({ id: 'ElementInput' })
+      )
+      .optional()
+      .meta({
+        description: 'Reference elements (logos, products) by image URL.',
+      }),
+
+    webhookUrl: z.url().optional().meta({
+      description:
+        'Reserved for phase 2: URL to receive a signed completion webhook. Stored intent only — delivery is not implemented yet.',
+    }),
+  })
+  .refine((data) => data.stopAt !== undefined || !data.music || data.motion, {
+    path: ['music'],
+    message: MUSIC_REQUIRES_MOTION_ERROR,
+  })
+  .meta({
+    id: 'CreateSequenceRequest',
+    title: 'Create Sequence Request',
+    description:
+      'Input for POST /api/v1/sequences — one-shot video sequence creation.',
+  });
+
+export type ApiCreateSequenceInput = z.infer<typeof apiCreateSequenceSchema>;
+
+/** How far a create runs: the named stop, else motion/music, else the app's default. */
+export function apiStopAt(
+  input: Pick<ApiCreateSequenceInput, 'stopAt' | 'motion' | 'music'>
+): GenerationStage {
+  if (input.stopAt) return input.stopAt;
+  if (!input.motion) return NEW_SEQUENCE_STOP_AT;
+  return stopAtFromFlags({
+    autoGenerateMotion: true,
+    autoGenerateMusic: input.music,
+  });
+}

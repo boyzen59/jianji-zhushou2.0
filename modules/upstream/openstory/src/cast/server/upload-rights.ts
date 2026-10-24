@@ -1,0 +1,358 @@
+/**
+ * Upload rights gate (#1180, #1581) — the server half.
+ *
+ * One ledger row per uploaded image or clip, keyed by the SHA-256 of its
+ * stored URL under the `uploaded_image` subject type (a clip is judged by Gemini
+ * watching all of it, #1930):
+ *
+ *  - {@link classifyUpload} runs the likeness classifier once and records its
+ *    verdict (`likeness-cleared-v1` / `likeness-detected-v1`);
+ *  - {@link attestUploads} records the user's portrait sign-off
+ *    (`portrait-rights-v1`), which supersedes a detected finding;
+ *  - {@link requireUploadRights} is what every finalize / create / generate
+ *    asks before a row, a move, a credit hold or a model call: the latest row
+ *    must be cleared or signed. Nothing else counts, so a direct server-fn
+ *    call cannot skip the check or the checkbox;
+ *  - {@link carryUploadRights} re-keys the row when a finalize moves the
+ *    object, so the library URL is covered by the same evidence.
+ *
+ * `depictsRealPerson` on a character is derived from this ledger, never taken
+ * off the client.
+ */
+
+import type { Likeness } from '@/cast/likeness';
+import {
+  analyzeTalentClipForTeam,
+  analyzeTalentMediaForTeam,
+} from '@/cast/server/talent/analyze-talent-media';
+import type { TalentVisionResult } from '@/cast/server/talent-vision';
+import type { TalentSubjectKind } from '@/cast/subject-kind';
+import type { PortraitAttestation, UploadRights } from '@/cast/upload-rights';
+import {
+  LIKENESS_CLEARED_V1,
+  LIKENESS_DETECTED_V1,
+  PORTRAIT_RIGHTS_V1,
+  statementHash,
+  type AttestationStatement,
+} from '@/platform/compliance/attestations';
+import { sha256Hex } from '@/platform/compliance/hash';
+import { AttestationRequiredError, ValidationError } from '@/platform/errors';
+import { r2KeyFromUrl } from '@/platform/server/storage/buckets';
+import {
+  getExtensionFromUrl,
+  getMimeTypeFromExtension,
+} from '@/platform/server/storage/file';
+import type { ScopedDb } from '@/platform/server/db/scoped';
+import type { UploadAttestation } from '@/platform/server/db/schema/compliance';
+
+export type LikenessRequestContext = {
+  ipAddress?: string | null;
+  userAgent?: string | null;
+};
+
+/**
+ * All the gate reads: the newest ledger row for a URL. Narrow so a workflow
+ * can ask through `scopedDb.liveRead` (#1930).
+ */
+export type UploadRightsReader = {
+  compliance: {
+    attestations: Pick<
+      ScopedDb['compliance']['attestations'],
+      'listForSubject'
+    >;
+  };
+};
+
+async function latestRow(
+  scopedDb: UploadRightsReader,
+  url: string
+): Promise<UploadAttestation | undefined> {
+  const [latest] = await scopedDb.compliance.attestations.listForSubject(
+    'uploaded_image',
+    await sha256Hex(url)
+  );
+  return latest;
+}
+
+function rightsFromRow(row: UploadAttestation): UploadRights {
+  switch (row.statementVersion) {
+    case LIKENESS_CLEARED_V1.version:
+      return { status: 'cleared' };
+    case LIKENESS_DETECTED_V1.version:
+      return { status: 'needs_portrait' };
+    case PORTRAIT_RIGHTS_V1.version:
+      return { status: 'signed' };
+    default:
+      // A statement this code no longer writes (the retired asset warranty).
+      // Treat it as unchecked rather than guess what it meant.
+      throw new AttestationRequiredError(
+        'This upload was recorded under a retired statement; check it again'
+      );
+  }
+}
+
+async function record(
+  scopedDb: ScopedDb,
+  url: string,
+  statement: AttestationStatement,
+  authorizationBasis: string | null,
+  request: LikenessRequestContext
+): Promise<void> {
+  await scopedDb.compliance.attestations.record({
+    subjectType: 'uploaded_image',
+    subjectId: await sha256Hex(url),
+    statementVersion: statement.version,
+    statementSha256: await statementHash(statement),
+    depictsRealPerson: statement !== LIKENESS_CLEARED_V1,
+    authorizationBasis,
+    ipAddress: request.ipAddress ?? null,
+    userAgent: request.userAgent ?? null,
+  });
+}
+
+/**
+ * Write the classifier's verdict for each URL it looked at, unless the URL
+ * already has a row (a re-check never downgrades a sign-off).
+ */
+export async function recordLikenessFinding(
+  scopedDb: ScopedDb,
+  urls: string[],
+  subjectKind: TalentSubjectKind,
+  request: LikenessRequestContext
+): Promise<void> {
+  let statement: AttestationStatement;
+  switch (subjectKind) {
+    case 'human':
+      statement = LIKENESS_DETECTED_V1;
+      break;
+    case 'animated':
+    case 'other':
+      statement = LIKENESS_CLEARED_V1;
+      break;
+    default:
+      subjectKind satisfies never;
+      throw new Error(`Unknown subject kind ${String(subjectKind)}`);
+  }
+  for (const url of new Set(urls)) {
+    if (await latestRow(scopedDb, url)) continue;
+    await record(scopedDb, url, statement, null, request);
+  }
+}
+
+/**
+ * One classifier call for the upload: Claude on a still, Gemini watching the
+ * whole clip (#1930). A clip that is not this team's stored object is
+ * refused, never waved through.
+ */
+function analyzeUpload(opts: {
+  scopedDb: ScopedDb;
+  userId: string;
+  url: string;
+  filename?: string;
+}): Promise<TalentVisionResult> {
+  const filenames = opts.filename ? [opts.filename] : undefined;
+  const idempotencyKey = `likeness:${opts.url}`;
+  // Routed on the stored file's type: a clip that reached the still
+  // classifier could be cleared on bytes it cannot read.
+  const mimeType = getMimeTypeFromExtension(getExtensionFromUrl(opts.url));
+  if (mimeType.startsWith('image/')) {
+    return analyzeTalentMediaForTeam({
+      scopedDb: opts.scopedDb,
+      userId: opts.userId,
+      imageUrls: [opts.url],
+      filenames,
+      idempotencyKey,
+    });
+  }
+  if (!mimeType.startsWith('video/')) {
+    throw new ValidationError(
+      'Only an image or a video clip can be checked for a real person.'
+    );
+  }
+  const key = r2KeyFromUrl(opts.url);
+  // Only this team's own objects: the check streams the bytes to Gemini.
+  if (key === null || !key.split('/').includes(opts.scopedDb.teamId)) {
+    throw new ValidationError(
+      'This clip can’t be checked for a real person here. Upload it to OpenStory and try again.'
+    );
+  }
+  return analyzeTalentClipForTeam({
+    scopedDb: opts.scopedDb,
+    userId: opts.userId,
+    key,
+    mimeType,
+    idempotencyKey,
+  });
+}
+
+/**
+ * The rights for one upload: what the ledger already says, or one vision
+ * call whose verdict is written so the next ask is free. Never defaults to
+ * human, never defaults to cleared: a classifier failure throws and leaves
+ * no row, so the gate keeps refusing.
+ */
+export async function classifyUpload(opts: {
+  scopedDb: ScopedDb;
+  userId: string;
+  url: string;
+  /** Original filename, appended to the vision prompt as a hint. */
+  filename?: string;
+  request: LikenessRequestContext;
+}): Promise<UploadRights> {
+  const existing = await latestRow(opts.scopedDb, opts.url);
+  if (existing) return rightsFromRow(existing);
+  const analysis = await analyzeUpload(opts);
+  await recordLikenessFinding(
+    opts.scopedDb,
+    [opts.url],
+    analysis.subjectKind,
+    opts.request
+  );
+  return analysis.subjectKind === 'human'
+    ? { status: 'needs_portrait' }
+    : { status: 'cleared' };
+}
+
+/** Record the portrait sign-off for each URL. Signing is always allowed. */
+export async function attestUploads(
+  scopedDb: ScopedDb,
+  attestations: PortraitAttestation[],
+  request: LikenessRequestContext
+): Promise<void> {
+  for (const claim of attestations) {
+    const existing = await latestRow(scopedDb, claim.url);
+    if (existing && rightsFromRow(existing).status === 'signed') continue;
+    await record(
+      scopedDb,
+      claim.url,
+      PORTRAIT_RIGHTS_V1,
+      claim.authorizationBasis,
+      request
+    );
+  }
+}
+
+/**
+ * Refuse unless every URL is cleared or signed. Returns whether each depicts
+ * a real person, so a caller can derive `isHuman` from the ledger.
+ */
+export async function requireUploadRights(
+  scopedDb: UploadRightsReader,
+  urls: string[]
+): Promise<Map<string, { depictsRealPerson: boolean }>> {
+  const result = new Map<string, { depictsRealPerson: boolean }>();
+  for (const url of new Set(urls)) {
+    const row = await latestRow(scopedDb, url);
+    if (!row) {
+      throw new AttestationRequiredError(
+        'This upload has not been checked for a real person yet'
+      );
+    }
+    const rights = rightsFromRow(row);
+    if (rights.status === 'needs_portrait') {
+      throw new AttestationRequiredError(
+        'Confirm the rights to this person’s likeness before using the upload'
+      );
+    }
+    result.set(url, { depictsRealPerson: rights.status === 'signed' });
+  }
+  return result;
+}
+
+/**
+ * Signed or detected → `real`; classifier cleared → `none` (#1682).
+ * Detected-but-unsigned is still a real person — `requireUploadRights`
+ * refuses use until signed. No row returns null. A `none` still is a
+ * plain URL; anything else registers.
+ */
+export async function likenessFromLedger(
+  scopedDb: ScopedDb,
+  url: string
+): Promise<Likeness | null> {
+  const row = await latestRow(scopedDb, url);
+  if (!row) return null;
+  switch (rightsFromRow(row).status) {
+    case 'signed':
+      return 'real';
+    case 'cleared':
+      return 'none';
+    case 'needs_portrait':
+      return 'real';
+  }
+}
+
+/**
+ * The URLs among these the ledger saw a real person in: `likenessFromLedger`
+ * is `real`, for many URLs in one read (#2065). It never throws, so a list
+ * read always loads, and it fails closed: a row under a retired statement
+ * counts as a real person, where `likenessFromLedger` would throw. Only a
+ * cleared row, or no row, is not one. This is a safety gate, and an old row
+ * must not be the way to make a character not a person.
+ */
+export async function realPersonUrls(
+  scopedDb: Pick<ScopedDb, 'compliance'>,
+  urls: readonly string[]
+): Promise<Set<string>> {
+  const urlByHash = new Map<string, string>();
+  for (const url of new Set(urls)) urlByHash.set(await sha256Hex(url), url);
+  const rows = await scopedDb.compliance.attestations.listForSubjects(
+    'uploaded_image',
+    [...urlByHash.keys()]
+  );
+  const real = new Set<string>();
+  const seen = new Set<string>();
+  for (const row of rows) {
+    // Newest first: only a subject's first row is its verdict.
+    if (seen.has(row.subjectId)) continue;
+    seen.add(row.subjectId);
+    const url = urlByHash.get(row.subjectId);
+    if (
+      url !== undefined &&
+      row.statementVersion !== LIKENESS_CLEARED_V1.version
+    ) {
+      real.add(url);
+    }
+  }
+  return real;
+}
+
+/**
+ * After a finalize moves an object, cover the new URL with the same row so
+ * the library copy passes the gate without a second look.
+ */
+export async function carryUploadRights(
+  scopedDb: ScopedDb,
+  fromUrl: string,
+  toUrl: string
+): Promise<void> {
+  const row = await latestRow(scopedDb, fromUrl);
+  if (!row) {
+    throw new AttestationRequiredError(
+      'This upload has not been checked for a real person yet'
+    );
+  }
+  await scopedDb.compliance.attestations.record({
+    subjectType: 'uploaded_image',
+    subjectId: await sha256Hex(toUrl),
+    statementVersion: row.statementVersion,
+    statementSha256: row.statementSha256,
+    depictsRealPerson: row.depictsRealPerson,
+    authorizationBasis: row.authorizationBasis,
+    ipAddress: row.ipAddress,
+    userAgent: row.userAgent,
+  });
+}
+
+/**
+ * {@link carryUploadRights} for a copy: an unchecked source stays unchecked
+ * rather than failing the copy, and every use still asks the gate.
+ */
+export async function carryUploadRightsIfChecked(
+  scopedDb: ScopedDb,
+  fromUrl: string,
+  toUrl: string
+): Promise<void> {
+  if (await latestRow(scopedDb, fromUrl)) {
+    await carryUploadRights(scopedDb, fromUrl, toUrl);
+  }
+}

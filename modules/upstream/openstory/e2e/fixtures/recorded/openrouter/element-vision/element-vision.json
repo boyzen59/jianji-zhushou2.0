@@ -1,0 +1,26 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Uploaded filename: broadcast-mic.jpg\n\nDescribe the element in the image below and suggest a token.",
+        "model": "anthropic/claude-sonnet-5.5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\"description\":\"A large-diaphragm studio condenser microphone with a champagne/silver metallic finish. The upper half features a fine metal wire mesh grille covering the capsule, cylindrical in shape. The lower body is a smooth brushed-metal cylinder engraved with a circular logo, the text \\\"PHANTOM classic\\\" and a serial number \\\"Nr.1307\\\". The mic sits cradled in a silver elastic-band shock mount with metal support arms attached to a black adjustable clamp. A round black mesh pop filter on a curved black metal gooseneck arm is positioned in front of the microphone's grille.\",\"consistencyTag\":\"silver-condenser-mic-shockmount\",\"suggestedToken\":\"BROADCAST_MIC\"}"
+      },
+      "recordedTimings": {
+        "ttftMs": 2852,
+        "interChunkDelaysMs": [
+          23, 417, 143, 420, 127, 419, 128, 420, 125, 418, 127, 419, 88, 32, 0,
+          2
+        ],
+        "totalDurationMs": 6160
+      },
+      "metadata": {
+        "systemHash": "441a992e"
+      }
+    }
+  ]
+}

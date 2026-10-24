@@ -1,0 +1,425 @@
+/**
+ * Hook for fetching sequence characters
+ */
+
+import { toast } from 'sonner';
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from '@tanstack/react-query';
+import {
+  createSequenceCharacterFn,
+  getCharacterFn,
+  getCharacterSheetStalenessFn,
+  getSequenceCharactersFn,
+  regenerateCharacterSheetFn,
+  assignCharacterVoiceFn,
+  chooseCharacterVoiceTakeFn,
+  cancelCharacterVoiceFn,
+  generateCharacterVoiceFn,
+  listCharacterVoiceVersionsFn,
+  selectCharacterVoiceVersionFn,
+  setCharacterVoiceEnabledFn,
+  restoreSequenceCharacterFn,
+  softDeleteSequenceCharacterFn,
+  updateSequenceCharacterFn,
+} from '@/cast/sequence-characters.fn';
+import type { SheetStaleness } from '@/cast/server/sheets/sheet-staleness';
+import { shotStalenessNamespace } from '@/shots/ui/use-shot-staleness';
+import { segmentKeys } from '@/shots/ui/use-segments';
+import { shotKeys } from '@/shots/ui/use-shots';
+import { elevenLabsVoiceKeys } from '@/cast/ui/use-elevenlabs-voices';
+import type {
+  CharacterDetail,
+  SequenceCharacter,
+} from '@/cast/sequence-characters.fn';
+
+/**
+ * A character's own keys take the sequence it is read through, or null from
+ * the Characters page (#2017), where the same sheets and voice are shown.
+ */
+const scope = (sequenceId: string | null) => sequenceId ?? 'team';
+
+export const sequenceCharacterKeys = {
+  all: ['sequence-characters'] as const,
+  list: (sequenceId: string) =>
+    [...sequenceCharacterKeys.all, 'list', sequenceId] as const,
+  detail: (sequenceId: string | null, characterId: string) =>
+    [
+      ...sequenceCharacterKeys.all,
+      'detail',
+      scope(sequenceId),
+      characterId,
+    ] as const,
+  voiceVersions: (sequenceId: string | null, characterId: string) =>
+    [
+      ...sequenceCharacterKeys.all,
+      'voice-versions',
+      scope(sequenceId),
+      characterId,
+    ] as const,
+  sheetStaleness: (sequenceId: string | null, characterId: string) =>
+    [
+      ...sequenceCharacterKeys.all,
+      'sheet-staleness',
+      scope(sequenceId),
+      characterId,
+    ] as const,
+};
+
+/**
+ * One character as its detail page reads it (#2017): through a sequence,
+ * or from none. Under the cast keys, so every cast invalidation refreshes it.
+ */
+export function useCharacter(sequenceId: string | null, characterId: string) {
+  return useQuery<CharacterDetail | null>({
+    queryKey: sequenceCharacterKeys.detail(sequenceId, characterId),
+    queryFn: () => getCharacterFn({ data: { sequenceId, characterId } }),
+    staleTime: 30_000,
+    refetchOnWindowFocus: true,
+    // A sheet is the character's, so a run started from another sequence (or
+    // the Characters page) reports on a channel this view does not hear
+    // (#2017). Poll while a look reads generating so it cannot stick.
+    refetchInterval: (query) =>
+      query.state.data?.looks.some((look) => look.sheetStatus === 'generating')
+        ? 3000
+        : false,
+  });
+}
+
+export function useSequenceCharacters(sequenceId: string) {
+  return useQuery<SequenceCharacter[]>({
+    queryKey: sequenceCharacterKeys.list(sequenceId),
+    queryFn: async () => {
+      return getSequenceCharactersFn({ data: { sequenceId } });
+    },
+    // Sheets and voices live on the row, and realtime is the only
+    // other refresh — one dropped event held a stale cast for minutes (#1822).
+    // Same freshness as the shot list.
+    staleTime: 30_000,
+    refetchOnWindowFocus: true,
+    enabled: !!sequenceId,
+  });
+}
+
+/** Editable bible fields; `''` clears a nullable field server-side. */
+type CharacterBibleInput = {
+  age?: string;
+  gender?: string;
+  ethnicity?: string;
+  physicalDescription?: string;
+  standardClothing?: string;
+  personality?: string;
+  movement?: string;
+  voiceDescription?: string;
+};
+
+/**
+ * A character's voice moved (#1657): every reading it spoke stops matching
+ * ("Voice changed since") and every video that bound one reads stale. The
+ * voice is part of both keys, so both caches go with the cast list.
+ */
+function invalidateAfterVoiceChange(
+  queryClient: QueryClient,
+  sequenceId: string | null
+): void {
+  // Every cast read of the character, in every sequence (#2017).
+  void queryClient.invalidateQueries({ queryKey: sequenceCharacterKeys.all });
+  void queryClient.invalidateQueries({
+    queryKey: shotKeys.dialogueSectionsAll(),
+  });
+  // The video's "Stale" chip is a segment verdict, not a shot one.
+  if (sequenceId !== null) {
+    void queryClient.invalidateQueries({
+      queryKey: segmentKeys.list(sequenceId),
+    });
+  }
+  void queryClient.invalidateQueries({ queryKey: shotStalenessNamespace });
+}
+
+/** Cancel a voice still generating; the character keeps the voice it had. */
+export function useCancelCharacterVoice() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { sequenceId: string | null; characterId: string }) =>
+      cancelCharacterVoiceFn({ data }),
+    onSuccess: (_result, { sequenceId, characterId }) =>
+      Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: sequenceCharacterKeys.all,
+        }),
+        queryClient.invalidateQueries({
+          queryKey: sequenceCharacterKeys.voiceVersions(
+            sequenceId,
+            characterId
+          ),
+        }),
+      ]),
+    onError: (error: Error) =>
+      toast.error('Voice not cancelled', { description: error.message }),
+  });
+}
+
+/** Voice design (#1553): the workflow's realtime events refresh the list. */
+export function useGenerateCharacterVoice() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: {
+      sequenceId: string | null;
+      characterId: string;
+      takes: number;
+    }) => generateCharacterVoiceFn({ data }),
+    // Stays pending until the husk is on screen: the list and the versions
+    // carry it, and a gap between the two reads as the card vanishing and
+    // coming back.
+    onSuccess: (_result, { sequenceId, characterId }) => {
+      invalidateAfterVoiceChange(queryClient, sequenceId);
+      return Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: sequenceCharacterKeys.all,
+        }),
+        queryClient.invalidateQueries({
+          queryKey: sequenceCharacterKeys.voiceVersions(
+            sequenceId,
+            characterId
+          ),
+        }),
+      ]);
+    },
+  });
+}
+
+export function useSetCharacterVoiceEnabled() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: {
+      sequenceId: string | null;
+      characterId: string;
+      enabled: boolean;
+    }) => setCharacterVoiceEnabledFn({ data }),
+    // Pending until the list says so: the switch and the section it opens
+    // then change together, not in two steps.
+    onSuccess: (_result, { sequenceId }) => {
+      invalidateAfterVoiceChange(queryClient, sequenceId);
+      return queryClient.invalidateQueries({
+        queryKey: sequenceCharacterKeys.all,
+      });
+    },
+  });
+}
+
+export function useChooseCharacterVoiceTake() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: {
+      sequenceId: string | null;
+      characterId: string;
+      generatedVoiceId: string;
+    }) => chooseCharacterVoiceTakeFn({ data }),
+    onSettled: (_result, _error, { sequenceId, characterId }) => {
+      invalidateAfterVoiceChange(queryClient, sequenceId);
+      void queryClient.invalidateQueries({
+        queryKey: elevenLabsVoiceKeys.saved(characterId),
+      });
+    },
+  });
+}
+
+export function useAssignCharacterVoice() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: {
+      sequenceId: string | null;
+      characterId: string;
+      source: 'premade' | 'library';
+      voiceId: string;
+      publicOwnerId?: string;
+      name?: string;
+      description?: string;
+    }) => assignCharacterVoiceFn({ data }),
+    onSuccess: (_result, { sequenceId, characterId }) => {
+      invalidateAfterVoiceChange(queryClient, sequenceId);
+      void queryClient.invalidateQueries({
+        queryKey: elevenLabsVoiceKeys.saved(characterId),
+      });
+    },
+  });
+}
+
+/**
+ * Voice history (#1657). Not suspending: the history list renders nothing
+ * until the versions arrive, so the voice section never waits on it.
+ */
+export function useCharacterVoiceVersions(
+  sequenceId: string | null,
+  characterId: string
+) {
+  return useQuery({
+    queryKey: sequenceCharacterKeys.voiceVersions(sequenceId, characterId),
+    queryFn: () =>
+      listCharacterVoiceVersionsFn({ data: { sequenceId, characterId } }),
+    // Realtime can miss the terminal event; poll while a husk is live so
+    // the Pending take does not stick after persist (#1715).
+    refetchInterval: (query) => {
+      const rows = query.state.data;
+      if (
+        !rows?.some(
+          (row) => row.status === 'generating' || row.status === 'pending'
+        )
+      ) {
+        return false;
+      }
+      return 2000;
+    },
+  });
+}
+
+/** Point the character back at an earlier voice (#1657). */
+export function useSelectCharacterVoiceVersion() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: {
+      sequenceId: string | null;
+      characterId: string;
+      versionId: string;
+    }) => selectCharacterVoiceVersionFn({ data }),
+    onSuccess: (_result, { sequenceId, characterId }) => {
+      invalidateAfterVoiceChange(queryClient, sequenceId);
+      void queryClient.invalidateQueries({
+        queryKey: sequenceCharacterKeys.voiceVersions(sequenceId, characterId),
+      });
+      void queryClient.invalidateQueries({
+        queryKey: elevenLabsVoiceKeys.saved(characterId),
+      });
+    },
+  });
+}
+
+/** Manual character create (#1108 Phase 2) — sheet-less until its sheet is generated. */
+export function useCreateSequenceCharacter() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (
+      data: { sequenceId: string; name: string } & CharacterBibleInput
+    ) => createSequenceCharacterFn({ data }),
+    onSuccess: (_character, { sequenceId }) => {
+      void queryClient.invalidateQueries({
+        queryKey: sequenceCharacterKeys.list(sequenceId),
+      });
+    },
+  });
+}
+
+/**
+ * Bible field edit (#1108 Phase 2). Prompts and the character sheet that
+ * project the edited fields re-stale by hash derivation, so the staleness
+ * namespace refetches for the dots to appear.
+ */
+export function useUpdateSequenceCharacter() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (
+      data: {
+        sequenceId: string;
+        characterId: string;
+        name?: string;
+        voiceOnly: boolean;
+      } & CharacterBibleInput
+    ) => updateSequenceCharacterFn({ data }),
+    onSuccess: (_character, { sequenceId }) => {
+      void queryClient.invalidateQueries({
+        queryKey: sequenceCharacterKeys.list(sequenceId),
+      });
+      void queryClient.invalidateQueries({ queryKey: shotStalenessNamespace });
+      void queryClient.invalidateQueries({
+        queryKey: sequenceCharacterKeys.all,
+      });
+    },
+  });
+}
+
+/** One look's sheet staleness (#2015); the default look's when `lookId` is omitted. */
+export function useCharacterSheetStaleness(
+  sequenceId: string | null,
+  characterId: string,
+  lookId?: string
+) {
+  return useQuery<SheetStaleness>({
+    queryKey: [
+      ...sequenceCharacterKeys.sheetStaleness(sequenceId, characterId),
+      lookId ?? 'default',
+    ],
+    queryFn: () =>
+      getCharacterSheetStalenessFn({
+        data: { sequenceId, characterId, lookId },
+      }),
+    enabled: !!characterId,
+    staleTime: 15_000,
+  });
+}
+
+export function useRegenerateCharacterSheet() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: {
+      sequenceId: string | null;
+      characterId: string;
+      /** A look other than the default (#2015). */
+      lookId?: string;
+      imageModel?: string;
+    }) => regenerateCharacterSheetFn({ data }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ['character-sheet-variants'],
+      });
+      void queryClient.invalidateQueries({ queryKey: shotStalenessNamespace });
+      // Returned, so the mutation stays pending until the character is
+      // re-read as `generating`: the button never shows idle in between.
+      return queryClient.invalidateQueries({
+        queryKey: sequenceCharacterKeys.all,
+      });
+    },
+  });
+}
+
+/**
+ * Soft-remove / restore (#1108 Phase 2). Both refresh the cast list, facet
+ * membership, and staleness — a removed character drops out of bible reads,
+ * so prompts naming it read stale; restore reverses that.
+ */
+export function useSoftDeleteSequenceCharacter() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { sequenceId: string; characterId: string }) =>
+      softDeleteSequenceCharacterFn({ data }),
+    onSuccess: (_result, { sequenceId }) =>
+      invalidateCastMembership(queryClient, sequenceId),
+  });
+}
+
+/**
+ * Restore is a plain async, not a hook: it runs from undo-toast closures that
+ * outlive the component that removed the entity (Radix unmounts inactive tab
+ * content; detail pages navigate away), where an unmounted mutation observer
+ * could skip its callbacks. The app-level QueryClient stays valid.
+ */
+export async function restoreSequenceCharacter(
+  queryClient: QueryClient,
+  data: { sequenceId: string; characterId: string }
+): Promise<void> {
+  await restoreSequenceCharacterFn({ data });
+  invalidateCastMembership(queryClient, data.sequenceId);
+}
+
+function invalidateCastMembership(
+  queryClient: QueryClient,
+  sequenceId: string
+): void {
+  void queryClient.invalidateQueries({
+    queryKey: sequenceCharacterKeys.list(sequenceId),
+  });
+  void queryClient.invalidateQueries({ queryKey: ['scene-facets'] });
+  void queryClient.invalidateQueries({ queryKey: shotStalenessNamespace });
+}

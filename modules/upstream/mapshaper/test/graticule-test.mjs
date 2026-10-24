@@ -1,0 +1,190 @@
+import api from '../mapshaper.js';
+import assert from 'assert';
+import { getGraticuleMeridianLongitudes } from '../src/commands/mapshaper-graticule';
+
+function sorted(arr) {
+  return arr.slice().sort((a, b) => a - b);
+}
+
+
+function hasOutline(json) {
+  return json.features.some(feat => {
+    return feat.properties.type == 'outline';
+  });
+}
+
+function hasOnePolygon(json) {
+  return json.geometries && json.geometries.length == 1 &&
+    json.geometries[0] && json.geometries[0].type == 'Polygon';
+}
+
+function hasMeridians(arr) {
+  return function(json) {
+    return arr.every(lon => {
+      return json.features.some(feat => {
+        return feat.properties.type == 'meridian' && feat.properties.value == lon;
+      });
+    });
+  }
+}
+
+function polygonTest(str) {
+  var path = 'test/data/geojson/world_land.json';
+  it(str, function(done) {
+    var cmd = `-i ${path} -proj ${str} densify -graticule polygon -o graticule.json`;
+    api.applyCommands(cmd, {}, function(err, out) {
+      var json = JSON.parse(out['graticule.json']);
+      assert(hasOnePolygon(json));
+      done();
+    });
+  });
+}
+
+function projTest(str, test) {
+  var path = 'test/data/geojson/world_land.json';
+  it(str, function(done) {
+    var cmd = `-i ${path} -proj ${str} densify -graticule -o graticule.json`;
+    api.applyCommands(cmd, {}, function(err, out) {
+      var json = JSON.parse(out['graticule.json']);
+      assert(test(json));
+      done();
+    });
+  });
+}
+
+describe('getGraticuleMeridianLongitudes()', function () {
+  it('default alignment includes 0 and 180, not -180', function() {
+    var xx = getGraticuleMeridianLongitudes(10, 0);
+    assert.deepEqual(sorted(xx), sorted(api.utils.range(36, -170, 10)));
+    assert(xx.includes(0));
+    assert(xx.includes(180));
+    assert(!xx.includes(-180));
+  });
+
+  it('base=5 interval=10 shifts meridians by 5 degrees', function() {
+    var xx = getGraticuleMeridianLongitudes(10, 5);
+    assert.deepEqual(sorted(xx), sorted(api.utils.range(36, -175, 10)));
+    assert(xx.includes(5));
+    assert(!xx.includes(0));
+    assert(!xx.includes(180));
+  });
+
+  it('base is taken modulo interval', function() {
+    assert.deepEqual(
+      sorted(getGraticuleMeridianLongitudes(10, 15)),
+      sorted(getGraticuleMeridianLongitudes(10, 5)));
+    assert.deepEqual(
+      sorted(getGraticuleMeridianLongitudes(10, -5)),
+      sorted(getGraticuleMeridianLongitudes(10, 5)));
+  });
+});
+
+describe('mapshaper-graticule.js', function () {
+  // Test of graticule outlines and edge meridians
+  // ... also should catch some projection failures
+  describe('proj tests', function () {
+    projTest('+proj=merc', hasOutline);
+    projTest('wgs84', hasMeridians([-180, 180]));
+    projTest('aea', hasMeridians([-180, 180]));
+    projTest('+proj=aea +lat_1=30 +lat_2=55', hasMeridians([-180, 180]));
+    projTest('+proj=bertin1953', hasOutline);
+    projTest('+proj=cupola', hasMeridians([-168.977, 180]));
+    projTest('+proj=ortho', hasOutline);
+    projTest('+proj=ortho +lat_0=60 +lon_0=-120', hasOutline);
+    projTest('+proj=nsper +lat_0=30 +lon_0=80 +h=1e8', hasOutline);
+  });
+
+  describe('-graticule polygon tests', function() {
+
+
+  })
+
+  it('create an outline matching the polygon boundary', async function() {
+    var base = '-i test/data/geojson/world_land.json -proj +proj=robin densify -graticule ';
+    var polygonOut = await api.applyCommands(base + 'polygon -o polygon.json');
+    var outlineOut = await api.applyCommands(base + 'outline -o outline.json');
+    var polygon = JSON.parse(polygonOut['polygon.json']).geometries[0];
+    var outline = JSON.parse(outlineOut['outline.json']).geometries[0];
+    assert.equal(outline.type, 'LineString');
+    // Polygon and polyline exporters use opposite ring winding.
+    assert.deepEqual(outline.coordinates, polygon.coordinates[0].slice().reverse());
+  });
+
+  it('name an outline layer outline', function(done) {
+    api.internal.testCommands('-graticule outline', function(err, dataset) {
+      if (err) return done(err);
+      assert.equal(dataset.layers[0].name, 'outline');
+      assert.equal(dataset.layers[0].geometry_type, 'polyline');
+      done();
+    });
+  });
+
+  it('base= shifts meridians away from 0', function(done) {
+    api.internal.testCommands('-graticule interval=10 base=5', function(err, dataset) {
+      if (err) return done(err);
+      var recs = dataset.layers[0].data.getRecords();
+      var meridians = recs.filter(r => r.type == 'meridian').map(r => r.value);
+      assert(meridians.includes(5));
+      assert(meridians.includes(-5));
+      assert(!meridians.includes(0));
+      assert(!meridians.includes(10));
+      // Edge meridians of a latlong graticule are independent of the grid phase
+      assert(meridians.includes(-180));
+      assert(meridians.includes(180));
+      done();
+    });
+  });
+
+  it('+ is accepted, and the target layer is kept either way', async function() {
+    var cmd = '-rectangle bbox=0,0,10,10 name=a -graticule ';
+    var withPlus = await api.applyCommands(cmd + '+ -o target=* format=geojson');
+    var without = await api.applyCommands(cmd + '-o target=* format=geojson');
+    assert.deepEqual(Object.keys(withPlus).sort(), ['a.json', 'graticule.json']);
+    assert.deepEqual(Object.keys(without).sort(), ['a.json', 'graticule.json']);
+  });
+
+  it('create latlong graticule if no data has been loaded', function(done) {
+
+    api.internal.testCommands('-graticule', function(err, dataset) {
+      assert.equal(dataset.layers[0].name, 'graticule');
+      assert(api.internal.getDatasetCRS(dataset).is_latlong);
+      done();
+    });
+  });
+
+  it('reproject to match dataset with known projection', function(done) {
+
+    api.internal.testCommands('-i test/data/shapefile/three_points.shp -proj +proj=robin -graticule', function(err, dataset) {
+      var graticule = dataset.layers[0];
+      var bbox = api.internal.getLayerBounds(graticule, dataset.arcs);
+      assert.equal(graticule.name, 'graticule');
+      assert(!api.internal.probablyDecimalDegreeBounds(bbox));
+      done();
+    });
+  })
+
+  describe('projecting a lat-long graticule', function() {
+    async function getAntimeridianValues(proj) {
+      var out = await api.applyCommands(`-graticule -proj ${proj} -o graticule.json`);
+      var json = JSON.parse(out['graticule.json']);
+      var values = json.features.filter(feat => {
+        return feat.properties.type == 'meridian' && Math.abs(feat.properties.value) == 180;
+      }).map(feat => feat.properties.value);
+      return sorted(Array.from(new Set(values)));
+    }
+
+    it('a tilted globe gets one antimeridian, not two on top of each other', async function() {
+      assert.deepEqual(await getAntimeridianValues('+proj=ortho +lat_0=50'), [180]);
+      assert.deepEqual(await getAntimeridianValues('+proj=nsper +h=3000000 +lat_0=50'), [180]);
+    });
+
+    it('a rotated world projection gets one antimeridian', async function() {
+      assert.deepEqual(await getAntimeridianValues('+proj=robin +lon_0=90'), [180]);
+    });
+
+    it('a world projection bounded by the antimeridian keeps both edges', async function() {
+      assert.deepEqual(await getAntimeridianValues('+proj=robin'), [-180, 180]);
+    });
+  });
+});
+

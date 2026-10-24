@@ -1,0 +1,423 @@
+
+import { getHighPrecisionSnapInterval, snapCoordsByInterval } from '../paths/mapshaper-snapping';
+import { convertIntervalParam } from '../geom/mapshaper-units';
+import { debug, error } from '../utils/mapshaper-logging';
+import { profileStart, profileEnd } from '../utils/mapshaper-profile';
+import { NodeCollection } from '../topology/mapshaper-nodes';
+import { getDatasetCRS } from '../crs/mapshaper-projections';
+import { layerHasPaths } from '../dataset/mapshaper-layer-utils';
+import { cleanShapes } from '../paths/mapshaper-path-repair-utils';
+import { buildTopology } from '../topology/mapshaper-topology';
+import { editShapes } from '../paths/mapshaper-shape-utils';
+import { findSegmentIntersections } from '../paths/mapshaper-segment-intersection';
+import { cleanArcReferences, deleteUnusedArcs } from './mapshaper-arc-clean';
+import geom from '../geom/mapshaper-geom';
+import {
+  markArcsChanged,
+  markLayerChanged,
+  noteArcsWillChange,
+  noteLayerWillChange
+} from '../undo/mapshaper-undo-tracking';
+
+// Functions for dividing polygons and polygons at points where arc-segments intersect
+
+// TODO:
+//    Consider inserting cut points on import, when building initial topology
+//    Improve efficiency (e.g. only update ArcCollection once)
+//    Remove junk arcs (collapsed and duplicate arcs) instead of just removing
+//       references to them
+
+// Divide a collection of arcs at points where segments intersect
+// and re-index the paths of all the layers that reference the arc collection.
+// (in-place)
+export function addIntersectionCuts(dataset, _opts) {
+  profileStart('addIntersectionCuts');
+  var opts = _opts || {};
+  var arcs = dataset.arcs;
+  var arcBounds, snapDist, nodes;
+  // Arcs that no layer uses would otherwise be snapped and cut along with the
+  // rest, adding nodes and vertices to the arcs they touch.
+  if (arcs) deleteUnusedArcs(dataset);
+  arcBounds = arcs && arcs.getBounds();
+  if (!arcBounds || !arcBounds.hasBounds()) {
+    profileEnd('addIntersectionCuts');
+    return new NodeCollection([]);
+  }
+  noteArcsWillChange(arcs, {operation: 'addIntersectionCuts'});
+  dataset.layers.forEach(function(lyr) {
+    if (layerHasPaths(lyr)) {
+      noteLayerWillChange(lyr, {operation: 'addIntersectionCuts', unit: 'shapes'});
+    }
+  });
+
+  if (opts.snap_interval) {
+    snapDist = convertIntervalParam(opts.snap_interval, getDatasetCRS(dataset));
+  } else if (!opts.no_snap && arcBounds.hasBounds()) {
+    snapDist = getHighPrecisionSnapInterval(arcBounds.toArray());
+  } else {
+    snapDist = 0;
+  }
+  debug('addIntersectionCuts() snap dist:', snapDist);
+
+  // bake-in any simplification (bug fix; before, -simplify followed by dissolve2
+  // used to reset simplification)
+  profileStart('flatten');
+  arcs.flatten();
+  profileEnd('flatten');
+
+  var changed = snapAndCut(dataset, snapDist);
+
+  // Detect topology again if coordinates have changed
+  if (changed || opts.rebuild_topology) {
+    profileStart('buildTopology');
+    buildTopology(dataset);
+    profileEnd('buildTopology');
+  }
+  // Remove degenerate shapes
+  // Without this step, pathfinder function would encounter dead ends.
+  profileStart('cleanShapes');
+  dataset.layers.forEach(function(lyr) {
+    if (layerHasPaths(lyr)) {
+      cleanShapes(lyr.shapes, arcs, lyr.geometry_type);
+    }
+  });
+  profileEnd('cleanShapes');
+  // Further clean-up -- remove duplicate and unused arcs, etc.
+  profileStart('cleanArcReferences');
+  nodes = cleanArcReferences(dataset);
+  profileEnd('cleanArcReferences');
+  dataset.layers.forEach(function(lyr) {
+    if (layerHasPaths(lyr)) {
+      markLayerChanged(lyr, {operation: 'addIntersectionCuts', unit: 'shapes'});
+    }
+  });
+  markArcsChanged(arcs, {operation: 'addIntersectionCuts'});
+  profileEnd('addIntersectionCuts');
+  return nodes;
+}
+
+function snapAndCut(dataset, snapDist) {
+  profileStart('snapAndCut');
+  var arcs = dataset.arcs;
+  var cutOpts = snapDist > 0 ? {tolerance: snapDist} : {tolerance: 0};
+
+  // Probe for intersections before any modification. If the input has none,
+  // every pass of the loop below is provably a no-op: snap() can only
+  // consolidate FP noise around intersection points, cutPathsAtIntersections
+  // inserts cut points only where segments cross, and buildTopology is gated
+  // on coordsHaveChanged. So we can return early and skip a ~O(V log V) snap
+  // that would snap zero points, which is the dominant cost of robust
+  // dissolve on already-clean polygon input.
+  //
+  // limit=1 makes the probe cheap on dirty input too — it stops the stripe
+  // scan after the first hit, so the probe's full cost is only paid on
+  // truly clean input (where it replaces the equivalent scan that
+  // cutPathsAtIntersections would otherwise do on pass 1).
+  var probeOpts = {tolerance: cutOpts.tolerance, limit: 1};
+  profileStart('probeIntersections');
+  var probe = findSegmentIntersections(arcs, probeOpts);
+  profileEnd('probeIntersections');
+  if (probe.length === 0) {
+    debug('[snapAndCut] skipped (no intersections)');
+    profileEnd('snapAndCut');
+    return false;
+  }
+
+  var coordsHaveChanged = false;
+  var snapCount = 0, dupeCount, cutCount;
+  var maxLoops = 4, loopCount = 0;
+  // After pass 1, snap & dedup can be skipped IF pass 1 snap moved nothing:
+  // cuts inserted exact intersection coordinates that match either an existing
+  // vertex (handled by formatIntersectingSegment) or a fresh point. The only
+  // way a fresh cut point could need re-snapping is if it falls within snap
+  // interval of a third (unrelated) vertex by coincidence; in clean data that
+  // didn't happen on pass 1 either, so we skip the redundant O(V log V) sort.
+  var skipFollowupSnap;
+
+  do {
+    loopCount++;
+    cutCount = 0;
+    skipFollowupSnap = loopCount > 1 && snapCount === 0;
+    if (!skipFollowupSnap) {
+      profileStart('snap');
+      snapCount = snapCoordsByInterval(arcs, snapDist);
+      profileEnd('snap');
+      profileStart('dedupCoords');
+      dupeCount = arcs.dedupCoords();
+      profileEnd('dedupCoords');
+    } else {
+      snapCount = 0;
+      dupeCount = 0;
+    }
+    if (snapCount > 0 || cutCount > 0 || loopCount == 1) {
+      profileStart('cutPathsAtIntersections');
+      cutCount = cutPathsAtIntersections(dataset, cutOpts);
+      profileEnd('cutPathsAtIntersections');
+    }
+    coordsHaveChanged |= (snapCount + dupeCount + cutCount) > 0;
+    debug("[snapAndCut] pass:", loopCount, "snaps:", snapCount, "dupes:", dupeCount, "cuts:", cutCount, skipFollowupSnap ? "(skipped snap)" : "");
+  } while (loopCount < maxLoops && cutCount > 0);
+  profileEnd('snapAndCut');
+
+  // should this be added?
+  // if (cutCount > 0 && loopCount == maxLoops) {
+  //   snapCount = snapCoordsByInterval(arcs, snapDist);
+  //   arcs.dedupCoords(); // need to do this here?
+  // }
+
+  return coordsHaveChanged;
+}
+
+
+// Return a function for updating a path (array of arc ids)
+// @map array generated by insertCutPoints()
+// @arcCount number of arcs in divided collection (kludge)
+function getDividedArcUpdater(map, arcCount) {
+  return function(ids) {
+    var ids2 = [];
+    for (var j=0; j<ids.length; j++) {
+      remapArcId2(ids[j], ids2);
+    }
+    return ids2;
+  };
+
+  function remapArcId2(id, ids) {
+    var rev = id < 0,
+        absId = rev ? ~id : id,
+        min = map[absId],
+        max = (absId >= map.length - 1 ? arcCount : map[absId + 1]) - 1,
+        id2;
+    do {
+      if (rev) {
+        id2 = ~max;
+        max--;
+      } else {
+        id2 = min;
+        min++;
+      }
+      ids.push(id2);
+    } while (max - min >= 0);
+  }
+}
+
+
+export function cutPathsAtIntersections(dataset, opts) {
+  var n = dataset.arcs.getPointCount();
+  var map = divideArcs(dataset.arcs, opts);
+  var n2 = dataset.arcs.getPointCount();
+  remapDividedArcs(dataset, map);
+  return n2 - n;
+}
+
+export function remapDividedArcs(dataset, map) {
+  var remapPath = getDividedArcUpdater(map, dataset.arcs.size());
+  dataset.layers.forEach(function(lyr) {
+    if (layerHasPaths(lyr)) {
+      editShapes(lyr.shapes, remapPath);
+    }
+  });
+}
+
+
+// Divides a collection of arcs at points where arc paths cross each other
+// Returns array for remapping arc ids
+export function divideArcs(arcs, opts) {
+  profileStart('findClippingPoints');
+  var points = findClippingPoints(arcs, opts);
+  profileEnd('findClippingPoints');
+  // TODO: avoid the following if no points need to be added
+  profileStart('insertCutPoints');
+  var map = insertCutPoints(points, arcs);
+  profileEnd('insertCutPoints');
+  // segment-point intersections currently create duplicate points
+  // TODO: consider dedup in a later cleanup pass?
+  // arcs.dedupCoords();
+  return map;
+}
+
+export function findClippingPoints(arcs, opts) {
+  profileStart('findSegmentIntersections');
+  var intersections = findSegmentIntersections(arcs, opts);
+  profileEnd('findSegmentIntersections');
+  profileStart('convertIntersectionsToCutPoints');
+  var data = arcs.getVertexData();
+  var points = convertIntersectionsToCutPoints(intersections, data.xx, data.yy);
+  profileEnd('convertIntersectionsToCutPoints');
+  return points;
+}
+
+// Inserts array of cutting points into an ArcCollection
+// Returns array for remapping arc ids
+export function insertCutPoints(unfilteredPoints, arcs) {
+  var data = arcs.getVertexData(),
+      xx0 = data.xx,
+      yy0 = data.yy,
+      nn0 = data.nn,
+      i0 = 0,
+      i1 = 0,
+      nn1 = [],
+      srcArcTotal = arcs.size(),
+      map = new Uint32Array(srcArcTotal);
+  profileStart('sortCutPoints');
+  var sorted = sortCutPoints(unfilteredPoints, xx0, yy0);
+  profileEnd('sortCutPoints');
+  profileStart('filterSortedCutPoints');
+  var points = filterSortedCutPoints(sorted, arcs);
+  profileEnd('filterSortedCutPoints');
+  // Skip the full xx/yy rewrite when nothing actually needs cutting.
+  // map[k] stores the destination arc-id at which source arc k begins; with no
+  // cuts, source arc k becomes destination arc k (map is the identity).
+  if (points.length === 0) {
+    for (var k = 0; k < srcArcTotal; k++) {
+      map[k] = k;
+    }
+    return map;
+  }
+  profileStart('rewriteVertexData');
+  var destPointTotal = arcs.getPointCount() + points.length * 2,
+      xx1 = new Float64Array(destPointTotal),
+      yy1 = new Float64Array(destPointTotal),
+      n0, n1, arcLen, p;
+
+  points.reverse(); // reverse sorted order to use pop()
+  p = points.pop();
+
+  for (var srcArcId=0, destArcId=0; srcArcId < srcArcTotal; srcArcId++) {
+    // start merging an arc
+    arcLen = nn0[srcArcId];
+    map[srcArcId] = destArcId;
+    n0 = 0;
+    n1 = 0;
+    while (n0 < arcLen) {
+      // copy another point
+      xx1[i1] = xx0[i0];
+      yy1[i1] = yy0[i0];
+      i1++;
+      n1++;
+      while (p && p.i == i0) {
+        // interpolate any clip points that fall within the current segment
+        xx1[i1] = p.x;
+        yy1[i1] = p.y;
+        i1++;
+        n1++;
+        nn1[destArcId++] = n1; // end current arc at intersection
+        n1 = 0; // begin new arc
+        xx1[i1] = p.x;
+        yy1[i1] = p.y;
+        i1++;
+        n1++;
+        p = points.pop();
+      }
+      n0++;
+      i0++;
+    }
+    nn1[destArcId++] = n1;
+  }
+
+  if (i1 != destPointTotal) error("[insertCutPoints()] Counting error");
+  arcs.updateVertexData(nn1, xx1, yy1, null);
+  profileEnd('rewriteVertexData');
+  return map;
+}
+
+function convertIntersectionsToCutPoints(intersections, xx, yy) {
+  var points = [], ix, a, b;
+  for (var i=0, n=intersections.length; i<n; i++) {
+    ix = intersections[i];
+    a = getCutPoint(ix.x, ix.y, ix.a[0], ix.a[1], xx, yy);
+    b = getCutPoint(ix.x, ix.y, ix.b[0], ix.b[1], xx, yy);
+    if (a) points.push(a);
+    if (b) points.push(b);
+  }
+  return points;
+}
+
+// i, j: indexes of segment endpoints in xx, yy, or of a single endpoint
+//   if point x,y falls on an endpoint
+// Assumes: i <= j
+export function getCutPoint(x, y, i, j, xx, yy) {
+  if (j < i || j > i + 1) {
+    error("Out-of-sequence arc ids:", i, j);
+  }
+
+  // Removed out-of-range check: small out-of-range intersection points are now allowed.
+  // (Such points may occur due to fp rounding, when intersections occur along
+  // vertical or horizontal segments)
+  // if (geom.outsideRange(x, ix, jx) || geom.outsideRange(y, iy, jy)) {
+    // return null;
+  // }
+
+  // Removed endpoint check: intersecting arcs need to be cut both at vertices
+  // and between vertices, so pathfinding functions will work correctly.
+  // if (x == ix && y == iy || x == jx && y == jy) {
+    // return null;
+  // }
+  return {x: x, y: y, i: i};
+}
+
+// Sort insertion points in order of insertion
+// Insertion order: ascending id of first endpoint of containing segment and
+//   ascending distance from same endpoint.
+export function sortCutPoints(points, xx, yy) {
+  var len = points.length;
+  if (!xx) {
+    points.sort(function(a, b) { return a.i - b.i; });
+    return points;
+  }
+  // Sort a permutation of indices rather than decorating each point with a
+  // (point, dist) tuple: the keys live in contiguous typed arrays (cache-
+  // friendly, no per-point allocation), and the comparator reads them by index
+  // instead of chasing object properties. This is ~2x faster, and matters most
+  // when many intersections share one segment, where the sort falls through to
+  // the secondary distance key on nearly every comparison.
+  var segId = new Int32Array(len); // first-endpoint index of each point
+  var dist = new Float64Array(len); // squared distance from that endpoint
+  var order = new Uint32Array(len);
+  for (var k = 0; k < len; k++) {
+    var p = points[k];
+    var dx = p.x - xx[p.i];
+    var dy = p.y - yy[p.i];
+    segId[k] = p.i;
+    dist[k] = dx * dx + dy * dy;
+    order[k] = k;
+  }
+  order.sort(function(a, b) {
+    return segId[a] - segId[b] || dist[a] - dist[b];
+  });
+  var sorted = new Array(len);
+  for (var m = 0; m < len; m++) {
+    sorted[m] = points[order[m]];
+  }
+  for (var w = 0; w < len; w++) {
+    points[w] = sorted[w];
+  }
+  return points;
+}
+
+// Removes duplicate points and arc endpoints
+export function filterSortedCutPoints(points, arcs) {
+  var filtered = [],
+      pointId = 0;
+  arcs.forEach2(function(arcId, i, n, xx, yy) {
+    var j = i + n - 1, // idx of second endpoint
+        x1 = xx[i],
+        y1 = yy[i],
+        x2 = xx[j],
+        y2 = yy[j],
+        p, pp;
+
+    while (pointId < points.length && points[pointId].i <= j) {
+      p = points[pointId];
+      pointId++;
+      pp = filtered[filtered.length - 1]; // previous point
+      if (p.x == x1 && p.y == y1 && p.i == i || p.x == x2 && p.y == y2 && p.i >= j - 1) {
+        // clip point is an arc endpoint -- discard
+      } else if (pp && pp.x == p.x && pp.y == p.y && pp.i == p.i) {
+        // clip point is a duplicate -- discard
+      } else {
+        filtered.push(p);
+      }
+    }
+  });
+  return filtered;
+}

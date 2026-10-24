@@ -1,0 +1,177 @@
+import assert from 'assert';
+import { renderPoint } from '../src/svg/svg-symbols';
+import { setLoggingFunctions, getLoggingSetter } from '../src/utils/mapshaper-logging';
+
+describe('svg-symbols.js', function () {
+  describe('renderPoint()', function () {
+    it('renders a circle', function() {
+      var defn = {
+        type: 'circle',
+        fill: 'magenta',
+        opacity: 0.5
+      };
+      var output = renderPoint({'svg-symbol': defn});
+      var target = {
+        tag: 'circle',
+        properties: {cx: 0, cy: 0, fill: 'magenta', opacity: 0.5}
+      };
+      assert.deepEqual(output, target);
+    });
+
+    it('accepts pre-rendered objects', function() {
+      var defn = {
+        tag: 'g',
+        children: [{
+          tag: 'circle',
+          properties: {
+            r: 4
+          }
+        }]
+      };
+      var out = renderPoint({'svg-symbol': defn});
+      assert.deepEqual(out, defn);
+    });
+
+    it('renders a group', function() {
+      var defn = {
+        type: 'group',
+        parts: [{
+          type: 'circle',
+          fill: 'magenta',
+          opacity: 0.5
+        }, {
+          type: 'line',
+          stroke: 'yellow',
+          dx: 1,
+          dy: -1
+        }]
+      };
+      var output = renderPoint({'svg-symbol': defn});
+      var target = {
+        tag: 'g',
+        properties: {},
+        children: [{
+          tag: 'circle',
+          properties: {cx: 0, cy: 0, fill: 'magenta', opacity: 0.5}
+        }, {
+          // tag: 'line',
+          tag: 'path',
+          properties: {
+            stroke: 'yellow',
+            d: 'M 0 0 1 -1'
+            // x1: 0,
+            // y1: 0,
+            // x2: 1,
+            // y2: -1
+          }
+        }]};
+      assert.deepEqual(output, target);
+    });
+
+    it('renders a square icon', function() {
+      var output = renderPoint({icon: 'square', 'icon-size': 8, fill: 'red'});
+      var target = {
+        tag: 'rect',
+        properties: {x: -4, y: -4, width: 8, height: 8, fill: 'red'}
+      };
+      assert.deepEqual(output, target);
+    });
+
+    it('renders a ring icon using fill as fallback color', function() {
+      var output = renderPoint({icon: 'ring', 'icon-size': 8, fill: 'red'});
+      var target = {
+        tag: 'circle',
+        properties: {cx: 0, cy: 0, r: 3.25, fill: 'none', stroke: 'red', 'stroke-width': 1.5}
+      };
+      assert.deepEqual(output, target);
+    });
+
+    it('lets icon-color override fill', function() {
+      var output = renderPoint({icon: 'circle', 'icon-size': 8, fill: 'red', 'icon-color': 'blue'});
+      var target = {
+        tag: 'circle',
+        properties: {cx: 0, cy: 0, r: 3.5, fill: 'blue'}
+      };
+      assert.deepEqual(output, target);
+    });
+
+    it('lets icon-opacity override the label opacity on the symbol', function() {
+      var output = renderPoint({icon: 'circle', 'icon-size': 8, fill: 'red', opacity: 0.2, 'icon-opacity': 0.9});
+      var target = {
+        tag: 'circle',
+        properties: {cx: 0, cy: 0, r: 3.5, fill: 'red', opacity: 0.9}
+      };
+      assert.deepEqual(output, target);
+    });
+
+    it('applies an icon-opacity of zero', function() {
+      var output = renderPoint({icon: 'circle', 'icon-size': 8, 'icon-opacity': 0});
+      assert.equal(output.properties.opacity, 0);
+    });
+
+    it('leaves the symbol opacity alone if icon-opacity is not a number', function() {
+      var output = renderPoint({icon: 'circle', 'icon-size': 8, opacity: 0.2, 'icon-opacity': undefined});
+      assert.equal(output.properties.opacity, 0.2);
+    });
+
+    it('applies icon-opacity to a ring, which has no fill to fade', function() {
+      var output = renderPoint({icon: 'ring', 'icon-size': 8, fill: 'red', 'icon-opacity': 0.5});
+      var target = {
+        tag: 'circle',
+        properties: {cx: 0, cy: 0, r: 3.25, fill: 'none', stroke: 'red', 'stroke-width': 1.5, opacity: 0.5}
+      };
+      assert.deepEqual(output, target);
+    });
+
+    it('fades the symbol without fading the text', function() {
+      var output = renderPoint({
+        'label-text': 'Paris', icon: 'circle', 'icon-size': 8,
+        opacity: 0.8, 'icon-opacity': 0.3
+      });
+      assert.equal(output.tag, 'g');
+      assert.equal(output.children[0].properties.opacity, 0.3);
+      assert.equal(output.children[1].properties.opacity, 0.8);
+      assert.equal('icon-opacity' in output.children[1].properties, false);
+    });
+
+    it('applies icon-color to r circles', function() {
+      var output = renderPoint({r: 4, 'icon-color': 'blue'});
+      var target = {
+        tag: 'circle',
+        properties: {cx: 0, cy: 0, r: 4, fill: 'blue'}
+      };
+      assert.deepEqual(output, target);
+    });
+
+    it('renders a star icon with a default black fill', function() {
+      var output = renderPoint({icon: 'star', 'icon-size': 10});
+      assert.equal(output.tag, 'path');
+      assert.equal(output.properties.fill, 'black');
+      assert(output.properties.d.includes('M 0 -5.5'));
+    });
+
+    it('renders an unsupported icon name as nothing, without logging', function() {
+      // Rendering runs once per feature (and repeatedly in the GUI), so an
+      // unsupported name must not log here; -style warns when it is assigned.
+      var msgs = [];
+      var restoreLogging = getLoggingSetter();
+      setLoggingFunctions(
+        function() { msgs.push(formatLogArgs(arguments)); },
+        function() {},
+        function(s) { throw new Error(s); },
+        function() { msgs.push(formatLogArgs(arguments)); });
+      try {
+        var output = renderPoint({icon: 'triangle', 'icon-size': 8, fill: 'red'});
+        assert.deepEqual(output, {tag: 'g', properties: {}, children: []});
+      } finally {
+        restoreLogging();
+      }
+      assert.deepEqual(msgs, []);
+    });
+
+  })
+})
+
+function formatLogArgs(args) {
+  return Array.prototype.join.call(args, ' ');
+}

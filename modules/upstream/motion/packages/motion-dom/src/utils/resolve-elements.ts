@@ -1,0 +1,56 @@
+import { activeScope } from "../scope/active"
+
+export type ElementOrSelector =
+    | Element
+    | Element[]
+    | NodeListOf<Element>
+    | string
+    | null
+    | undefined
+
+export interface WithQuerySelectorAll {
+    querySelectorAll: Element["querySelectorAll"]
+}
+
+export interface AnimationScope<T = any> {
+    readonly current: T
+    animations: any[] // TODO: Refactor to types package AnimationPlaybackControls[]
+    /**
+     * Set by useAnimate() from MotionConfig, so timelines created with
+     * this scope follow the same settings.
+     */
+    reduceMotion?: boolean
+    skipAnimations?: boolean
+}
+
+export interface SelectorCache {
+    [key: string]: NodeListOf<Element>
+}
+
+export function resolveElements(
+    elementOrSelector: ElementOrSelector,
+    scope?: AnimationScope,
+    selectorCache?: SelectorCache
+): Element[] {
+    if (elementOrSelector == null) {
+        return []
+    }
+
+    if (elementOrSelector instanceof EventTarget) {
+        return [elementOrSelector]
+    } else if (typeof elementOrSelector === "string") {
+        const root: WithQuerySelectorAll = scope
+            ? scope.current
+            : activeScope.current?.root || document
+
+        const elements =
+            selectorCache?.[elementOrSelector] ??
+            root.querySelectorAll(elementOrSelector)
+
+        return elements ? Array.from(elements) : []
+    }
+
+    return Array.from(elementOrSelector).filter(
+        (element): element is Element => element != null
+    )
+}

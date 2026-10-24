@@ -1,0 +1,630 @@
+import { El } from './gui-el';
+import {
+  claimFieldKeys, isTextInput, opensAMenu, releasePanelFocus
+} from './gui-panel-focus';
+import {
+  makeColorRow, makePanelActionButton, makePanelSection, setPanelButtonDisabled
+} from './gui-panel-controls';
+import { SizeField } from './gui-size-field';
+import { internal } from './gui-core';
+import { formatEditingStatus } from './gui-editing-status';
+import { runGuiEditCommand } from './gui-edit-command';
+import { quoteCommandValue } from './gui-command-utils';
+import {
+  parseOpacityValue, formatOpacityPct, formatColorOpacityPct, getNextStrokeWidth,
+  getNextLadderValue
+} from './gui-style-values';
+import { getSelectionChangeTest } from './gui-selection-change';
+import { FloatingToolbar } from './gui-floating-toolbar';
+import { getRestyleSymbolCommand } from './gui-symbol-commands';
+import { getAddIconOptions, getDefaultIconStyle } from './gui-symbol-style';
+var defaultCircleRadius = 0;
+var defaultCircleFill = '#000000';
+
+export function PointStyleTool(gui) {
+  var parent = gui.container.findChild('.mshp-main-map');
+  var panel = El('div').addClass('label-style-panel point-style-panel rollover').appendTo(parent).hide();
+  var title, noteSection, labelsSection, circlesSection, symbolsSection, labelNoteSection;
+  var symbolNote, convertRow, convertBtn;
+  var toolbar, stylesBtn;
+  // whether the mode is on, which the panel no longer shows: it can be hidden
+  var active = false;
+  var panelHidden = false;
+  var createFieldSelect, createExprInput, createCopyCheckbox, createLabelsBtn;
+  var editingRow, editingStatus, clearLink;
+  var circleControlRows = [];
+  var circleRadiusField, circleStrokeWidthField;
+  var circleFillControl, circleStrokeControl;
+  var targetLayer = null;
+  var hit = null;
+  var selectionChanged = getSelectionChangeTest();
+
+  initPanel();
+
+  this.open = function(lyr, dataset) {
+    if (!layerCanBeStyled(lyr)) return;
+    if (!gui.map.isActiveLayer(lyr)) {
+      modelSelectLayer(lyr, dataset);
+    }
+    gui.interaction.setMode('point_style');
+  };
+
+  gui.on('interaction_mode_change', function(e) {
+    if (modeMatchesActiveLayer(e.mode)) {
+      turnOn();
+    } else {
+      turnOff();
+    }
+  });
+
+  gui.model.on('update', function() {
+    if (active && !modeMatchesActiveLayer(gui.interaction.getMode())) {
+      gui.interaction.turnOff();
+    } else if (active) {
+      updateControls();
+    }
+  });
+
+  hit = gui.map.getHitControl && gui.map.getHitControl();
+  if (hit) {
+    hit.on('change', function(e) {
+      if (!selectionChanged(getSelectionIds())) return;
+      if (e.mode == 'point_style') {
+        updateControls();
+      }
+    });
+  }
+
+  function initPanel() {
+    // The panel's fields keep the keyboard while the caret is in them, and
+    // give it up when they are finished with; see gui-panel-focus.mjs.
+    claimFieldKeys(panel.node(), {
+      revert: updateControls,
+      release: releaseFocus
+    });
+    panel.node().addEventListener('click', function(e) {
+      if (isTextInput(document.activeElement) || opensAMenu(e.target)) return;
+      releaseFocus();
+    });
+
+    var header = El('div').addClass('label-style-panel-title').appendTo(panel);
+    title = El('span').appendTo(header).text('Point symbols');
+    El('button').addClass('label-style-close').appendTo(header).text('×').on('click', function() {
+      setPanelShown(false);
+    });
+
+    initNoteSections();
+    initCreateLabelsSection();
+    initCreateCirclesSection();
+    initSymbolsSection();
+  }
+
+  function initNoteSections() {
+    noteSection = El('div').addClass('label-style-section').appendTo(panel);
+    El('div').addClass('point-style-note').appendTo(noteSection).text('This layer contains unstyled points.');
+
+    labelNoteSection = El('div').addClass('label-style-section').appendTo(panel);
+    El('div').addClass('point-style-note').appendTo(labelNoteSection)
+      .text('This layer is rendered as labels. Use the label tool to edit them.');
+  }
+
+  function initCreateLabelsSection() {
+    labelsSection = makePanelSection(panel, 'Labels');
+
+    var fieldRow = El('label').addClass('label-style-row').appendTo(labelsSection);
+    El('span').appendTo(fieldRow).text('Label field');
+    createFieldSelect = El('select').appendTo(fieldRow).on('change', function() {
+      var field = createFieldSelect.node().value;
+      if (field) {
+        createExprInput.node().value = getFieldExpression(field);
+      }
+      updateCreateLabelsButton();
+    });
+
+    var exprRow = El('label').addClass('label-style-row label-create-expression-row').appendTo(labelsSection);
+    El('span').appendTo(exprRow).text('or expression');
+    createExprInput = El('input')
+      .attr('type', 'text')
+      .appendTo(exprRow)
+      .on('input', updateCreateLabelsButton)
+      .on('change', updateCreateLabelsButton);
+
+    var btnRow = El('div').addClass('label-style-row point-create-labels-row').appendTo(labelsSection);
+    createLabelsBtn = makePanelActionButton(btnRow, 'Create', createLabels);
+    var copyLabel = El('label').addClass('point-create-copy-label').appendTo(btnRow);
+    createCopyCheckbox = El('input').attr('type', 'checkbox').appendTo(copyLabel);
+    El('span').appendTo(copyLabel).text('as new layer');
+  }
+
+  function initCreateCirclesSection() {
+    circlesSection = makePanelSection(panel, 'Circles');
+    // The panel's own title says what the points are, and the section is the
+    // only thing in the panel.
+    circlesSection.findChild('.label-style-section-title').classed('hidden', true);
+
+    editingRow = El('div').addClass('label-style-row label-style-selection-row').appendTo(circlesSection);
+    editingStatus = El('span').addClass('label-editing-status').appendTo(editingRow);
+    clearLink = El('span').addClass('label-editing-clear colored-text').appendTo(editingRow).text('deselect').on('click', clearSelection);
+
+    circleFillControl = addCircleColorControl('Fill', 'fill');
+    circleStrokeControl = addCircleColorControl('Stroke', 'stroke');
+    circleControlRows.push(circleFillControl.row, circleStrokeControl.row);
+
+    // Each size beside the colour it goes with: the radius beside the fill,
+    // the stroke's width beside its colour, as in the line and polygon panels.
+    var radiusCell = circleFillControl.aside;
+    var widthCell = circleStrokeControl.aside;
+    El('span').appendTo(widthCell).text('Width');
+    circleStrokeWidthField = new SizeField(widthCell, {
+      min: 0,
+      decimals: 2, // quarter-pixel hairlines, which the ladder below steps through
+      title: 'Stroke width in px',
+      onSet: function(value) {
+        setCircleStrokeWidth(value);
+        applyCircleStyles();
+      },
+      // Up a ladder of widths rather than by a fixed amount: the useful ones
+      // are close together at the hairline end and far apart above 2px.
+      onStep: function(delta) {
+        setCircleStrokeWidth(getNextStrokeWidth(getCircleStrokeWidth(), delta > 0 ? 1 : -1));
+        applyCircleStyles();
+      },
+      onDone: releaseFocus
+    });
+    El('span').appendTo(radiusCell).text('Radius');
+    circleRadiusField = new SizeField(radiusCell, {
+      min: 0,
+      title: 'Circle radius in px',
+      onSet: function(value) {
+        setCircleRadius(value);
+        applyCircleStyles();
+      },
+      onStep: function(delta) {
+        setCircleRadius(getNextCircleRadius(getCircleRadiusForNudge(), delta > 0 ? 1 : -1));
+        applyCircleStyles();
+      },
+      onDone: releaseFocus
+    });
+  }
+
+  function initSymbolsSection() {
+    symbolsSection = makePanelSection(panel, 'Symbols');
+    convertRow = El('div').addClass('label-style-row label-panel-button-row').appendTo(symbolsSection);
+    convertBtn = makePanelActionButton(convertRow, 'Convert to symbols', convertToSymbols);
+    symbolNote = El('div').addClass('point-style-note').appendTo(symbolsSection);
+  }
+
+  function addCircleColorControl(label, field) {
+    var control = makeColorRow(circlesSection, {
+      label: label,
+      // Every circle property is applied together, from what the controls are
+      // showing: the fields are one style, not five. An emptied colour field
+      // unsets the colour, which applying the fields would leave alone.
+      onColor: function(color) {
+        if (color) {
+          applyCircleStyles();
+        } else if (!styleFieldIsUnset(field)) {
+          runStyleCommand([field + '=' + quoteCommandValue('')], 'Remove circle ' + field);
+        } else {
+          updateControls();
+        }
+      },
+      onOpacity: applyCircleStyles,
+      revert: updateControls
+    });
+    control.field = field;
+    return control;
+  }
+
+  function releaseFocus() {
+    releasePanelFocus(panel.node());
+  }
+
+  function turnOn() {
+    active = true;
+    targetLayer = getActiveLayer();
+    renderCreateFields();
+    updateControls();
+    if (!panelHidden) panel.show();
+  }
+
+  function turnOff() {
+    active = false;
+    hidePanel();
+    if (toolbar) toolbar.hide();
+    targetLayer = null;
+  }
+
+  function hidePanel() {
+    circleFillControl.picker.hide();
+    circleStrokeControl.picker.hide();
+    releaseFocus();
+    panel.hide();
+  }
+
+  function setPanelShown(shown) {
+    panelHidden = !shown;
+    if (shown) {
+      panel.show();
+      updateControls();
+    } else {
+      hidePanel();
+      updateToolbar();
+    }
+  }
+
+  function exitMode() {
+    turnOff();
+    if (gui.interaction.getMode() == 'point_style') {
+      gui.interaction.turnOff();
+    }
+  }
+
+  function updateControls() {
+    syncTargetLayer();
+    var representation = getPointRepresentation();
+    updateCreateLabelsButton();
+    title.text(representation == 'circle' ? 'Circle styles' : 'Points');
+    updateEditingStatus(getSelectionIds().length);
+    toggleSection(noteSection, representation == 'unstyled');
+    toggleSection(labelsSection, representation == 'unstyled');
+    toggleSection(circlesSection, representation == 'circle');
+    toggleSection(symbolsSection, representation == 'unstyled' || representation == 'svg-symbol');
+    toggleSection(labelNoteSection, representation == 'label');
+    convertRow.classed('hidden', representation != 'unstyled');
+    setPanelButtonDisabled(convertBtn, !targetLayer || internal.getFeatureCount(targetLayer) === 0);
+    symbolNote.text(representation == 'svg-symbol' ?
+      'This layer uses SVG symbols. Use the -symbols command in the console to create arrows and other symbols.' :
+      'Use the -symbols and -style commands in the console for symbols that vary with the data, such as proportional circles and arrows.');
+    updateCircleSection(representation);
+    updateCircleControls(representation);
+    updateToolbar();
+  }
+
+  function toggleSection(section, visible) {
+    if (visible) {
+      section.show();
+    } else {
+      section.hide();
+    }
+  }
+
+  function updateCircleSection(representation) {
+    editingRow.classed('hidden', representation != 'circle');
+  }
+
+  function updateCircleControls(representation) {
+    var radius = getCommonValue('r');
+    var fill = getCommonValue('fill');
+    var stroke = getCommonValue('stroke');
+    var strokeWidth = getCommonValue('stroke-width');
+    setCircleRadius(radius);
+    setCircleColor(circleFillControl, fill);
+    setCircleColor(circleStrokeControl, stroke);
+    updateCircleOpacity(circleFillControl);
+    updateCircleOpacity(circleStrokeControl);
+    setCircleStrokeWidth(strokeWidth === '' ? 0 : strokeWidth);
+    if (representation != 'circle' && representation != 'unstyled') {
+      setCircleRadius(defaultCircleRadius);
+      setCircleColor(circleFillControl, '');
+      setCircleColor(circleStrokeControl, '');
+      circleFillControl.opacity.node().value = '';
+      circleStrokeControl.opacity.node().value = '';
+      setCircleStrokeWidth(0);
+    }
+  }
+
+  // The opacity to put in the style command: undefined to leave the property
+  // as it is, null for a field holding something that is not an opacity.
+  // A blank field has nothing to say, and 100% over an unset opacity is the
+  // default being shown rather than a value to store.
+  function getCircleOpacityToWrite(control) {
+    var str = control.opacity.node().value.trim();
+    var val = parseOpacityValue(str);
+    if (str === '') return undefined;
+    if (val === 1 && styleFieldIsUnset(control.field + '-opacity')) return undefined;
+    return val;
+  }
+
+  // A selection whose colours disagree still has colours, so an opacity unset
+  // on all of it shows as full rather than blank.
+  function updateCircleOpacity(control) {
+    var field = control.field + '-opacity';
+    control.opacity.node().value = styleFieldIsUnset(field) ?
+      formatColorOpacityPct(null, !styleFieldIsUnset(control.field)) :
+      formatOpacityPct(getCommonValue(field));
+  }
+
+  function renderCreateFields() {
+    var lyr = getActiveLayer();
+    var records = lyr && lyr.data ? lyr.data.getRecords() : [];
+    var fields = lyr && lyr.data ? lyr.data.getFields().filter(function(field) {
+      return internal.getColumnType(field, records) == 'string';
+    }) : [];
+    var value = createFieldSelect.node().value;
+    createFieldSelect.empty();
+    El('option').attr('value', '').appendTo(createFieldSelect).text('');
+    fields.forEach(function(field) {
+      El('option').attr('value', field).appendTo(createFieldSelect).text(field);
+    });
+    createFieldSelect.node().disabled = fields.length === 0;
+    createFieldSelect.node().value = fields.indexOf(value) > -1 ? value : '';
+  }
+
+  function updateCreateLabelsButton() {
+    setPanelButtonDisabled(createLabelsBtn, createExprInput.node().value.trim() === '');
+  }
+
+  function createLabels() {
+    var expr = createExprInput.node().value.trim();
+    var cmd;
+    if (!expr || !gui.console) return;
+    cmd = '-labels text=' + quoteCommandValue(expr);
+    if (createCopyCheckbox.node().checked) cmd += ' + name=labels';
+    runGuiEditCommand(gui, cmd, {
+      title: 'Create labels',
+      onSuccess: openLabelStyles
+    });
+  }
+
+  // What to do once this panel's Create button has turned a field into labels.
+  // The layer is a label layer now, which this panel can only restyle, so the
+  // label tool takes over -- the same tool the layer's own menu offers.
+  function openLabelStyles() {
+    var active = gui.model.getActiveLayer();
+    if (active && active.layer && internal.layerHasLabels(active.layer)) {
+      gui.interaction.setMode('label');
+    } else {
+      updateControls();
+    }
+  }
+
+  // The symbol tool's default symbol for every point in the layer, after
+  // which the symbol tool takes over, as the label tool does once points are
+  // labels. Converting all of them, not some, keeps the layer from being half
+  // symbols and half plain points.
+  function convertToSymbols() {
+    if (!targetLayer || internal.getFeatureCount(targetLayer) === 0) return;
+    runGuiEditCommand(gui, getRestyleSymbolCommand(getAddIconOptions(getDefaultIconStyle()), null), {
+      title: 'Convert to symbols',
+      onSuccess: function() {
+        gui.interaction.setMode('symbols');
+      }
+    });
+  }
+
+  function getToolbar() {
+    if (toolbar) return toolbar;
+    toolbar = new FloatingToolbar(gui, {name: 'point-toolbar'});
+    // The style panel's toggle, and Done, which leaves the mode -- with the
+    // panel hidden, its close button is not there to do that
+    stylesBtn = toolbar.addButton('#style-panel-icon', {tooltip: 'Hide style panel'})
+      .on('click', function() { setPanelShown(panelHidden); });
+    toolbar.addTextButton('Done', {tooltip: 'Stop editing points'})
+      .on('click', exitMode);
+    return toolbar;
+  }
+
+  function updateToolbar() {
+    getToolbar().show();
+    stylesBtn.setSelected(!panelHidden);
+    stylesBtn.setTooltip(panelHidden ? 'Show style panel' : 'Hide style panel');
+  }
+
+  function applyCircleStyles() {
+    var representation = getPointRepresentation();
+    var radius = getCircleRadius();
+    var fill = circleFillControl.input.node().value.trim();
+    var fillOpacity = getCircleOpacityToWrite(circleFillControl);
+    var stroke = circleStrokeControl.input.node().value.trim();
+    var strokeOpacity = getCircleOpacityToWrite(circleStrokeControl);
+    var strokeWidth = getCircleStrokeWidth();
+    var args;
+    if (!gui.console || !(representation == 'unstyled' || representation == 'circle') ||
+      (radius !== null && !(radius >= 0)) || fillOpacity === null || strokeOpacity === null || strokeWidth === null) return;
+    if (radius !== null && radius > 0 && !fill && !stroke && styleFieldIsUnset('fill') && styleFieldIsUnset('stroke')) {
+      fill = defaultCircleFill;
+      setCircleColor(circleFillControl, fill);
+    }
+    args = ['stroke-width=' + strokeWidth];
+    if (fillOpacity !== undefined) args.push('fill-opacity=' + fillOpacity);
+    if (strokeOpacity !== undefined) args.push('stroke-opacity=' + strokeOpacity);
+    if (radius !== null) args.unshift('r=' + radius);
+    if (fill) args.push('fill=' + quoteCommandValue(fill));
+    if (stroke) args.push('stroke=' + quoteCommandValue(stroke));
+    runStyleCommand(args, 'Create circles');
+  }
+
+  function runStyleCommand(args, title) {
+    syncTargetLayer();
+    var ids = getTargetIds();
+    var parts = ['-style'].concat(args);
+    if (!targetLayer || ids.length === 0) return;
+    addTargetOption(parts);
+    if (ids.length < internal.getFeatureCount(targetLayer)) {
+      parts.push('ids=' + ids.join(','));
+    }
+    runCommand(parts.join(' '), title);
+  }
+
+  function runCommand(cmd, title) {
+    runGuiEditCommand(gui, cmd, {
+      title: title,
+      onSuccess: updateControls
+    });
+  }
+
+  // null for a field showing nothing, which is what a selection whose circles
+  // do not agree on a radius shows: there is no radius to apply then, and the
+  // style command leaves the property alone.
+  function getCircleRadius() {
+    return circleRadiusField.getValue();
+  }
+
+  function getCircleRadiusForNudge() {
+    var radius = getCircleRadius();
+    return radius === null ? getMostCommonNumberValue('r', defaultCircleRadius) : radius;
+  }
+
+  function setCircleRadius(value) {
+    circleRadiusField.setValue(value === '' ? '' : formatNumberValue(value));
+  }
+
+  function getCircleStrokeWidth() {
+    var width = circleStrokeWidthField.getValue();
+    return width === null ? 0 : width;
+  }
+
+  function setCircleStrokeWidth(value) {
+    circleStrokeWidthField.setValue(formatNumberValue(value));
+  }
+
+  function getNextCircleRadius(value, direction) {
+    return getNextLadderValue([0, 0.5, 1, 1.5, 2, 2.5, 3, 4, 5], value, direction);
+  }
+
+  function getPointRepresentation() {
+    var lyr = targetLayer || getActiveLayer();
+    var table = lyr && lyr.data;
+    if (table && table.fieldExists('svg-symbol')) return 'svg-symbol';
+    if (table && table.fieldExists('label-text')) return 'label';
+    if (table && table.fieldExists('icon')) return 'svg-symbol';
+    if (table && table.fieldExists('r')) return 'circle';
+    return 'unstyled';
+  }
+
+  function getCommonValue(field) {
+    var table = targetLayer && targetLayer.data;
+    var records = table && table.getRecords();
+    var ids = getTargetIds();
+    var value, val;
+    if (!records || ids.length === 0) return '';
+    for (var i=0; i<ids.length; i++) {
+      val = records[ids[i]] && records[ids[i]][field];
+      if (i === 0) {
+        value = val;
+      } else if (val != value) {
+        return '';
+      }
+    }
+    return value === undefined || value === null ? '' : value;
+  }
+
+  function getMostCommonNumberValue(field, defaultValue) {
+    var table = targetLayer && targetLayer.data;
+    var records = table && table.getRecords();
+    var ids = getTargetIds();
+    var counts = {};
+    var bestValue = null;
+    var bestCount = 0;
+    var val, key;
+    if (!records || ids.length === 0) return defaultValue;
+    for (var i=0; i<ids.length; i++) {
+      val = Number(records[ids[i]] && records[ids[i]][field]);
+      if (!isFinite(val)) continue;
+      key = String(val);
+      counts[key] = (counts[key] || 0) + 1;
+      if (counts[key] > bestCount) {
+        bestCount = counts[key];
+        bestValue = val;
+      }
+    }
+    return bestValue === null ? defaultValue : bestValue;
+  }
+
+  function styleFieldIsUnset(field) {
+    var table = targetLayer && targetLayer.data;
+    var records = table && table.getRecords();
+    var ids = getTargetIds();
+    var val;
+    if (!records || ids.length === 0) return true;
+    for (var i=0; i<ids.length; i++) {
+      val = records[ids[i]] && records[ids[i]][field];
+      if (val !== undefined && val !== null && val !== '') return false;
+    }
+    return true;
+  }
+
+  function addTargetOption(parts) {
+    if (getActiveLayer() != targetLayer) {
+      parts.push('target=' + internal.formatOptionValue(internal.getLayerTargetId(gui.model, targetLayer)));
+    }
+  }
+
+  function getSelectionIds() {
+    return hit ? hit.getSelectionIds() : [];
+  }
+
+  function getTargetIds() {
+    var ids = getSelectionIds();
+    if (!targetLayer) return [];
+    return ids.length > 0 ? ids : getAllFeatureIds(targetLayer);
+  }
+
+  function getAllFeatureIds(lyr) {
+    var ids = [];
+    for (var i=0, n=internal.getFeatureCount(lyr); i<n; i++) {
+      ids.push(i);
+    }
+    return ids;
+  }
+
+  function clearSelection() {
+    if (hit) hit.clearSelection();
+    updateControls();
+  }
+
+  // As in the line and polygon panels: an empty layer's controls are shown
+  // disabled rather than left to do nothing.
+  function updateEditingStatus(count) {
+    var total = targetLayer ? internal.getFeatureCount(targetLayer) : 0;
+    var text = formatEditingStatus({selected: count, total: total});
+    editingStatus.text(text);
+    clearLink.classed('hidden', count === 0);
+    panel.classed('no-targets', total === 0);
+  }
+
+  function setCircleColor(control, color) {
+    control.showColor(color);
+  }
+
+  function formatNumberValue(val) {
+    val = Number(val);
+    return isFinite(val) ? String(val) : '';
+  }
+
+  function getFieldExpression(field) {
+    return 'd[' + JSON.stringify(field) + ']';
+  }
+
+  function getActiveLayer() {
+    var active = gui.model.getActiveLayer();
+    return active && active.layer;
+  }
+
+  function syncTargetLayer() {
+    var lyr = getActiveLayer();
+    if (lyr == targetLayer) return;
+    if (layerCanBeStyled(lyr)) {
+      targetLayer = lyr;
+      if (hit) hit.clearSelection();
+    } else {
+      targetLayer = null;
+    }
+  }
+
+  function modelSelectLayer(lyr, dataset) {
+    if (lyr) lyr.hidden = false;
+    gui.model.selectLayer(lyr, dataset);
+  }
+
+  function modeMatchesActiveLayer(mode) {
+    var lyr = getActiveLayer();
+    return mode == 'point_style' && layerCanBeStyled(lyr);
+  }
+
+  function layerCanBeStyled(lyr) {
+    return !!(lyr && lyr.geometry_type == 'point');
+  }
+
+}

@@ -1,0 +1,286 @@
+import {
+  AUDIO_MODELS,
+  DEFAULT_IMAGE_MODEL,
+  DEFAULT_VIDEO_MODEL,
+  IMAGE_MODELS,
+  IMAGE_TO_VIDEO_MODELS,
+  referenceOnlyCapableWith,
+  type ImageToVideoModel,
+} from '@/models/models';
+import {
+  DEFAULT_ANALYSIS_MODEL,
+  isValidAnalysisModelId,
+} from '@/models/models.config';
+import { aspectRatioSchema } from '@/models/aspect-ratios';
+import { resolutionSchema } from '@/models/resolutions';
+import { sequences } from '@/platform/server/db/schema/sequences';
+import {
+  DEFAULT_GENERATION_STOP_AT,
+  flagsFromStopAt,
+  generationStageSchema,
+  includesStage,
+  stopAtFromFlags,
+} from '@/sequences/pipeline';
+import { elementKindFromFilename } from '@/cast/element-kind';
+import {
+  acceptsReference,
+  unusableReferenceLines,
+} from '@/motion/reference-support';
+import { ulidSchemaOptional } from '@/platform/server/schemas/id.schemas';
+import { createInsertSchema } from 'drizzle-orm/zod';
+import { draftElementUploadSchema } from '@/cast/draft-element-upload';
+import { z } from 'zod';
+
+/**
+ * Shared Zod schemas for sequence operations
+ * Generated from Drizzle schema with custom refinements
+ */
+
+// Get valid model IDs for validation
+const validImageModelKeys = Object.keys(
+  IMAGE_MODELS
+) satisfies readonly string[];
+const validVideoModelKeys = Object.keys(
+  IMAGE_TO_VIDEO_MODELS
+) satisfies readonly string[];
+const validAudioModelKeys = Object.keys(
+  AUDIO_MODELS
+) satisfies readonly string[];
+
+export const MUSIC_REQUIRES_MOTION_ERROR =
+  'Music generation currently requires motion. Turn on motion or disable music.';
+
+export const REFERENCE_ONLY_MODEL_ERROR =
+  'Without start frames, the video model must render from references alone. Pick Seedance, H3 Max, Omni Flash or Grok Imagine, or turn on Generate start frames.';
+
+export const REFERENCE_ONLY_REQUIRES_MOTION_ERROR =
+  'Without start frames, each shot renders straight to video, so motion is required. Turn motion on, or turn on Generate start frames.';
+
+export const createSequenceSchema = createInsertSchema(sequences, {
+  title: (schema) => schema.min(1).optional(), // Optional - defaults to 'Untitled Sequence' in hook
+  script: z.string().min(10), // Override to make it required with business rules
+  teamId: ulidSchemaOptional, // Optional - will use user's default team if not provided
+  aspectRatio: aspectRatioSchema.optional(), // Optional - defaults to '16:9' in database
+  resolution: resolutionSchema.optional(), // Optional - defaults to '720p' in database
+  styleId: z.string().optional(), // Optional - can be null
+})
+  .omit({
+    id: true,
+    status: true,
+    createdAt: true,
+    updatedAt: true,
+    createdBy: true,
+    updatedBy: true,
+    analysisModel: true, // Omit singular model - we'll use analysisModels array
+    imageModel: true, // Omit - will use imageModel field in extend
+    videoModel: true, // Omit - will use videoModel field in extend
+    workflow: true, // Omit - set by workflow, not user
+    // Copied from the style row on create — clients send styleId only. The
+    // snapshot is a version row now (#1600); these are its pointer and the
+    // legacy column.
+    legacyStyleConfig: true,
+    selectedStyleVersionId: true,
+    // Music pointers - moved by the music claim lifecycle, not user input
+    // (#1115); the model is set from `musicModel` in the extend.
+    musicModel: true,
+    selectedMusicVariantId: true,
+    selectedMusicPromptVersionId: true,
+    pendingPromoteMusicVariantId: true,
+    generationStopAt: true,
+  })
+  .extend({
+    // Accept array of models for multi-model sequence creation
+    analysisModels: z
+      .array(
+        z.string().refine(isValidAnalysisModelId, {
+          message: 'Invalid analysis model',
+        })
+      )
+      .min(1, 'At least one model must be selected')
+      .default([DEFAULT_ANALYSIS_MODEL]),
+    // Primary image model (model key, not full ID) — first of imageModels
+    imageModel: z
+      .string()
+      .refine((val) => validImageModelKeys.includes(val), {
+        message: 'Invalid image model',
+      })
+      .default(DEFAULT_IMAGE_MODEL)
+      .optional(),
+    // Multiple image models for variant generation (first is primary)
+    imageModels: z
+      .array(
+        z.string().refine((val) => validImageModelKeys.includes(val), {
+          message: 'Invalid image model',
+        })
+      )
+      .min(1, 'At least one image model must be selected')
+      .default([DEFAULT_IMAGE_MODEL]),
+    // Video model selection (model key, not full ID) — primary / first of videoModels
+    videoModel: z
+      .string()
+      .refine((val) => validVideoModelKeys.includes(val), {
+        message: 'Invalid video model',
+      })
+      .default(DEFAULT_VIDEO_MODEL),
+    // Multiple video models for variant generation (first is primary)
+    videoModels: z
+      .array(
+        z.string().refine((val) => validVideoModelKeys.includes(val), {
+          message: 'Invalid video model',
+        })
+      )
+      .min(1, 'At least one video model must be selected')
+      .default([DEFAULT_VIDEO_MODEL]),
+    // How far the run should go (#1408). Default music = stills + motion +
+    // music (the aha path). Legacy auto-generate flags still parse and map
+    // onto a stop-at when `stopAt` is omitted.
+    stopAt: generationStageSchema.optional(),
+    autoGenerateMotion: z.boolean().optional(),
+    autoGenerateMusic: z.boolean().optional(),
+    // Explicit default: the model refinement below and the create handler
+    // both read the parsed value, and leaving it `undefined` would make "off"
+    // indistinguishable from "unset".
+    generateStartFrames: z.boolean().default(false).optional(),
+    // Design a voice per speaking character (#1553). Omitted = on wherever
+    // voice design is configured (#2004) — `createSequences` decides.
+    generateVoices: z.boolean().optional(),
+    // Render motion as Ark drafts (#1756); off by default.
+    draftMotion: z.boolean().default(false).optional(),
+    // Music model selection (model key, not full ID) — primary / first of audioModels
+    musicModel: z
+      .string()
+      .refine((val) => validAudioModelKeys.includes(val), {
+        message: 'Invalid music model',
+      })
+      .optional(),
+    // Multiple audio models for variant generation (first is primary). Optional
+    // (music is opt-in via a `music` stop-at); when present must be non-empty.
+    audioModels: z
+      .array(
+        z.string().refine((val) => validAudioModelKeys.includes(val), {
+          message: 'Invalid audio model',
+        })
+      )
+      .min(1, 'At least one audio model must be selected')
+      .optional(),
+    // The Enhance target (#1593); only set when Enhance ran. Pre-flight scene
+    // count + per-shot duration use this so client ActionCost and server
+    // requireCredits stay aligned before Scene N headings exist (#1140).
+    // No ceiling: a pasted feature script is as long as it is.
+    targetDurationSeconds: z.number().min(5).optional(),
+    // Suggested location IDs for visual consistency during generation
+    suggestedLocationIds: z.array(z.string()).optional(),
+    // Team characters the script references with `@` (#2050): cast into
+    // the new sequence before analysis runs, so analysis reads them.
+    castCharacterIds: z.array(z.string()).optional(),
+    // Draft element uploads: images already at a permanent key, waiting for a
+    // sequence to point rows at them (#1471). One schema, shared with the
+    // localStorage draft and the public API — see `draftElementUploadSchema`.
+    //
+    // It carries `durationSeconds` because the length is needed HERE, not just
+    // at motion time (#1559): a full-pipeline run pays for script, references
+    // and images before the first clip is submitted, so a reference no
+    // selected model can take has to be caught before any of that.
+    elementUploads: z.array(draftElementUploadSchema).optional(),
+    // When regenerating from an existing sequence, copy its elements onto the
+    // newly created sequence so the user doesn't have to re-upload references.
+    sourceSequenceId: ulidSchemaOptional,
+  })
+  // Legacy-flag checks only apply when the caller did not pick a stop-at
+  // (#1408): an explicit early stop is a deliberate partial run.
+  .superRefine((data, ctx) => {
+    if (data.stopAt) return;
+    if (data.autoGenerateMusic && data.autoGenerateMotion === false) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['autoGenerateMusic'],
+        message: MUSIC_REQUIRES_MOTION_ERROR,
+      });
+    }
+    // Reference-only skips the image pass; motion is the only thing left that
+    // renders. With motion off the sequence would complete having generated
+    // nothing at all, and report success doing it.
+    if (!data.generateStartFrames && data.autoGenerateMotion === false) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['generateStartFrames'],
+        message: REFERENCE_ONLY_REQUIRES_MOTION_ERROR,
+      });
+    }
+  })
+  // Reference-only has no start frame, so EVERY selected model must have a
+  // route whose start frame is optional — not just the primary. A variant
+  // model without one would fail every shot it was asked to render.
+  //
+  // This schema is isomorphic and pure, so it cannot know which vias a team
+  // reaches. It asks the widest question — capable on SOME via — which rejects
+  // Kling v3 always and lets Grok Imagine through; `createSequences`
+  // then re-asks it against the team's real keys via `canRenderReferenceOnly`.
+  .refine(
+    (data) =>
+      data.generateStartFrames ||
+      data.videoModels.every(
+        (model) =>
+          validVideoModelKeys.includes(model) &&
+          // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- guarded by the key check above
+          referenceOnlyCapableWith(model as ImageToVideoModel, { xai: true })
+      ),
+    {
+      path: ['generateStartFrames'],
+      message: REFERENCE_ONLY_MODEL_ERROR,
+    }
+  )
+  // An attached clip or voice line the chosen model is too short to take will
+  // be REFUSED at submit (#1559) — deliberately, since the fix is to trim the
+  // file. That refusal lands at the motion step, which on a full run is after
+  // script, references and images have all been paid for. So the same question
+  // is asked here, up front, against every selected model: a variant that
+  // cannot take the reference fails every shot that mentions it.
+  //
+  // Warn-and-block rather than silently filtering the model list — the user
+  // picked those models, and changing their selection under them is worse than
+  // telling them what is wrong.
+  .superRefine((data, ctx) => {
+    const reachesMotion = data.stopAt
+      ? includesStage(data.stopAt, 'motion')
+      : data.autoGenerateMotion !== false;
+    if (!reachesMotion) return;
+    for (const upload of data.elementUploads ?? []) {
+      const kind = elementKindFromFilename(upload.filename) ?? 'image';
+      if (kind === 'image') continue;
+      const ref = {
+        // `token` is optional on the shared wire schema (#1471), so name the
+        // file when it is absent rather than telling the user "null is 20s".
+        token: upload.token || upload.filename,
+        kind,
+        durationSeconds: upload.durationSeconds ?? null,
+        // The stored key carries the extension, for the format check.
+        imageUrl: upload.tempPath,
+      };
+      for (const model of data.videoModels) {
+        if (!validVideoModelKeys.includes(model)) continue;
+        // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- guarded above
+        const key = model as ImageToVideoModel;
+        if (acceptsReference(key, ref)) continue;
+        // Same words the scene panel and the submit refusal use (#1559).
+        for (const message of unusableReferenceLines(key, [ref])) {
+          ctx.addIssue({ code: 'custom', path: ['elementUploads'], message });
+        }
+      }
+    }
+  })
+  .transform((data) => {
+    const stopAt =
+      data.stopAt ??
+      (data.autoGenerateMotion === undefined &&
+      data.autoGenerateMusic === undefined
+        ? DEFAULT_GENERATION_STOP_AT
+        : stopAtFromFlags({
+            autoGenerateMotion: data.autoGenerateMotion ?? true,
+            autoGenerateMusic: data.autoGenerateMusic ?? true,
+          }));
+    const flags = flagsFromStopAt(stopAt);
+    return { ...data, stopAt, ...flags };
+  });
+
+export type CreateSequenceInput = z.infer<typeof createSequenceSchema>;

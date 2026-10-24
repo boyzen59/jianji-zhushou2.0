@@ -1,0 +1,230 @@
+import { requireDatasetsHaveCompatibleCRS } from '../crs/mapshaper-projections';
+import { forEachArcId } from '../paths/mapshaper-path-utils';
+import { copyLayerShapes } from '../dataset/mapshaper-layer-utils';
+import {
+  markDatasetChanged,
+  markLayerChanged,
+  noteDatasetWillChange,
+  noteLayerWillChange
+} from '../undo/mapshaper-undo-tracking';
+import utils from '../utils/mapshaper-utils';
+import { verbose, stop, error } from '../utils/mapshaper-logging';
+import { ArcCollection } from '../paths/mapshaper-arcs';
+import { buildTopology } from '../topology/mapshaper-topology';
+import { getSharedFrameRef } from '../dataset/mapshaper-frame-membership';
+
+// Merge arcs from one or more source datasets into target dataset
+// return array of layers from the source dataset (instead of adding them to the target dataset)
+export function mergeDatasetsIntoDataset(dataset, datasets) {
+  noteDatasetWillChange(dataset, {operation: 'mergeDatasetsIntoDataset'});
+  var merged = mergeDatasets([dataset].concat(datasets));
+  var mergedLayers = datasets.reduce(function(memo, dataset) {
+    return memo.concat(dataset.layers);
+  }, []);
+  dataset.arcs = merged.arcs;
+  markDatasetChanged(dataset, {operation: 'mergeDatasetsIntoDataset'});
+  return mergedLayers;
+}
+
+// Don't modify input layers (mergeDatasets() updates arc ids in-place)
+export function mergeDatasetsForExport(arr) {
+  // copy layers but not arcs, which get copied in mergeDatasets()
+  var copy = arr.map(function(dataset) {
+    return utils.defaults({
+      layers: dataset.layers.map(copyLayerShapes)
+    }, dataset);
+  });
+  return mergeDatasets(copy);
+}
+
+export function mergeCommandTargets(targets, catalog) {
+  var targetLayers = [];
+  var targetDatasets = [];
+  var datasetsWithArcs = 0;
+  var merged;
+
+  targets.forEach(function(target) {
+    targetLayers = targetLayers.concat(target.layers);
+    targetDatasets = targetDatasets.concat(target.dataset);
+    if (target.dataset.arcs && target.dataset.arcs.size() > 0) datasetsWithArcs++;
+  });
+
+  merged = mergeDatasets(targetDatasets);
+
+  // Rebuild topology, if multiple datasets contain arcs
+  if (datasetsWithArcs > 1) {
+    buildTopology(merged);
+  }
+
+  // remove old datasets after merging, so catalog is not affected if merge throws an error
+  targetDatasets.forEach(function(dataset) {
+    catalog.removeDataset(dataset);
+  });
+  catalog.addDataset(merged); // sets default target to all layers in merged dataset
+  catalog.setDefaultTarget(targetLayers, merged); // reset default target
+  return [{
+    layers: targetLayers,
+    dataset: merged
+  }];
+}
+
+// Rejoin datasets that were split apart from one dataset, so that boundaries
+// that are still identical are shared again. Simplification thresholds are
+// kept, so callers should first check that the datasets have the same
+// simplification state (see haveSameSimplification()). The output keeps the
+// ID of the first dataset.
+export function rejoinDatasets(arr) {
+  var merged = mergeDatasets(arr, {preserve_simplification: true});
+  buildTopology(merged, {preserve_simplification: true});
+  if (arr[0].id) merged.id = arr[0].id;
+  return merged;
+}
+
+// True if the datasets all have no simplification thresholds, or all have
+// thresholds and the same retained interval
+export function haveSameSimplification(datasets) {
+  var states = datasets.filter(function(dataset) {
+    return dataset.arcs && dataset.arcs.size() > 0; // datasets without paths don't count
+  }).map(function(dataset) {
+    return dataset.arcs.isFlat() ? null : dataset.arcs.getRetainedInterval();
+  });
+  return states.every(function(state) {
+    return state === states[0];
+  });
+}
+
+// Combine multiple datasets into one using concatenation
+// (any shared topology is ignored)
+// opts.preserve_simplification: keep simplification thresholds (by default,
+//   the current simplification is baked in)
+export function mergeDatasets(arr, opts) {
+  var arcSources = [],
+      arcCount = 0,
+      frameRef,
+      merged = {
+        info: {},
+        layers: []
+      };
+
+  // Error if incompatible CRS
+  requireDatasetsHaveCompatibleCRS(arr);
+
+  arr.forEach(function(dataset) {
+    var n = dataset.arcs ? dataset.arcs.size() : 0;
+    if (n > 0) {
+      arcSources.push(dataset.arcs);
+    }
+
+    mergeDatasetInfo(merged, dataset);
+    dataset.layers.forEach(function(lyr) {
+      if (lyr.geometry_type == 'polygon' || lyr.geometry_type == 'polyline') {
+        if (arcCount > 0) {
+          noteLayerWillChange(lyr, {operation: 'mergeDatasets', unit: 'arc-ids'});
+        }
+        forEachArcId(lyr.shapes, function(id) {
+          return id < 0 ? id - arcCount : id + arcCount;
+        });
+        if (arcCount > 0) {
+          markLayerChanged(lyr, {operation: 'mergeDatasets', unit: 'arc-ids'});
+        }
+      }
+      merged.layers.push(lyr);
+    });
+    arcCount += n;
+  });
+
+  // the merged dataset stays in a frame only if every part was in it
+  frameRef = getSharedFrameRef(arr);
+  if (frameRef) {
+    merged.info.frame = frameRef;
+  }
+
+  if (arcSources.length > 0) {
+    merged.arcs = opts && opts.preserve_simplification ?
+      mergeArcsKeepingThresholds(arcSources) : mergeArcs(arcSources);
+    if (merged.arcs.size() != arcCount) {
+      error("[mergeDatasets()] Arc indexing error");
+    }
+  }
+
+  return merged;
+}
+
+export function mergeDatasetInfo(merged, dataset) {
+  var src = dataset.info || {};
+  var dest = merged.info || (merged.info = {});
+  dest.input_files = utils.uniq((dest.input_files || []).concat(src.input_files || []));
+  dest.input_formats = utils.uniq((dest.input_formats || []).concat(src.input_formats || []));
+  // A frame reference is never inherited from a merged-in dataset
+  var destFrame = dest.frame;
+  // merge other info properties (e.g. input_geojson_crs, input_delimiter, prj, crs)
+  utils.defaults(dest, src);
+  if (destFrame) {
+    dest.frame = destFrame;
+  } else {
+    delete dest.frame;
+  }
+}
+
+export function mergeArcs(arr) {
+  // Returning the original causes a test to fail
+  // if (arr.length < 2) return arr[0];
+  var dataArr = arr.map(function(arcs) {
+    if (arcs.getRetainedInterval() > 0) {
+      verbose("Baking-in simplification setting.");
+      arcs.flatten();
+    }
+    return arcs.getVertexData();
+  });
+  var xx = mergeArrays(utils.pluck(dataArr, 'xx'), Float64Array),
+      yy = mergeArrays(utils.pluck(dataArr, 'yy'), Float64Array),
+      nn = mergeArrays(utils.pluck(dataArr, 'nn'), Int32Array);
+
+  return new ArcCollection(nn, xx, yy);
+}
+
+// Like mergeArcs(), but keeps simplification thresholds instead of baking in
+// the current simplification, and leaves the source arcs unchanged. Vertices
+// of arcs without thresholds are never removed by simplification. All the
+// arcs with thresholds must have the same retained interval.
+export function mergeArcsKeepingThresholds(arr) {
+  var simplified = arr.filter(function(arcs) { return !arcs.isFlat(); });
+  var interval = simplified.length > 0 ? simplified[0].getRetainedInterval() : 0;
+  var dataArr = arr.map(function(arcs) { return arcs.getVertexData(); });
+  var merged, zz;
+  if (simplified.some(function(arcs) { return arcs.getRetainedInterval() !== interval; })) {
+    error('[mergeArcsKeepingThresholds()] Arcs have different simplification intervals');
+  }
+  merged = new ArcCollection(
+    mergeArrays(utils.pluck(dataArr, 'nn'), Int32Array),
+    mergeArrays(utils.pluck(dataArr, 'xx'), Float64Array),
+    mergeArrays(utils.pluck(dataArr, 'yy'), Float64Array));
+  if (simplified.length > 0) {
+    zz = mergeArrays(dataArr.map(function(data) {
+      return data.zz || new Float64Array(data.xx.length).fill(Infinity);
+    }), Float64Array);
+    merged.setThresholds(zz).setRetainedInterval(interval);
+  }
+  return merged;
+}
+
+function countElements(arrays) {
+  return arrays.reduce(function(memo, arr) {
+    return memo + (arr.length || 0);
+  }, 0);
+}
+
+function mergeArrays(arrays, TypedArr) {
+  var size = countElements(arrays),
+      Arr = TypedArr || Array,
+      merged = new Arr(size),
+      offs = 0;
+  arrays.forEach(function(src) {
+    var n = src.length;
+    for (var i = 0; i<n; i++) {
+      merged[i + offs] = src[i];
+    }
+    offs += n;
+  });
+  return merged;
+}

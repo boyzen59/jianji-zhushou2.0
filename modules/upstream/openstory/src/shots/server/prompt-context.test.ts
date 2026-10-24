@@ -1,0 +1,686 @@
+import { describe, expect, it } from 'vitest';
+import { migrateStyleConfigV1ToV2 } from '@/look/style-config';
+import type {
+  CastCharacterWithSheet,
+  SequenceElement,
+  SequenceLocationWithReference,
+  StyleConfig,
+} from '@/platform/server/db/schema';
+import {
+  charactersToBible,
+  sequenceElementsToBible,
+  sequenceLocationsToBible,
+} from '@/cast/server/bibles-from-scoped';
+import {
+  hashMotionPromptInput,
+  hashVisualPromptInput,
+} from '@/shots/input-hash';
+import { narrowShotPromptContext } from './prompt-context';
+import type { VisualPromptHashInput } from '@/shots/input-hash';
+
+/** A shot with no prompt yet: the scene's continuity tags pick the bibles. */
+const narrow = <T extends VisualPromptHashInput>(ctx: T) =>
+  narrowShotPromptContext(ctx, { channel: 'visual', prompt: null });
+import type {
+  CharacterBibleEntry,
+  ElementBibleEntry,
+  LocationBibleEntry,
+  Scene,
+} from '@/shots/scene-analysis.schema';
+
+const style: StyleConfig = migrateStyleConfigV1ToV2({
+  mood: 'neutral',
+  artStyle: 'cinematic',
+  lighting: 'natural',
+  colorPalette: ['neutral'],
+  cameraWork: 'static',
+  referenceFilms: [],
+  colorGrading: 'neutral',
+});
+
+const alice: CharacterBibleEntry = {
+  characterId: 'alice',
+  name: 'Alice',
+  age: '30',
+  gender: '',
+  ethnicity: '',
+  physicalDescription: '',
+  standardClothing: '',
+  looks: [],
+  personality: '',
+  movement: '',
+  voiceDescription: '',
+  voiceOnly: false,
+  isPerson: true,
+  rendering: 'Photoreal live action',
+  consistencyTag: '',
+};
+const bob: CharacterBibleEntry = { ...alice, characterId: 'bob', name: 'Bob' };
+
+const beach: LocationBibleEntry = {
+  locationId: 'beach',
+  name: 'Beach',
+  type: 'exterior',
+  description: '',
+  architecturalStyle: '',
+  keyFeatures: '',
+  ambiance: '',
+  rendering: 'Photoreal live action',
+  consistencyTag: '',
+  firstMention: { sceneId: '', text: '', lineNumber: 0 },
+};
+const forest: LocationBibleEntry = {
+  ...beach,
+  locationId: 'forest',
+  name: 'Forest',
+  firstMention: { sceneId: '', text: '', lineNumber: 0 },
+};
+
+const logo: ElementBibleEntry = {
+  token: 'LOGO',
+  description: 'Red hex logo',
+  consistencyTag: 'red-hex-logo',
+  firstMention: { sceneId: 's1', text: 'LOGO', lineNumber: 1 },
+};
+const bottle: ElementBibleEntry = {
+  token: 'BOTTLE',
+  description: 'Silver bottle',
+  consistencyTag: 'silver-bottle',
+  firstMention: { sceneId: 's1', text: 'BOTTLE', lineNumber: 1 },
+};
+
+function sceneReferencing(opts: {
+  characterTags?: string[];
+  environmentTag?: string;
+  elementTags?: string[];
+  script?: string;
+  location?: string;
+  durationSeconds?: number;
+}): Scene {
+  return {
+    sceneId: 's1',
+    sceneNumber: 1,
+    originalScript: { extract: opts.script ?? '', dialogue: [] },
+    metadata: {
+      title: 'Test scene',
+      durationSeconds: opts.durationSeconds ?? 5,
+      location: opts.location ?? '',
+      timeOfDay: '',
+      storyBeat: '',
+    },
+    continuity: {
+      characterTags: opts.characterTags ?? [],
+      environmentTag: opts.environmentTag ?? '',
+      elementTags: opts.elementTags ?? [],
+      colorPalette: '',
+      lightingSetup: '',
+      styleTag: '',
+    },
+  };
+}
+
+describe('narrowShotPromptContext', () => {
+  it('keeps only the character entries the scene references', () => {
+    const ctx = {
+      scene: sceneReferencing({ characterTags: ['alice'] }),
+      styleConfig: style,
+      characterBible: [alice, bob],
+      locationBible: [],
+      elementBible: [],
+      aspectRatio: '16:9',
+      analysisModel: 'anthropic/claude-haiku-4.5',
+    };
+    const narrowed = narrow(ctx);
+    expect(narrowed.characterBible.map((c) => c.characterId)).toEqual([
+      'alice',
+    ]);
+  });
+
+  it('keeps only the location entries that match environmentTag or scene location', () => {
+    const ctx = {
+      scene: sceneReferencing({ environmentTag: 'beach' }),
+      styleConfig: style,
+      characterBible: [],
+      locationBible: [beach, forest],
+      elementBible: [],
+      aspectRatio: '16:9',
+      analysisModel: 'anthropic/claude-haiku-4.5',
+    };
+    const narrowed = narrow(ctx);
+    expect(narrowed.locationBible.map((l) => l.locationId)).toEqual(['beach']);
+  });
+
+  it('keeps only the element entries this scene tags or mentions in its script', () => {
+    const ctx = {
+      scene: sceneReferencing({ elementTags: ['LOGO'] }),
+      styleConfig: style,
+      characterBible: [],
+      locationBible: [],
+      elementBible: [logo, bottle],
+      aspectRatio: '16:9',
+      analysisModel: 'anthropic/claude-haiku-4.5',
+    };
+    const narrowed = narrow(ctx);
+    expect(narrowed.elementBible.map((e) => e.token)).toEqual(['LOGO']);
+  });
+
+  it('names only the character the shot prompt names (#2012)', async () => {
+    const ctx = {
+      scene: sceneReferencing({ characterTags: ['alice', 'bob'] }),
+      styleConfig: style,
+      characterBible: [alice, bob],
+      locationBible: [],
+      elementBible: [],
+      aspectRatio: '16:9',
+      analysisModel: 'anthropic/claude-haiku-4.5',
+    };
+    const view = {
+      channel: 'visual',
+      prompt: 'ALICE waits by the window.',
+    } as const;
+    const shotScoped = narrowShotPromptContext(ctx, view);
+    expect(shotScoped.characterBible.map((c) => c.characterId)).toEqual([
+      'alice',
+    ]);
+    // The scene roster is a different digest: an old stamp, never a new one.
+    expect(await hashVisualPromptInput(shotScoped)).not.toBe(
+      await hashVisualPromptInput(narrow(ctx))
+    );
+    const bobEdited = narrowShotPromptContext(
+      {
+        ...ctx,
+        characterBible: [{ ...bob, physicalDescription: 'now bearded' }, alice],
+      },
+      view
+    );
+    expect(await hashVisualPromptInput(bobEdited)).toBe(
+      await hashVisualPromptInput(shotScoped)
+    );
+  });
+
+  it('with no continuity, only a prompt can put anyone in the shot', () => {
+    const ctx = {
+      scene: {
+        sceneId: 's1',
+        sceneNumber: 1,
+        originalScript: { extract: '', dialogue: [] },
+      } as Scene,
+      styleConfig: style,
+      characterBible: [alice, bob],
+      locationBible: [beach],
+      elementBible: [logo],
+      aspectRatio: '16:9',
+      analysisModel: 'anthropic/claude-haiku-4.5',
+    };
+    expect(narrow(ctx)).toEqual({
+      ...ctx,
+      characterBible: [],
+      locationBible: [],
+      elementBible: [],
+    });
+    expect(
+      narrowShotPromptContext(ctx, {
+        channel: 'visual',
+        prompt: 'BOB on the beach with the LOGO.',
+      })
+    ).toEqual({
+      ...ctx,
+      characterBible: [bob],
+      locationBible: [beach],
+      elementBible: [logo],
+    });
+  });
+});
+
+describe('narrowed hash stability (the user-reported bug)', () => {
+  const baseCtx = {
+    scene: sceneReferencing({
+      characterTags: ['alice'],
+      environmentTag: 'beach',
+      elementTags: ['LOGO'],
+    }),
+    styleConfig: style,
+    characterBible: [alice],
+    locationBible: [beach],
+    elementBible: [logo],
+    aspectRatio: '16:9',
+    analysisModel: 'anthropic/claude-haiku-4.5',
+    startingFrameImageUrl: null,
+    referenceOnly: false,
+    dialogue: { presence: false, lines: [] },
+  };
+
+  it('adding an unreferenced element does NOT change the visual hash', async () => {
+    const before = await hashVisualPromptInput(narrow(baseCtx));
+    // Simulate uploading a new element that no scene references yet.
+    const after = await hashVisualPromptInput(
+      narrow({
+        ...baseCtx,
+        elementBible: [logo, bottle],
+      })
+    );
+    expect(after).toBe(before);
+  });
+
+  it('adding an unreferenced character does NOT change the visual hash', async () => {
+    const before = await hashVisualPromptInput(narrow(baseCtx));
+    const after = await hashVisualPromptInput(
+      narrow({
+        ...baseCtx,
+        characterBible: [alice, bob],
+      })
+    );
+    expect(after).toBe(before);
+  });
+
+  it('adding an unreferenced location does NOT change the motion hash', async () => {
+    const before = await hashMotionPromptInput(narrow(baseCtx));
+    const after = await hashMotionPromptInput(
+      narrow({
+        ...baseCtx,
+        locationBible: [beach, forest],
+      })
+    );
+    expect(after).toBe(before);
+  });
+
+  it('referencing a new element via continuity tags DOES change the hash', async () => {
+    const before = await hashVisualPromptInput(
+      narrow({
+        ...baseCtx,
+        elementBible: [logo, bottle],
+      })
+    );
+    // Same bibles, but now the scene's continuity additionally references BOTTLE.
+    const after = await hashVisualPromptInput(
+      narrow({
+        ...baseCtx,
+        scene: sceneReferencing({
+          characterTags: ['alice'],
+          environmentTag: 'beach',
+          elementTags: ['LOGO', 'BOTTLE'],
+        }),
+        elementBible: [logo, bottle],
+      })
+    );
+    expect(after).not.toBe(before);
+  });
+
+  // Issue #767: motion-music-prompts-workflow snaps the duration mid-pipeline
+  // (e.g. 7 → 8 for a model that only supports {5, 10}) and overwrites
+  // `shot.metadata` after the visual prompt hash was already stored. The
+  // visual hash must NOT care about that downstream parameter — duration is
+  // in the render manifest, where it actually matters.
+  it('changing metadata.durationSeconds does NOT change the visual hash', async () => {
+    const continuityTags = {
+      characterTags: ['alice'],
+      environmentTag: 'beach',
+      elementTags: ['LOGO'],
+    };
+    const before = await hashVisualPromptInput(
+      narrow({
+        ...baseCtx,
+        scene: sceneReferencing({ ...continuityTags, durationSeconds: 7 }),
+      })
+    );
+    const after = await hashVisualPromptInput(
+      narrow({
+        ...baseCtx,
+        scene: sceneReferencing({ ...continuityTags, durationSeconds: 8 }),
+      })
+    );
+    expect(after).toBe(before);
+  });
+
+  it('changing metadata.durationSeconds does NOT change the motion hash', async () => {
+    const continuityTags = {
+      characterTags: ['alice'],
+      environmentTag: 'beach',
+      elementTags: ['LOGO'],
+    };
+    const before = await hashMotionPromptInput(
+      narrow({
+        ...baseCtx,
+        scene: sceneReferencing({ ...continuityTags, durationSeconds: 7 }),
+      })
+    );
+    const after = await hashMotionPromptInput(
+      narrow({
+        ...baseCtx,
+        scene: sceneReferencing({ ...continuityTags, durationSeconds: 8 }),
+      })
+    );
+    expect(after).toBe(before);
+  });
+});
+
+describe('prompt-driving projection (#867 §4.2)', () => {
+  const baseCtx = {
+    scene: sceneReferencing({
+      characterTags: ['alice'],
+      environmentTag: 'beach',
+    }),
+    styleConfig: style,
+    characterBible: [alice],
+    locationBible: [beach],
+    elementBible: [],
+    aspectRatio: '16:9',
+    analysisModel: 'anthropic/claude-haiku-4.5',
+    startingFrameImageUrl: null,
+    referenceOnly: false,
+    dialogue: { presence: false, lines: [] },
+  };
+
+  it('a consistencyTag change on a referenced character does NOT move the visual hash', async () => {
+    const before = await hashVisualPromptInput(narrow(baseCtx));
+    const after = await hashVisualPromptInput(
+      narrow({
+        ...baseCtx,
+        characterBible: [{ ...alice, consistencyTag: 'alice_recast_xyz' }],
+      })
+    );
+    expect(after).toBe(before);
+  });
+
+  it('a firstMention change on a referenced location does NOT move the motion hash', async () => {
+    const before = await hashMotionPromptInput(narrow(baseCtx));
+    const after = await hashMotionPromptInput(
+      narrow({
+        ...baseCtx,
+        locationBible: [
+          {
+            ...beach,
+            firstMention: { sceneId: 's9', text: 'x', lineNumber: 42 },
+          },
+        ],
+      })
+    );
+    expect(after).toBe(before);
+  });
+
+  it('a rename on a referenced location does NOT move the visual hash', async () => {
+    const before = await hashVisualPromptInput(narrow(baseCtx));
+    const after = await hashVisualPromptInput(
+      narrow({
+        ...baseCtx,
+        locationBible: [{ ...beach, name: 'The Shore' }],
+      })
+    );
+    expect(after).toBe(before);
+  });
+
+  it('a rename on a referenced character does NOT move the visual hash', async () => {
+    const before = await hashVisualPromptInput(narrow(baseCtx));
+    const after = await hashVisualPromptInput(
+      narrow({
+        ...baseCtx,
+        characterBible: [{ ...alice, name: 'Alicia' }],
+      })
+    );
+    expect(after).toBe(before);
+  });
+
+  it('a physicalDescription change on a referenced character DOES move the visual hash', async () => {
+    const before = await hashVisualPromptInput(narrow(baseCtx));
+    const after = await hashVisualPromptInput(
+      narrow({
+        ...baseCtx,
+        characterBible: [{ ...alice, physicalDescription: 'now bearded' }],
+      })
+    );
+    expect(after).not.toBe(before);
+  });
+});
+
+describe('character bible round-trip — stamp matches verify (#867)', () => {
+  const rawSarah: CharacterBibleEntry = {
+    characterId: 'char_001',
+    name: 'Detective Sarah',
+    age: '30s',
+    gender: 'Female',
+    ethnicity: 'Caucasian',
+    physicalDescription: 'Tall, blonde hair, blue eyes',
+    standardClothing: 'Dark trench coat',
+    looks: [],
+    personality: '',
+    movement: '',
+    voiceDescription: '',
+    voiceOnly: false,
+    isPerson: true,
+    rendering: 'Photoreal live action',
+    consistencyTag: 'detective_sarah_blonde_30s',
+  };
+  // Scene references the character by name slug.
+  const scene = sceneReferencing({
+    characterTags: ['detective_sarah'],
+    environmentTag: 'beach',
+  });
+
+  // Simulate the row the character-bible workflow persists, then read it back
+  // the way `getShotStalenessFn` does at verify time.
+  const makeCharacter = (b: CharacterBibleEntry): CastCharacterWithSheet => ({
+    id: `row_${b.characterId}`,
+    sequenceId: 'seq_1',
+    characterId: b.characterId,
+    name: b.name,
+    age: b.age,
+    gender: b.gender,
+    ethnicity: b.ethnicity,
+    physicalDescription: b.physicalDescription,
+    standardClothing: b.standardClothing,
+    legacyDistinguishingFeatures: null,
+    personality: '',
+    movement: '',
+    voiceOnly: b.voiceOnly,
+    isPerson: true,
+    rendering: 'Photoreal live action',
+    voiceId: null,
+    voiceDescription: b.voiceDescription || null,
+    voicePreviews: null,
+    useVoice: null,
+    selectedVoiceVersionId: null,
+    pendingPromoteVoiceVersionId: null,
+    consistencyTag: b.consistencyTag,
+    firstMentionSceneId: null,
+    firstMentionText: null,
+    firstMentionLine: null,
+    sheetImageUrl: null,
+    sheetImagePath: null,
+    sheetPortraitUrl: null,
+    sheetStatus: 'completed',
+    sheetGeneratedAt: null,
+    sheetError: null,
+    sheetInputHash: null,
+    selectedSheetVersionId: null,
+    // Wearing its default look (#2015).
+    lookId: 'default-look',
+    lookName: 'Default',
+    looks: [],
+    styling: null,
+    // Cast in its sequence (#2017).
+    castId: 'cast-1',
+    teamId: 'team-1',
+    selectedBibleVersionId: 'bible-1',
+    pendingPromoteSheetVersionId: null,
+    deletedAt: null,
+    createdAt: new Date(0),
+    updatedAt: new Date(0),
+  });
+
+  const ctxWith = (characterBible: CharacterBibleEntry[]) =>
+    narrow({
+      scene,
+      styleConfig: style,
+      characterBible,
+      locationBible: [beach],
+      elementBible: [],
+      aspectRatio: '16:9',
+      analysisModel: 'anthropic/claude-haiku-4.5',
+      startingFrameImageUrl: null,
+      referenceOnly: false,
+      dialogue: { presence: false, lines: [] },
+    });
+
+  it('stamp (analysed bible fed to the prompt) equals verify (bible read from the DB)', async () => {
+    const verifyBible = charactersToBible([makeCharacter(rawSarah)]);
+
+    const stampHash = await hashVisualPromptInput(ctxWith([rawSarah]));
+    const verifyHash = await hashVisualPromptInput(ctxWith(verifyBible));
+    expect(stampHash).toBe(verifyHash);
+  });
+
+  // The MOTION child receives the same bible as the visual child.
+  it('motion: stamp equals verify (bible read from the DB)', async () => {
+    const verifyBible = charactersToBible([makeCharacter(rawSarah)]);
+
+    const stampHash = await hashMotionPromptInput(ctxWith([rawSarah]));
+    const verifyHash = await hashMotionPromptInput(ctxWith(verifyBible));
+    expect(stampHash).toBe(verifyHash);
+  });
+});
+
+// Locations and
+// elements have no such transform — the prompt STAMP hashes the raw scene-split
+// bible while VERIFY hashes the DB readback (`sequenceLocationsToBible` /
+// `sequenceElementsToBible`). Those readbacks coerce nulls/`type`, so a coercion
+// that diverged from the raw bible's projected fields would resurrect the #867
+// false-staleness for every location-/element-bearing shot. Pin the round-trip.
+describe('location/element bible round-trip — stamp matches verify (#867)', () => {
+  const scene = sceneReferencing({
+    environmentTag: 'beach',
+    elementTags: ['LOGO'],
+    script: 'The LOGO glows on the beach.',
+  });
+
+  const ctxWith = (
+    locationBible: LocationBibleEntry[],
+    elementBible: ElementBibleEntry[]
+  ) =>
+    narrow({
+      scene,
+      styleConfig: style,
+      characterBible: [],
+      locationBible,
+      elementBible,
+      aspectRatio: '16:9',
+      analysisModel: 'anthropic/claude-haiku-4.5',
+    });
+
+  const makeLocationRow = (
+    l: LocationBibleEntry
+  ): SequenceLocationWithReference => ({
+    id: `row_${l.locationId}`,
+    teamId: 'team_1',
+    legacyLibraryReferenceHash: null,
+    linkId: `link_${l.locationId}`,
+    attached: false,
+    sequenceId: 'seq_1',
+    locationId: l.locationId,
+    name: l.name,
+    type: l.type,
+    description: l.description,
+    architecturalStyle: l.architecturalStyle,
+    keyFeatures: l.keyFeatures,
+    ambiance: l.ambiance,
+    rendering: l.rendering,
+    consistencyTag: l.consistencyTag,
+    firstMentionSceneId: l.firstMention.sceneId || null,
+    firstMentionText: l.firstMention.text || null,
+    firstMentionLine: l.firstMention.lineNumber || null,
+    referenceImageUrl: null,
+    referenceImagePath: null,
+    referencePortraitUrl: null,
+    referenceStatus: 'completed',
+    referenceGeneratedAt: null,
+    referenceError: null,
+    referenceInputHash: null,
+    selectedReferenceVersionId: null,
+    selectedBibleVersionId: null,
+    pendingPromoteReferenceVersionId: null,
+    deletedAt: null,
+    createdAt: new Date(0),
+    updatedAt: new Date(0),
+  });
+
+  const makeElementRow = (e: ElementBibleEntry): SequenceElement => ({
+    id: `row_${e.token}`,
+    sequenceId: 'seq_1',
+    uploadedFilename: 'logo.png',
+    kind: 'image',
+    durationSeconds: null,
+    token: e.token,
+    description: e.description,
+    consistencyTag: e.consistencyTag,
+    imageUrl: 'https://example.com/logo.png',
+    imagePath: 'elements/logo.png',
+    visionStatus: 'completed',
+    visionError: null,
+    visionGeneratedAt: null,
+    firstMentionSceneId: e.firstMention.sceneId || null,
+    firstMentionText: e.firstMention.text || null,
+    firstMentionLine: e.firstMention.lineNumber || null,
+    deletedAt: null,
+    createdAt: new Date(0),
+    updatedAt: new Date(0),
+  });
+
+  it.each(['interior', 'exterior', 'both'] as const)(
+    'location: stamp == verify for a %s location (type coercion is faithful)',
+    async (type) => {
+      const stampLocation: LocationBibleEntry = {
+        ...beach,
+        type,
+        description: 'sand and surf',
+        keyFeatures: 'pier, dunes',
+      };
+      const verifyBible = sequenceLocationsToBible([
+        makeLocationRow(stampLocation),
+      ]);
+      const stamp = await hashVisualPromptInput(ctxWith([stampLocation], []));
+      const verify = await hashVisualPromptInput(ctxWith(verifyBible, []));
+      expect(stamp).toBe(verify);
+    }
+  );
+
+  it('location: a firstMention/consistencyTag-only difference (raw stamp vs coerced DB row) does not move the hash', async () => {
+    // Production reality: scene-split's raw bible carries a populated
+    // firstMention; the DB row may have nulls → readback coerces to ''/0. Those
+    // fields aren't projected, so the hashes must still match.
+    const stampLocation: LocationBibleEntry = {
+      ...beach,
+      description: 'sand and surf',
+      consistencyTag: 'beach_raw_tag',
+      firstMention: { sceneId: 's9', text: 'the beach', lineNumber: 42 },
+    };
+    const dbReadback = sequenceLocationsToBible([
+      makeLocationRow({
+        ...stampLocation,
+        consistencyTag: '',
+        firstMention: { sceneId: '', text: '', lineNumber: 0 },
+      }),
+    ]);
+    const stamp = await hashVisualPromptInput(ctxWith([stampLocation], []));
+    const verify = await hashVisualPromptInput(ctxWith(dbReadback, []));
+    expect(stamp).toBe(verify);
+  });
+
+  it('element: stamp == verify through the DB readback', async () => {
+    const verifyBible = sequenceElementsToBible([makeElementRow(logo)]);
+    const stamp = await hashVisualPromptInput(ctxWith([], [logo]));
+    const verify = await hashVisualPromptInput(ctxWith([], verifyBible));
+    expect(stamp).toBe(verify);
+  });
+
+  it('element: a firstMention/consistencyTag-only difference does not move the hash', async () => {
+    const dbReadback = sequenceElementsToBible([
+      makeElementRow({
+        ...logo,
+        consistencyTag: '',
+        firstMention: { sceneId: '', text: '', lineNumber: 0 },
+      }),
+    ]);
+    const stamp = await hashVisualPromptInput(ctxWith([], [logo]));
+    const verify = await hashVisualPromptInput(ctxWith([], dbReadback));
+    expect(stamp).toBe(verify);
+  });
+});

@@ -1,0 +1,542 @@
+import api from '../mapshaper.js';
+import { convertTextStylesToClasses, formatTextClassesAsCss } from '../src/html/html-text-classes';
+import { addFontFallbacks, applyWebFonts } from '../src/html/html-font-stacks';
+import { getPointAtCurveLength } from '../src/curves/mapshaper-curve-fit';
+import { getSeamStrokeColor } from '../src/svg/geojson-to-svg';
+import { PNG } from 'pngjs';
+import assert from 'assert';
+
+// A 200 x 100 px frame, filled red, matching its coordinates one to one
+var FRAME = '-rectangle bbox=0,0,200,100 name=frame -each \'type="frame", width=200, fill="#ff0000"\'';
+
+async function exportHTML(cmd, outOpts) {
+  return api.applyCommands(cmd + ' -o target=* out.html ' + (outOpts || ''));
+}
+
+// The map's id, ms-out-<hash>, is written as ms-out
+async function html(cmd, outOpts) {
+  var out = await exportHTML(cmd, outOpts);
+  return removeIdHash(String(out['out.html']));
+}
+
+function removeIdHash(str) {
+  return str.replace(/(ms-\w+)-[0-9a-f]{6}\b/g, '$1');
+}
+
+function anchors(str) {
+  return (str.match(/<svg x="[^"]*" y="[^"]*"/g) || []).map(function(s) {
+    var m = /x="([^"]*)" y="([^"]*)"/.exec(s);
+    return [m[1], m[2]];
+  });
+}
+
+describe('HTML output', function () {
+
+  describe('files', function () {
+    it('writes an HTML fragment and a PNG image', async function () {
+      var out = await exportHTML(FRAME);
+      assert.deepEqual(Object.keys(out).sort(), ['out.html', 'out.png']);
+      assert.ok(out['out.png'].subarray(1, 4).equals(Buffer.from('PNG')));
+      assert.ok(String(out['out.html']).includes('<img class="ms-image" src="out.png" width="200" height="100"'));
+    });
+
+    it('is inferred from a .htm extension', async function () {
+      var out = await api.applyCommands(FRAME + ' -o target=* map.htm');
+      assert.deepEqual(Object.keys(out).sort(), ['map.htm', 'map.png']);
+    });
+
+    it('image-format=jpg writes a JPEG image', async function () {
+      var out = await exportHTML(FRAME, 'image-format=jpg');
+      assert.deepEqual(Object.keys(out).sort(), ['out.html', 'out.jpg']);
+      assert.equal(out['out.jpg'][0], 0xFF);
+      assert.equal(out['out.jpg'][1], 0xD8);
+      assert.ok(String(out['out.html']).includes('src="out.jpg"'));
+    });
+
+    it('the image is twice the frame size by default, or pixel-ratio= times', async function () {
+      var png = PNG.sync.read((await exportHTML(FRAME))['out.png']);
+      assert.deepEqual([png.width, png.height], [400, 200]);
+      png = PNG.sync.read((await exportHTML(FRAME, 'pixel-ratio=1'))['out.png']);
+      assert.deepEqual([png.width, png.height], [200, 100]);
+    });
+
+    it('the image shows the shapes in the map', async function () {
+      var png = PNG.sync.read((await exportHTML(FRAME, 'pixel-ratio=1'))['out.png']);
+      var i = (50 * png.width + 100) * 4; // center pixel
+      assert.deepEqual(Array.from(png.data.subarray(i, i + 4)), [255, 0, 0, 255]);
+    });
+
+    it('rejects an unknown image format', async function () {
+      await assert.rejects(exportHTML(FRAME, 'image-format=gif'), /image-format/);
+    });
+  });
+
+  describe('seams between polygons', function () {
+    // two dark squares sharing an edge that falls between image pixels, on a
+    // white frame
+    var input = {'squares.json': JSON.stringify({type: 'FeatureCollection', features: [
+      {type: 'Feature', properties: {}, geometry: {type: 'Polygon', coordinates: [[[20, 20], [100.4, 20], [100.4, 80], [20, 80], [20, 20]]]}},
+      {type: 'Feature', properties: {}, geometry: {type: 'Polygon', coordinates: [[[100.4, 20], [180, 20], [180, 80], [100.4, 80], [100.4, 20]]]}}
+    ]})};
+    var cmd = '-rectangle bbox=0,0,200,100 name=frame -each \'type="frame", width=200, fill="#ffffff"\'' +
+      ' -i squares.json -style fill="#2166ac"';
+
+    function lightestOnSeam(png) {
+      var max = 0;
+      for (var y = 30; y < 70; y++) {
+        for (var x = 98; x < 103; x++) {
+          max = Math.max(max, png.data[(y * png.width + x) * 4]); // red: fill is 0x21
+        }
+      }
+      return max;
+    }
+
+    it('are covered in the image by a stroke in the fill color', async function () {
+      var out = await api.applyCommands(cmd + ' -o target=* out.html pixel-ratio=1', input);
+      var png = PNG.sync.read(out['out.png']);
+      assert.ok(lightestOnSeam(png) < 0x21 + 8, 'seam lightness: ' + lightestOnSeam(png));
+    });
+
+    it('are left alone in SVG output', async function () {
+      var out = await api.applyCommands(cmd + ' -o target=* out.svg', input);
+      assert.ok(!/<path [^>]*stroke=/.test(String(out['out.svg'])));
+    });
+  });
+
+  describe('getSeamStrokeColor()', function () {
+    it('returns the fill of an opaque polygon with a solid fill and no stroke', function () {
+      assert.equal(getSeamStrokeColor({fill: '#2166ac'}), '#2166ac');
+      assert.equal(getSeamStrokeColor({fill: 'steelblue', opacity: 1, stroke: 'none'}), 'steelblue');
+      assert.equal(getSeamStrokeColor({fill: 'rgb(1,2,3)', stroke: '#000', 'stroke-width': 0}), 'rgb(1,2,3)');
+    });
+
+    it('returns null for a polygon a stroke would change', function () {
+      [
+        {},
+        {fill: 'none'},
+        {fill: '#2166ac', stroke: '#fff'},
+        {fill: '#2166ac', 'fill-opacity': 0.5},
+        {fill: '#2166ac', opacity: '0.8'},
+        {fill: 'rgba(0,0,0,0.5)'},
+        {fill: '#2166ac80'},
+        {fill: '#2166ac', 'fill-pattern': 'hatches 2px grey 2px white'},
+        {fill: '#2166ac', 'fill-effect': 'sphere'},
+        {fill: '#2166ac', css: 'fill: red'}
+      ].forEach(function(rec) {
+        assert.strictEqual(getSeamStrokeColor(rec), null, JSON.stringify(rec));
+      });
+    });
+  });
+
+  describe('responsiveness', function () {
+    it('fixed is the default, and sizes the map in pixels, shrinking it to fit a narrower container', async function () {
+      var str = await html(FRAME);
+      assert.ok(str.includes('#ms-out {position:relative;overflow:hidden;width:100%;max-width:200px;aspect-ratio:200 / 100;}'));
+    });
+
+    it('dynamic fills the width of the container, keeping the aspect ratio', async function () {
+      var str = await html(FRAME, 'responsiveness=dynamic');
+      assert.ok(str.includes('#ms-out {position:relative;overflow:hidden;width:100%;aspect-ratio:200 / 100;}'));
+    });
+
+    it('rejects other values', async function () {
+      await assert.rejects(exportHTML(FRAME, 'responsiveness=fluid'), /responsiveness/);
+    });
+  });
+
+  describe('frames of different widths', function () {
+    function frame(name, width) {
+      return ` -rectangle bbox=0,0,200,100 name=${name}-box -frame target=${name}-box width=${width} name=${name}`;
+    }
+    var TWO = frame('small', 300) + frame('large', 600);
+
+    async function exportFrames(cmd, outOpts) {
+      return api.applyCommands(cmd + ' -o target=small,large,mid map.html ' + (outOpts || ''));
+    }
+
+    // the CSS of each map in the file, by name
+    function mapCss(str) {
+      var o = {};
+      str.replace(/<div id="ms-map-(\w+)" class="ms-map"[^]*?<\/style>/g, function(s, name) {
+        o[name] = s;
+      });
+      return o;
+    }
+
+    it('share one file, which shows the widest map that fits the container', async function () {
+      var out = await exportFrames(TWO);
+      var str = removeIdHash(String(out['map.html']));
+      var css = mapCss(str);
+      assert.deepEqual(Object.keys(out).sort(), ['map-large.png', 'map-small.png', 'map.html']);
+      assert.ok(str.startsWith('<div id="ms-map" class="ms-maps">\n<style>\n#ms-map {container-type:inline-size;container-name:ms-map;}'));
+      // the narrowest map is shown by default, and shrinks to fit a narrower container
+      assert.ok(css.small.includes('#ms-map-small {position:relative;overflow:hidden;width:100%;max-width:300px;aspect-ratio:300 / 150;}'));
+      assert.ok(css.small.includes('@container ms-map (width >= 600px) {#ms-map-small {display:none;}}'));
+      assert.ok(css.large.includes('#ms-map-large {position:relative;overflow:hidden;width:600px;height:300px;display:none;}'));
+      assert.ok(css.large.includes('@container ms-map (width >= 600px) {#ms-map-large {display:block;}}'));
+      assert.ok(str.includes('src="map-small.png" width="300" height="150" alt="" loading="lazy"'));
+    });
+
+    it('are ordered by width, and a middle map is shown up to the next width', async function () {
+      var out = await exportFrames(frame('large', 600) + frame('small', 300) + frame('mid', 450));
+      var str = removeIdHash(String(out['map.html']));
+      assert.deepEqual(str.match(/<div id="ms-map-\w+"/g),
+        ['<div id="ms-map-small"', '<div id="ms-map-mid"', '<div id="ms-map-large"']);
+      assert.ok(mapCss(str).mid.includes('@container ms-map (width >= 450px) and (width < 600px) {#ms-map-mid {display:block;}}'));
+    });
+
+    it('fill the container with responsiveness=dynamic', async function () {
+      var css = mapCss(removeIdHash(String((await exportFrames(TWO, 'responsiveness=dynamic'))['map.html'])));
+      assert.ok(css.small.includes('#ms-map-small {position:relative;overflow:hidden;width:100%;aspect-ratio:300 / 150;}'));
+      assert.ok(css.large.includes('#ms-map-large {position:relative;overflow:hidden;width:100%;aspect-ratio:600 / 300;display:none;}'));
+    });
+
+    it('frames of the same width are written to separate files', async function () {
+      var out = await exportFrames(frame('small', 300) + frame('large', 300));
+      assert.deepEqual(Object.keys(out).sort(),
+        ['map-large.html', 'map-large.png', 'map-small.html', 'map-small.png']);
+      assert.ok(!String(out['map-small.html']).includes('@container'));
+    });
+
+    it('each map\'s definitions have ids of their own, which its references use', async function () {
+      var label = function(name) {
+        return ` -add-label target=${name}-box + name=${name}-label coordinates=0,50,100,90,200,50 text=Curve`;
+      };
+      var str = String((await exportFrames(frame('small', 300) + label('small') + frame('large', 600) + label('large')))['map.html']);
+      var maps = str.split('<div id="').slice(2);
+      assert.equal(maps.length, 2);
+      maps.forEach(function(map) {
+        var mapId = map.slice(0, map.indexOf('"'));
+        var href = /xlink:href="#([^"]+)"/.exec(map)[1];
+        assert.ok(href.startsWith(mapId + '-label-path-'), href);
+        assert.ok(map.includes(`id="${href}"`));
+      });
+    });
+
+    it('maps with the same file name get different ids, and a map exported again the same id', async function () {
+      var a = String((await exportFrames(TWO))['map.html']);
+      var b = String((await exportFrames(TWO + ' -add-label target=small-box + coordinates=50,50 text=A'))['map.html']);
+      var a2 = String((await exportFrames(TWO))['map.html']);
+      var id = function(str) { return /^<div id="([^"]+)"/.exec(str)[1]; };
+      assert.notEqual(id(a), id(b));
+      assert.equal(a, a2);
+      assert.ok(/^ms-map-[0-9a-f]{6}$/.test(id(a)));
+    });
+  });
+
+  describe('overlay', function () {
+    it('anchors point symbols at percentages of the map size', async function () {
+      var str = await html(FRAME + ' -add-label + name=labels coordinates=50,25 text=A -add-label coordinates=200,100 text=B');
+      assert.deepEqual(anchors(str), [['25%', '75%'], ['100%', '0%']]);
+      assert.ok(str.includes('<svg x="25%" y="75%" overflow="visible">\n<text y="0" x="0" class="ms-text-0">A</text>'));
+    });
+
+    it('draws polygons in the image and not in the overlay', async function () {
+      var str = await html(FRAME + ' -add-label + name=labels coordinates=50,25 text=A');
+      assert.ok(!str.includes('<path d='));
+      assert.ok(str.includes('<g id="labels">'));
+      assert.ok(!str.includes('<g id="frame"'));
+    });
+
+    it('omits the overlay when there are no point layers', async function () {
+      assert.ok(!(await html(FRAME)).includes('ms-overlay"'));
+    });
+
+    it('draws each point of a multipoint symbol, giving the id to the first', async function () {
+      var input = {
+        'pts.json': JSON.stringify({type: 'Feature', id: 'p', properties: {r: 3},
+          geometry: {type: 'MultiPoint', coordinates: [[0, 0], [200, 100]]}})
+      };
+      var out = await api.applyCommands(FRAME + ' -i pts.json -o target=* out.html id-field=id margin=0', input);
+      var str = String(out['out.html']);
+      assert.equal((str.match(/<circle/g) || []).length, 2);
+      assert.equal((str.match(/id="p"/g) || []).length, 1);
+    });
+
+    it('draws a halo as a copy of the text, beneath it, without paint-order', async function () {
+      var str = await html(FRAME + ' -add-label + name=labels coordinates=50,25 text=A -style halo-width=2 halo-opacity=0.5');
+      assert.equal((str.match(/<text/g) || []).length, 2);
+      assert.ok(/<text [^>]*class="ms-text-0">A<\/text>\s*<text [^>]*class="ms-text-1">A<\/text>/.test(str));
+      assert.ok(/\.ms-text-0 \{[^}]*fill:none;[^}]*opacity:0\.5;[^}]*stroke-width:4px;/.test(str));
+      assert.ok(!/\.ms-text-1 \{[^}]*stroke/.test(str));
+      assert.ok(!str.includes('paint-order'));
+    });
+
+    it('hides the map from screen readers', async function () {
+      var str = await html(FRAME + ' -add-label + name=labels coordinates=50,25 text=A -style halo-width=2');
+      assert.ok(str.startsWith('<div id="ms-out" class="ms-map" aria-hidden="true">'));
+      assert.equal((str.match(/aria-hidden/g) || []).length, 1);
+    });
+
+    it('adds data-* attributes to symbol containers with svg-data=', async function () {
+      var str = await html(FRAME + ' -add-label + name=labels coordinates=50,25 text=A -each \'name="Alpha"\'', 'svg-data=name');
+      assert.ok(str.includes('<svg x="25%" y="75%" overflow="visible" data-name="Alpha">'));
+    });
+  });
+
+  describe('path labels', function () {
+    var CURVE = FRAME + ' -add-label + name=labels coordinates=0,50,100,90,200,50 text=Curve';
+
+    it('are anchored where their text attaches, with the path relative to the anchor', async function () {
+      var str = await html(CURVE);
+      assert.deepEqual(anchors(str), [['50%', '10%']]);
+      assert.ok(/<path id="ms-out-label-path-\w+" d="M -100 40 C [^"]* 0 0 C [^"]* 100 40"\/>/.test(str));
+      assert.ok(str.includes('<textPath startOffset="50%" xlink:href="#ms-out-label-path-'));
+    });
+
+    it('text-anchor=start anchors a label at the start of its path', async function () {
+      var str = await html(CURVE + ' text-anchor=start');
+      assert.deepEqual(anchors(str), [['0%', '50%']]);
+    });
+
+    it('label-start-offset= in px anchors a label that far along its path', async function () {
+      var str = await html(FRAME + ' -add-label + name=labels coordinates=0,50,200,50 text=Line label-start-offset=50');
+      assert.deepEqual(anchors(str), [['25%', '50%']]);
+    });
+  });
+
+  describe('html-labels', function () {
+    var LABEL = FRAME + ' -add-label + name=labels coordinates=50,25 text=A';
+
+    function labels(str) {
+      return str.match(/<div class="ms-label" [^\n]*<\/div>/g) || [];
+    }
+
+    it('writes an anchored label as HTML at a percentage of the map size, with no SVG', async function () {
+      var str = await html(LABEL, 'html-labels');
+      assert.deepEqual(labels(str), ['<div class="ms-label" style="left:25%;top:75%">' +
+        '<div class="ms-label-box ms-label-style-0" style="left:0px;top:0px;transform:translateX(-50%);">' +
+        '<div class="ms-label-text"><span>A</span></div></div></div>']);
+      assert.ok(!str.includes('<text'));
+      assert.ok(!str.includes('ms-overlay"'));
+      assert.ok(str.includes('#ms-out .ms-label-style-0 {font-family:sans-serif;font-size:12px;line-height:1.1;text-align:center;color:#000;}'));
+      assert.ok(str.includes('#ms-out .ms-label::before {content:"";height:10000px;}'));
+    });
+
+    it('is off by default', async function () {
+      var str = await html(LABEL);
+      assert.ok(str.includes('<text'));
+      assert.ok(!str.includes('ms-label'));
+    });
+
+    it('does not change SVG output', async function () {
+      var out = await api.applyCommands(LABEL + ' -o target=* out.svg html-labels');
+      assert.ok(String(out['out.svg']).includes('>A</text>'));
+    });
+
+    it('keeps the icon and the callout in the SVG overlay', async function () {
+      var str = await html(LABEL + ' -style r=3 dx=30 dy=-30 text-anchor=start callout=line', 'html-labels');
+      assert.ok(str.includes('<svg x="25%" y="75%" overflow="visible">'));
+      assert.ok(str.includes('<circle'));
+      assert.ok(str.includes('class="label-callout"'));
+      assert.ok(!str.includes('<text'));
+      assert.ok(labels(str)[0].includes('style="left:30px;top:-30px;"'));
+    });
+
+    it('leaves path labels in SVG', async function () {
+      var str = await html(FRAME + ' -add-label + name=labels coordinates=0,50,100,90,200,50 text=Curve', 'html-labels');
+      assert.ok(str.includes('<textPath'));
+      assert.equal(labels(str).length, 0);
+    });
+
+    it('draws a background and padding on the box, and anchors the text inside the padding', async function () {
+      var str = await html(LABEL + ' text-anchor=end label-background=pink label-background-opacity=0.5 label-padding="2 6 4"', 'html-labels');
+      assert.ok(labels(str)[0].includes('transform:translateX(calc(-100% + 6px));'));
+      assert.ok(str.includes('background-color:color-mix(in srgb, pink 50%, transparent);padding:2px 6px 4px;'));
+      assert.ok(str.includes('text-align:right;'));
+    });
+
+    it('a position clears the anchor by the padding, as in SVG', async function () {
+      var str = await html(LABEL + ' label-pos=n label-padding=4', 'html-labels');
+      assert.ok(labels(str)[0].includes('style="left:0px;top:-10px;transform:translateX(-50%);"'));
+    });
+
+    it('writes line breaks, soft breaks included, as <br>, and bold as <b>', async function () {
+      var str = await html(FRAME + ' -add-label + name=labels coordinates=50,25 text="<b>One</b> two<wbr>three\\nfour"', 'html-labels');
+      assert.ok(labels(str)[0].includes('<span><b>One</b> two<br>three<br>four</span>'));
+    });
+
+    it('draws a halo as a copy of the text beneath it, with its glyphs copied all round', async function () {
+      var str = await html(LABEL + ' halo-width=2 halo-color=yellow halo-opacity=0.5', 'html-labels');
+      assert.ok(labels(str)[0].includes('<span class="ms-label-halo ms-label-style-1">A</span><span>A</span>'));
+      assert.ok(/\.ms-label-style-1 \{text-shadow:[^;]*yellow;opacity:0\.5;\}/.test(str));
+      assert.ok(str.includes('text-shadow:0.92px 0.38px 0 yellow,'));
+      assert.ok(!str.includes('-webkit-text-stroke'));
+    });
+
+    it('fades the text and not its background with opacity', async function () {
+      var str = await html(LABEL + ' opacity=0.5 label-background=pink', 'html-labels');
+      assert.ok(labels(str)[0].includes('<div class="ms-label-text ms-label-style-1">'));
+      assert.ok(str.includes('.ms-label-style-1 {opacity:0.5;}'));
+    });
+
+    it('adds data-* attributes with svg-data=', async function () {
+      var str = await html(LABEL + ' -each \'name="Alpha"\'', 'html-labels svg-data=name');
+      assert.ok(labels(str)[0].startsWith('<div class="ms-label" style="left:25%;top:75%" data-name="Alpha">'));
+    });
+
+    it('labels with the same style share a class', async function () {
+      var str = await html(LABEL + ' -add-label coordinates=20,20 text=B -add-label coordinates=30,30 text=C font-size=20', 'html-labels');
+      assert.deepEqual(str.match(/ms-label-style-\d"/g),
+        ['ms-label-style-0"', 'ms-label-style-0"', 'ms-label-style-1"']);
+    });
+
+    it('escapes text and values from data', async function () {
+      var str = await html(LABEL + ' -each \'this.properties["label-text"]="<script>x</script> & y"; this.properties.class="a\\"b"; this.properties.fill="red}</style>"\'', 'html-labels');
+      assert.ok(labels(str)[0].includes('<span>&lt;script&gt;x&lt;/script&gt; &amp; y</span>'));
+      assert.ok(str.includes('class="ms-label-box ms-label-style-0 a&quot;b"'));
+      assert.equal(str.match(/<\/style>/g).length, 1);
+    });
+  });
+
+  describe('text style classes', function () {
+    it('labels with the same style share a class; different styles get their own', async function () {
+      var str = await html(FRAME + ' -add-label + name=labels coordinates=10,10 text=A font-size=14' +
+        ' -add-label coordinates=20,20 text=B font-size=14 -add-label coordinates=30,30 text=C font-size=20');
+      assert.deepEqual(str.match(/class="ms-text-\d"/g),
+        ['class="ms-text-0"', 'class="ms-text-0"', 'class="ms-text-1"']);
+      assert.ok(str.includes('#ms-out .ms-text-0 {font-family:sans-serif;font-size:14px;text-anchor:middle;}'));
+      assert.ok(str.includes('#ms-out .ms-text-1 {font-family:sans-serif;font-size:20px;text-anchor:middle;}'));
+      assert.ok(!/<text[^>]*font-size/.test(str));
+    });
+
+    it('font families are given fallbacks', async function () {
+      var str = await html(FRAME + ' -add-label + name=labels coordinates=10,10 text=A font-family=Georgia');
+      assert.ok(str.includes('{font-family:Georgia, "Times New Roman", Times, serif;'));
+    });
+
+    it('the NYT web fonts are listed before the installed NYT fonts', async function () {
+      var str = await html(FRAME + ' -add-label + name=labels coordinates=10,10 text=A font-family=NYTFranklin' +
+        ' -add-label coordinates=20,20 text=B font-family=NYTCheltenham');
+      assert.ok(str.includes('{font-family:nyt-franklin, NYTFranklin, Helvetica, Arial, sans-serif;'));
+      assert.ok(str.includes('{font-family:nyt-cheltenham, NYTCheltenham, "Times New Roman", Times, serif;'));
+    });
+
+    it('an installed NYT family with a weight in its name is given that weight', async function () {
+      var str = await html(FRAME + ' -add-label + name=labels coordinates=10,10 text=A font-family="NYT Franklin Medium"');
+      assert.ok(str.includes('{font-family:nyt-franklin, "NYT Franklin Medium", Helvetica, Arial, sans-serif;'));
+      assert.ok(str.includes('font-weight:500;'));
+    });
+
+    it('other fonts are not given web fonts', async function () {
+      var str = await html(FRAME + ' -add-label + name=labels coordinates=10,10 text=A font-family="Acme Sans"');
+      assert.ok(str.includes('{font-family:"Acme Sans", Helvetica, Arial, sans-serif;'));
+    });
+
+    it('SVG output keeps the font families of the labels as they are', async function () {
+      var out = await api.applyCommands(FRAME + ' -add-label + name=labels coordinates=10,10 text=A font-family=NYTFranklin -o target=* out.svg');
+      var svg = String(out['out.svg']);
+      assert.ok(svg.includes('font-family="NYTFranklin"'));
+      assert.ok(!svg.includes('Arial'));
+    });
+
+    it('values from data cannot escape the <style> element', async function () {
+      var str = await html(FRAME + ' -add-label + name=labels coordinates=10,10 text=A -each \'this.properties["font-family"]="x}</style><b>"\'');
+      assert.ok(str.includes('{font-family:"x/styleb", Helvetica, Arial, sans-serif;font-size:12px;'));
+      assert.equal(str.match(/<\/style>/g).length, 1);
+    });
+  });
+
+  describe('convertTextStylesToClasses()', function () {
+    it('folds layer text defaults into the classes of its labels', function () {
+      var lyr = {tag: 'g', properties: {id: 'a', 'font-size': '12', fill: 'none'}, children: [
+        {tag: 'text', properties: {x: 0, fill: 'red'}, value: 'A'}
+      ]};
+      var classes = convertTextStylesToClasses([lyr], 'c');
+      assert.deepEqual(classes, [{name: 'c0', style: {'font-size': '12', fill: 'red'}}]);
+      assert.deepEqual(lyr.properties, {id: 'a', fill: 'none'});
+      assert.deepEqual(lyr.children[0].properties, {x: 0, class: 'c0'});
+    });
+
+    it('gives a tspan its own class, without the layer defaults', function () {
+      var lyr = {tag: 'g', properties: {'font-size': '12'}, children: [
+        {tag: 'text', properties: {}, children: [{tag: 'tspan', properties: {'font-weight': 'bold'}, value: 'B'}]}
+      ]};
+      var classes = convertTextStylesToClasses([lyr], 'c');
+      assert.deepEqual(classes.map(function(o) { return o.style; }),
+        [{'font-size': '12'}, {'font-weight': 'bold'}]);
+    });
+
+    it('keeps a class the label already has', function () {
+      var lyr = {tag: 'g', properties: {}, children: [
+        {tag: 'text', properties: {class: 'big', fill: 'red'}, value: 'A'}
+      ]};
+      convertTextStylesToClasses([lyr], 'c');
+      assert.equal(lyr.children[0].properties.class, 'big c0');
+    });
+
+    it('formats bare lengths as px', function () {
+      var css = formatTextClassesAsCss([{name: 'c0', style: {'font-size': 12, 'letter-spacing': '0.1em', opacity: 0.5}}], '#m');
+      assert.equal(css, '#m .c0 {font-size:12px;letter-spacing:0.1em;opacity:0.5;}');
+    });
+  });
+
+  describe('addFontFallbacks()', function () {
+    it('adds common sans-serif fonts and the generic family', function () {
+      assert.equal(addFontFallbacks('Helvetica'), 'Helvetica, Arial, sans-serif');
+      assert.equal(addFontFallbacks('Arial'), 'Arial, Helvetica, sans-serif');
+      assert.equal(addFontFallbacks('nyt-franklin'), 'nyt-franklin, Helvetica, Arial, sans-serif');
+    });
+
+    it('adds serif and monospace fallbacks to fonts of those kinds', function () {
+      assert.equal(addFontFallbacks('Times New Roman'), '"Times New Roman", Times, serif');
+      assert.equal(addFontFallbacks('Source Serif 4'), '"Source Serif 4", "Times New Roman", Times, serif');
+      assert.equal(addFontFallbacks('Roboto Slab'), '"Roboto Slab", "Times New Roman", Times, serif');
+      assert.equal(addFontFallbacks('Courier'), 'Courier, Menlo, Consolas, "Courier New", monospace');
+      assert.equal(addFontFallbacks('JetBrains Mono'), '"JetBrains Mono", Menlo, Consolas, "Courier New", monospace');
+    });
+
+    it('treats a sans font with "serif" in its name as sans-serif', function () {
+      assert.equal(addFontFallbacks('Source Sans Serif'), '"Source Sans Serif", Helvetica, Arial, sans-serif');
+    });
+
+    it('leaves a list that ends in a generic family as it is', function () {
+      assert.equal(addFontFallbacks('sans-serif'), 'sans-serif');
+      assert.equal(addFontFallbacks("'Helvetica Neue', serif"), '"Helvetica Neue", serif');
+    });
+
+    it('adds fallbacks after the fonts already listed, without repeating them', function () {
+      assert.equal(addFontFallbacks('Franklin, arial'), 'Franklin, arial, Helvetica, sans-serif');
+    });
+  });
+
+  describe('applyWebFonts()', function () {
+    it('inserts each web font before its installed font, ignoring case and spaces', function () {
+      assert.deepEqual(applyWebFonts({'font-family': 'Georgia, nytfranklin'}),
+        {'font-family': 'Georgia, nyt-franklin, nytfranklin'});
+      assert.deepEqual(applyWebFonts({'font-family': 'NYT Franklin'}),
+        {'font-family': 'nyt-franklin, "NYT Franklin"'});
+      assert.deepEqual(applyWebFonts({'font-family': 'NYTCheltenham Book'}),
+        {'font-family': 'nyt-cheltenham, "NYTCheltenham Book"', 'font-weight': '400'});
+    });
+
+    it('takes a weight only from the first font', function () {
+      assert.deepEqual(applyWebFonts({'font-family': '"NYTFranklin Medium"', 'font-weight': 'bold'}),
+        {'font-family': 'nyt-franklin, "NYTFranklin Medium"', 'font-weight': '500'});
+      assert.deepEqual(applyWebFonts({'font-family': 'Georgia, NYTFranklin Medium'}),
+        {'font-family': 'Georgia, nyt-franklin, "NYTFranklin Medium"'});
+    });
+
+    it('does not repeat a web font that is already listed', function () {
+      assert.deepEqual(applyWebFonts({'font-family': 'nyt-franklin, NYTFranklin'}),
+        {'font-family': 'nyt-franklin, NYTFranklin'});
+    });
+
+    it('leaves other fonts as they are', function () {
+      assert.deepEqual(applyWebFonts({'font-family': 'Georgia'}), {'font-family': 'Georgia'});
+    });
+  });
+
+  describe('getPointAtCurveLength()', function () {
+    it('measures along a straight path, clamped to its ends', function () {
+      var knots = [[0, 0], [100, 0]];
+      assert.deepEqual(getPointAtCurveLength(knots, 25).map(Math.round), [25, 0]);
+      assert.deepEqual(getPointAtCurveLength(knots, -5), [0, 0]);
+      assert.deepEqual(getPointAtCurveLength(knots, 500), [100, 0]);
+    });
+
+    it('returns null for a path that collapses to a point', function () {
+      assert.equal(getPointAtCurveLength([[1, 1], [1, 1]], 0), null);
+    });
+  });
+});

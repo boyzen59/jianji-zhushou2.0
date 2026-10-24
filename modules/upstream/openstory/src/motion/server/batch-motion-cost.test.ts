@@ -1,0 +1,354 @@
+import { describe, expect, it } from 'vitest';
+import { TEST_FAL_PRICING as FAL_PRICING } from '@/billing/fal-pricing-fixture';
+import {
+  estimateBatchMotionCost,
+  resolveBatchShotVideoModel,
+} from './batch-motion-cost';
+import { estimateVideoCost, gateEstimate } from '@/billing/cost-estimation';
+import { addMicros, micros, ZERO_MICROS } from '@/billing/money';
+import { snapDuration } from '@/motion/snap-duration';
+import { seedanceEditSeconds } from '@/motion/seedance-edit';
+
+const sequence = { videoModel: 'grok_imagine_video_1_5' };
+// `video_variants.model` of each shot's selected version (#1066).
+const shotModels = {
+  selected: new Map([
+    ['shot-a', 'seedance_v2'],
+    ['shot-b', 'kling_v3_pro'],
+  ]),
+  lastFailed: new Map<string, string>(),
+};
+
+describe('resolveBatchShotVideoModel', () => {
+  it('prefers the explicit batch model over the selected version and sequence', () => {
+    expect(
+      resolveBatchShotVideoModel(
+        { id: 'shot-a' },
+        shotModels,
+        sequence,
+        'kling_v3_pro'
+      )
+    ).toBe('kling_v3_pro');
+  });
+
+  it("resolves the shot's selected video version model when no explicit model", () => {
+    expect(
+      resolveBatchShotVideoModel({ id: 'shot-a' }, shotModels, sequence)
+    ).toBe('seedance_v2');
+  });
+
+  it('falls back to the sequence default when the shot has no selected version', () => {
+    expect(
+      resolveBatchShotVideoModel(
+        { id: 'shot-never-rendered' },
+        shotModels,
+        sequence
+      )
+    ).toBe('grok_imagine_video_1_5');
+  });
+
+  it("prefers a failed attempt's model over the older selected version", () => {
+    // shot-a's last render failed on gemini_omni_flash; re-running the batch must retry
+    // that model, not silently fall back to the selected seedance_v2.
+    const withFailure = {
+      selected: shotModels.selected,
+      lastFailed: new Map([['shot-a', 'gemini_omni_flash']]),
+    };
+    expect(
+      resolveBatchShotVideoModel({ id: 'shot-a' }, withFailure, sequence)
+    ).toBe('gemini_omni_flash');
+    // Shots without a failure are untouched.
+    expect(
+      resolveBatchShotVideoModel({ id: 'shot-b' }, withFailure, sequence)
+    ).toBe('kling_v3_pro');
+  });
+
+  it('still lets an explicit batch model override a failed attempt', () => {
+    const withFailure = {
+      selected: shotModels.selected,
+      lastFailed: new Map([['shot-a', 'gemini_omni_flash']]),
+    };
+    expect(
+      resolveBatchShotVideoModel(
+        { id: 'shot-a' },
+        withFailure,
+        sequence,
+        'kling_v3_pro'
+      )
+    ).toBe('kling_v3_pro');
+  });
+});
+
+/** Unequal Seedance i2v vs ref rates so routing regressions fail the suite. */
+const seedanceUnequalPricing = {
+  ...FAL_PRICING,
+  'bytedance/seedance-2.5/image-to-video': {
+    unitPrice: micros(10_000),
+    unit: 'units',
+  },
+  'bytedance/seedance-2.5/reference-to-video': {
+    unitPrice: micros(20_000),
+    unit: 'units',
+  },
+};
+
+// Not an edit: the hold is the shot's own length.
+const shotSeconds = (_shot: unknown, _model: unknown, seconds: number) =>
+  seconds;
+
+describe('estimateBatchMotionCost', () => {
+  it('prices Seedance at reference-to-video when hasReferenceImages is true', () => {
+    const shots = [{ id: 'shot-a' }];
+    const seedanceOnly = {
+      selected: new Map([['shot-a', 'seedance_v2_5']]),
+      lastFailed: new Map<string, string>(),
+    };
+    const i2v = estimateBatchMotionCost(shots, seedanceOnly, sequence, {
+      holdSeconds: shotSeconds,
+      pricing: seedanceUnequalPricing,
+      hasReferenceImages: false,
+    });
+    const ref = estimateBatchMotionCost(shots, seedanceOnly, sequence, {
+      holdSeconds: shotSeconds,
+      pricing: seedanceUnequalPricing,
+      hasReferenceImages: true,
+    });
+    expect(Number(ref)).toBeGreaterThan(Number(i2v));
+  });
+
+  it('supports per-shot hasReferenceImages functions', () => {
+    const shots = [{ id: 'shot-a' }, { id: 'shot-b' }];
+    const seedanceBoth = {
+      selected: new Map([
+        ['shot-a', 'seedance_v2_5'],
+        ['shot-b', 'seedance_v2_5'],
+      ]),
+      lastFailed: new Map<string, string>(),
+    };
+    const mixed = estimateBatchMotionCost(shots, seedanceBoth, sequence, {
+      holdSeconds: shotSeconds,
+      pricing: seedanceUnequalPricing,
+      hasReferenceImages: (shot) => shot.id === 'shot-a',
+    });
+    const bothI2v = estimateBatchMotionCost(shots, seedanceBoth, sequence, {
+      holdSeconds: shotSeconds,
+      pricing: seedanceUnequalPricing,
+      hasReferenceImages: false,
+    });
+    const bothRef = estimateBatchMotionCost(shots, seedanceBoth, sequence, {
+      holdSeconds: shotSeconds,
+      pricing: seedanceUnequalPricing,
+      hasReferenceImages: true,
+    });
+    expect(Number(mixed)).toBeGreaterThan(Number(bothI2v));
+    expect(Number(mixed)).toBeLessThan(Number(bothRef));
+  });
+
+  it('holds a Seedance 2.5 edit at its clip length, not the shot length (#2036)', () => {
+    const shots = [{ id: 'shot-a' }, { id: 'shot-b' }];
+    const seedanceBoth = {
+      selected: new Map([
+        ['shot-a', 'seedance_v2_5'],
+        ['shot-b', 'seedance_v2_5'],
+      ]),
+      lastFailed: new Map<string, string>(),
+    };
+    const clip = [{ kind: 'video', durationSeconds: 24 }];
+    const prompts: Record<string, string> = {
+      'shot-a': 'Edit the walk so she turns',
+      'shot-b': 'She walks to the window',
+    };
+    const price = (seconds: number) =>
+      gateEstimate(
+        estimateVideoCost('seedance_v2_5', seconds, {
+          pricing: FAL_PRICING,
+          resolution: undefined,
+          hasReferenceImages: true,
+          referenceOnly: false,
+        }),
+        { model: 'seedance_v2_5', operation: 'batch-motion' }
+      );
+
+    expect(
+      estimateBatchMotionCost(shots, seedanceBoth, sequence, {
+        pricing: FAL_PRICING,
+        hasReferenceImages: true,
+        // The trigger's callback: the same clip on both shots, the word on one.
+        holdSeconds: (shot, model, seconds) =>
+          Math.max(
+            seconds,
+            seedanceEditSeconds({
+              model,
+              onArk: true,
+              prompt: prompts[shot.id] ?? null,
+              references: clip,
+            }) ?? 0
+          ),
+      })
+    ).toBe(
+      addMicros(price(24), price(snapDuration(undefined, 'seedance_v2_5')))
+    );
+  });
+
+  it('prices a draft batch at 480p only for shots on a draft-capable model (#1756)', () => {
+    const shots = [{ id: 'shot-a' }, { id: 'shot-b' }];
+    const mixedModels = {
+      selected: new Map([
+        ['shot-a', 'seedance_v2_5'],
+        ['shot-b', 'kling_v3_pro'],
+      ]),
+      lastFailed: new Map<string, string>(),
+    };
+    const perShot = (
+      model: 'seedance_v2_5' | 'kling_v3_pro',
+      tier: '480p' | '1080p'
+    ) =>
+      gateEstimate(
+        estimateVideoCost(model, snapDuration(undefined, model), {
+          pricing: FAL_PRICING,
+          resolution: tier,
+          hasReferenceImages: false,
+          referenceOnly: false,
+        }),
+        { model, operation: 'batch-motion' }
+      );
+
+    expect(
+      estimateBatchMotionCost(shots, mixedModels, sequence, {
+        holdSeconds: shotSeconds,
+        pricing: FAL_PRICING,
+        resolution: '1080p',
+        draft: true,
+      })
+    ).toBe(
+      addMicros(
+        perShot('seedance_v2_5', '480p'),
+        perShot('kling_v3_pro', '1080p')
+      )
+    );
+  });
+
+  it('prices Kling with refs on O3 Pro reference-to-video', () => {
+    const shots = [{ id: 'shot-b' }];
+    const withRefs = estimateBatchMotionCost(shots, shotModels, sequence, {
+      holdSeconds: shotSeconds,
+      pricing: FAL_PRICING,
+      hasReferenceImages: true,
+    });
+    const without = estimateBatchMotionCost(shots, shotModels, sequence, {
+      holdSeconds: shotSeconds,
+      pricing: FAL_PRICING,
+      hasReferenceImages: false,
+    });
+    expect(withRefs).toEqual(
+      estimateVideoCost(
+        'kling_v3_pro',
+        snapDuration(undefined, 'kling_v3_pro'),
+        { pricing: FAL_PRICING, hasReferenceImages: true }
+      )
+    );
+    expect(without).toEqual(
+      estimateVideoCost(
+        'kling_v3_pro',
+        snapDuration(undefined, 'kling_v3_pro'),
+        { pricing: FAL_PRICING, hasReferenceImages: false }
+      )
+    );
+    expect(withRefs).not.toEqual(without);
+  });
+
+  it('sums per-shot cost across shots rendered by different (priced) models', () => {
+    const shots = [{ id: 'shot-a' }, { id: 'shot-b' }];
+    const expected = addMicros(
+      addMicros(
+        ZERO_MICROS,
+        gateEstimate(
+          estimateVideoCost(
+            'seedance_v2',
+            snapDuration(undefined, 'seedance_v2'),
+            { pricing: FAL_PRICING }
+          ),
+          { model: 'seedance_v2', operation: 'batch-motion' }
+        )
+      ),
+      gateEstimate(
+        estimateVideoCost(
+          'kling_v3_pro',
+          snapDuration(undefined, 'kling_v3_pro'),
+          { pricing: FAL_PRICING }
+        ),
+        { model: 'kling_v3_pro', operation: 'batch-motion' }
+      )
+    );
+    expect(
+      estimateBatchMotionCost(shots, shotModels, sequence, {
+        holdSeconds: shotSeconds,
+        pricing: FAL_PRICING,
+      })
+    ).toEqual(expected);
+  });
+
+  it('prices every shot with the explicit batch model when given', () => {
+    const shots = [{ id: 'shot-a' }, { id: 'shot-b' }];
+    const perShot = gateEstimate(
+      estimateVideoCost('kling_v3_pro', snapDuration(5, 'kling_v3_pro'), {
+        pricing: FAL_PRICING,
+      }),
+      { model: 'kling_v3_pro', operation: 'batch-motion' }
+    );
+    const expected = addMicros(addMicros(ZERO_MICROS, perShot), perShot);
+    expect(
+      estimateBatchMotionCost(shots, shotModels, sequence, {
+        holdSeconds: shotSeconds,
+        pricing: FAL_PRICING,
+        explicitModel: 'kling_v3_pro',
+        duration: 5,
+      })
+    ).toEqual(expected);
+  });
+
+  it('is ZERO for an empty shot list', () => {
+    expect(
+      estimateBatchMotionCost([], shotModels, sequence, {
+        holdSeconds: shotSeconds,
+        pricing: FAL_PRICING,
+      })
+    ).toEqual(ZERO_MICROS);
+  });
+});
+
+describe('estimateBatchMotionCost — per-shot reference-only', () => {
+  // A batch can mix: a shot overrides the sequence's start-frame mode either
+  // way. Pricing every shot on one shot's answer (the old `.some()`) quoted
+  // the reference-to-video rate for shots that animate from a still.
+  const shots = [
+    { id: 'shot-a', useStartFrame: false },
+    { id: 'shot-b', useStartFrame: true },
+  ];
+  const seedanceBoth = {
+    selected: new Map([
+      ['shot-a', 'seedance_v2_5'],
+      ['shot-b', 'seedance_v2_5'],
+    ]),
+    lastFailed: new Map<string, string>(),
+  };
+  const price = (referenceOnly: boolean | ((s: { id: string }) => boolean)) =>
+    Number(
+      estimateBatchMotionCost(shots, seedanceBoth, sequence, {
+        holdSeconds: shotSeconds,
+        pricing: seedanceUnequalPricing,
+        hasReferenceImages: false,
+        referenceOnly,
+      })
+    );
+
+  it('prices a mixed batch between the all-on and all-off totals', () => {
+    const mixed = price((shot) => shot.id === 'shot-a');
+    expect(mixed).toBeGreaterThan(price(false));
+    expect(mixed).toBeLessThan(price(true));
+  });
+
+  it('still accepts a plain boolean for a uniform batch', () => {
+    expect(price(() => true)).toBe(price(true));
+  });
+});

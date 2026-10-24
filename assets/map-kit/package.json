@@ -1,0 +1,7 @@
+{
+  "name": "jianji-historical-map-kit",
+  "private": true,
+  "type": "module",
+  "scripts": {"draw": "node draw-map.mjs"},
+  "dependencies": {"d3-geo": "3.1.1", "mapshaper": "0.7.98"}
+}

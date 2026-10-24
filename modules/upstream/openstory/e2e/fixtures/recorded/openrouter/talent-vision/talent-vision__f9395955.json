@@ -1,0 +1,26 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Analyze this talent reference: is the image already a character sheet? Describe the person.\nUploaded filename: creature.jpg",
+        "model": "anthropic/claude-sonnet-5.5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\"isCharacterSheet\": false, \"subjectKind\": \"other\", \"suggestedName\": \"Moss Sprite\", \"description\": \"A small forest creature with a round mossy head resembling thick green fur, large pointed elf-like ears, and oversized glowing orange eyes with dark pupils. Its skin is greenish-grey, textured like bark, with slender clawed fingers. It wears a leafy skirt-like garment and a draped green scarf, and carries a tiny glowing lantern while perched atop a moss-covered mound.\", \"age\": \"\", \"gender\": \"\", \"ethnicity\": \"\", \"physicalDescription\": \"Round moss-textured head, large pointed ears, huge orange eyes with black pupils, small nose, subtle smile, greenish-grey bark-like skin, slender limbs with clawed fingers.\", \"standardClothing\": \"Leafy skirt made of layered leaf fronds and a draped green fabric scarf around the neck and shoulders.\", \"distinguishingFeatures\": \"Glowing orange eyes, moss-covered head resembling hair, carries a small lit lantern.\"}"
+      },
+      "recordedTimings": {
+        "ttftMs": 2902,
+        "interChunkDelaysMs": [
+          437, 122, 418, 124, 415, 133, 433, 107, 428, 122, 418, 133, 414, 124,
+          367, 52, 0, 3
+        ],
+        "totalDurationMs": 7152
+      },
+      "metadata": {
+        "systemHash": "67e7d0bd"
+      }
+    }
+  ]
+}

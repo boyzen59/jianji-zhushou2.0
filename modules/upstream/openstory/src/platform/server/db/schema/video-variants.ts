@@ -1,0 +1,183 @@
+/**
+ * Video Variants Schema (flat versions) — Phase 3 of the SSF redesign (#990).
+ *
+ * Each row is ONE video render — a *version*. A "variant" is the emergent group
+ * of rows sharing `(renderSegmentId, model)`; its "versions" are those rows
+ * ordered by time (ULID). Re-rolls accumulate (we keep them); they never
+ * overwrite. A segment's chosen video is whichever version
+ * `render_segments.selectedVideoVersionId` points at — selection is a pointer,
+ * not a per-row flag (revert / switch-model is a repoint); playback reads the
+ * covered shots' video through that pointer.
+ *
+ * The render unit is the SEGMENT, not the scene: render models cap a single
+ * render at a per-model limit (15s, newer models 30s), so a scene is tiled into
+ * ≤cap contiguous-shot segments (`render_segments`); per-shot rendering is the
+ * degenerate case (one shot per segment).
+ *
+ * `manifest` snapshots exactly what the render consumed — one ordered entry per
+ * covered shot, referencing the immutable `shot_prompt_versions` /
+ * `frame_variants` rows (the reference IS the snapshot, since versions are
+ * append-only) plus value-snapshots of non-versioned inputs (`durationMs`).
+ * `inputHash` is computed over the manifest → O(1) staleness; per-shot staleness
+ * is also derivable by comparing a manifest entry's referenced version ids
+ * against the shot's currently-selected prompt/frame versions.
+ *
+ * Versions are immutable once completed (soft-hide via `discardedAt`, never
+ * hard-delete). Replaces the `variantType='video'` rows of `shot_variants`,
+ * which retire for video in this phase.
+ *
+ * See docs/architecture/scene-shot-frame-redesign.md.
+ */
+
+import type { InferInsertModel, InferSelectModel } from 'drizzle-orm';
+import { index, integer, snakeCase, text } from 'drizzle-orm/sqlite-core';
+import { generateId } from '@/platform/id';
+import type { RenderedResolution } from '@/models/resolutions';
+import { renderSegments } from './render-segments';
+import { sequences } from './sequences';
+import { SHOT_GENERATION_STATUSES } from './shots';
+
+// Video rows extend the shared generation statuses with 'cancelled' (#1108
+// Phase 4, mirroring frame_variants): a user cancel is deliberate abandonment,
+// distinct from 'failed' — smart retry and the failure surfaces match on
+// 'failed' only, so a cancel is never auto-re-run and re-billed.
+const VIDEO_VARIANT_STATUSES = [
+  ...SHOT_GENERATION_STATUSES,
+  'cancelled',
+] as const;
+type VideoGenerationStatus = (typeof VIDEO_VARIANT_STATUSES)[number];
+
+/**
+ * One covered shot in a render's manifest — a snapshot of the inputs that shot
+ * contributed. `motionPromptVersionId` / `frameVersionId` reference immutable
+ * version rows (null `frameVersionId` = reference-driven shot with no dedicated
+ * first frame). `durationMs` is a value-snapshot (not a versioned input).
+ *
+ * `usesStartFrame` stamps the mode the render actually ran in. Stamped, not
+ * derived (like `resolution`): the shot's switch can flip after the render,
+ * and a null `frameVersionId` alone is overloaded — it also means "not
+ * pinned" (#1380) and, with a null prompt id, "legacy, unknown provenance".
+ * Required so no write path can forget it. Rows written before the stamp were
+ * backfilled from the shot's mode by
+ * `20260902235958_backfill_manifest_uses_start_frame`; only an empty or
+ * invalid manifest can lack it.
+ * @public consumed from #990+
+ */
+export type VideoManifestEntry = {
+  shotId: string;
+  motionPromptVersionId: string | null;
+  frameVersionId: string | null;
+  usesStartFrame: boolean;
+  durationMs: number;
+  /**
+   * Dialogue TTS clips this render consumed (#1554). Required on the
+   * assembler (`[]` = voiceless) so stamp and verify cannot independently
+   * omit it. The manifest hash body still drops an empty list so pre-#1554
+   * stored digests do not move.
+   */
+  audioClipIds: string[];
+  /**
+   * Identity of the bound dialogue audio (voice id + line + tone + TTS
+   * model), or `null` when voiceless. The sheet analogue: character sheet
+   * hashes live on the still, not the visual prompt. Required so stamp and
+   * verify cannot independently omit it; the hash body still drops `null`
+   * so stored voiceless digests do not move.
+   */
+  audioSourceKey: string | null;
+  /**
+   * The lines the render prompt quoted (#1784, `dialogueLinesKey`): every
+   * line, voiced or not. `null` when none reached the prompt — no lines, no
+   * motion prompt, or a model without audio. Required so stamp and verify
+   * cannot independently omit it; the hash body drops `null` so stored
+   * digests do not move. Absent on rows from before #1784: unknown, never
+   * stale.
+   */
+  dialogueKey: string | null;
+  /**
+   * Provenance of every reference that rode on the wire for this render
+   * (#1657), in either mode: `character:<id>:<sheetVersionId|url>`,
+   * `location:<id>:<refVersionId|url>` and `element:<id>:<url>` (see
+   * `reference-provenance.ts`). Sorted, so order is not identity. The hash
+   * body drops an empty list so stored digests do not move. Absent on rows
+   * from before #1657: unknown, never stale.
+   */
+  referenceKeys: string[];
+};
+
+/** Ordered, one entry per covered shot. @public consumed from #990+ */
+export type VideoManifest = VideoManifestEntry[];
+
+export const videoVariants = snakeCase.table(
+  'video_variants',
+  {
+    id: text()
+      .$defaultFn(() => generateId())
+      .primaryKey()
+      .notNull(),
+    // The render unit this version belongs to. Versions of a segment+model
+    // accumulate under this; the segment's selection pointer chooses one.
+    renderSegmentId: text()
+      .notNull()
+      .references(() => renderSegments.id, { onDelete: 'cascade' }),
+    sequenceId: text()
+      .notNull()
+      .references(() => sequences.id, { onDelete: 'cascade' }),
+
+    model: text({ length: 100 }).notNull(),
+    // Resolution tier this version was asked for (#1449). Null on rows written
+    // before the tier existed. Stamped, not derived: the sequence default can
+    // change after a render, and a 4K re-roll has to stay legible next to the
+    // 720p draft it sits beside. An Ark draft stamps '480p' (#1756).
+    resolution: text({ length: 10 }).$type<RenderedResolution>(),
+    // The Ark task id when this version was rendered as a draft (#1756): the
+    // handle "Render at quality" renders the 1080p final from, valid seven
+    // days from `createdAt`. Null on full renders and rows from before it.
+    draftTaskId: text(),
+
+    // Ordered, one entry per covered shot — the immutable snapshot the render
+    // consumed (see VideoManifestEntry).
+    manifest: text({ mode: 'json' }).$type<VideoManifest>().notNull(),
+
+    // Output
+    url: text(),
+    storagePath: text(),
+
+    // Generation tracking
+    status: text().$type<VideoGenerationStatus>().default('pending').notNull(),
+    workflowRunId: text(),
+    generatedAt: integer({ mode: 'timestamp' }),
+    error: text(),
+
+    // Was this render seeking the segment's primary slot, or just adding a
+    // model alongside it (`variantOnly`, #547)? Without this the two are
+    // indistinguishable once a render fails, since failure clears
+    // `pendingPromoteVersionId` — which is why the shot kept its own
+    // `video_status`/`video_error` copy until #1067 phase 2d. The segment's
+    // in-flight/failed state is the newest primary version's.
+    isPrimary: integer({ mode: 'boolean' }).default(true).notNull(),
+
+    // SHA-256 over the manifest → O(1) staleness of THIS version.
+    inputHash: text(),
+
+    // Soft-hide a version (undoable).
+    discardedAt: integer({ mode: 'timestamp' }),
+
+    createdAt: integer({ mode: 'timestamp' })
+      .$defaultFn(() => new Date())
+      .notNull(),
+    updatedAt: integer({ mode: 'timestamp' })
+      .$defaultFn(() => new Date())
+      .notNull(),
+  },
+  (table) => [
+    // List a variant group's versions by time: filter on
+    // (renderSegmentId, model), order by id (ULID ≈ creation time).
+    index('idx_video_variants_group').on(table.renderSegmentId, table.model),
+    index('idx_video_variants_sequence').on(table.sequenceId),
+  ]
+);
+
+/** @public consumed from #990+ */
+export type VideoVariant = InferSelectModel<typeof videoVariants>;
+/** @public consumed from #990+ */
+export type NewVideoVariant = InferInsertModel<typeof videoVariants>;

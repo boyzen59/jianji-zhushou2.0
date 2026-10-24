@@ -1,0 +1,46 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Classify music design for each scene and generate a unified music prompt for the sequence.\n\nThere are 4 scenes. Return exactly 4 rows in `scenes`, in this order.\n\n<SCENES>\n[\n  {\n    \"sceneId\": \"01M2CJ4TT32EGVA1RXKYMRRG1G\",\n    \"title\": \"Hard morning light cuts across white tile and a...\",\n    \"storyBeat\": \"\",\n    \"durationSeconds\": 18,\n    \"location\": \"\",\n    \"timeOfDay\": \"\"\n  },\n  {\n    \"sceneId\": \"01M2CJ4TTS6FCGZ6XZZKGWGV5X\",\n    \"title\": \"Scarlett strides through a narrow downtown hall...\",\n    \"storyBeat\": \"\",\n    \"durationSeconds\": 12,\n    \"location\": \"\",\n    \"timeOfDay\": \"\"\n  },\n  {\n    \"sceneId\": \"01M2CJ4TTS6FCGZ6XZZKGWGV5Y\",\n    \"title\": \"A wide 16:9 street composition: Scarlett steps ...\",\n    \"storyBeat\": \"\",\n    \"durationSeconds\": 18,\n    \"location\": \"\",\n    \"timeOfDay\": \"\"\n  },\n  {\n    \"sceneId\": \"01M2CJ4TTS6FCGZ6XZZKGWGV5Z\",\n    \"title\": \"On a rooftop beside low concrete walls and pott...\",\n    \"storyBeat\": \"\",\n    \"durationSeconds\": 12,\n    \"location\": \"\",\n    \"timeOfDay\": \"\"\n  }\n]\n</SCENES>\n\nFor each scene, classify:\n1. presence: \"none\"|\"minimal\"|\"moderate\"|\"full\"\n2. style: Genre/instrumentation (if music present)\n3. mood: Emotional quality (if music present)\n4. atmosphere: Environmental atmosphere\n\nThen synthesize unified tags (starting with \"instrumental\") and a 1-2 sentence prompt for one cohesive music track.\n\nRespond with ONLY valid JSON matching the schema.",
+        "model": "openai/gpt-6-luna",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\"scenes\":[{\"sceneId\":\"01M2CJ4TT32EGVA1RXKYMRRG1G\",\"musicDesign\":{\"presence\":\"minimal\",\"style\":\"electronic ambient with soft pulse\",\"mood\":\"focused and anticipatory\",\"atmosphere\":\"bright modern apartment bathroom with crisp morning light\"}},{\"sceneId\":\"01M2CJ4TTS6FCGZ6XZZKGWGV5X\",\"musicDesign\":{\"presence\":\"moderate\",\"style\":\"minimal electronic with rhythmic percussion and warm synths\",\"mood\":\"confident and purposeful\",\"atmosphere\":\"quiet downtown apartment hallway with steady daylight\"}},{\"sceneId\":\"01M2CJ4TTS6FCGZ6XZZKGWGV5Y\",\"musicDesign\":{\"presence\":\"moderate\",\"style\":\"cinematic electronic with pulsing bass and crisp percussion\",\"mood\":\"energized and urban\",\"atmosphere\":\"busy downtown crosswalk filled with commuters, taxis, and reflected daylight\"}},{\"sceneId\":\"01M2CJ4TTS6FCGZ6XZZKGWGV5Z\",\"musicDesign\":{\"presence\":\"full\",\"style\":\"uplifting cinematic electronic with warm synth pads and light percussion\",\"mood\":\"liberated and triumphant\",\"atmosphere\":\"sunlit rooftop above downtown with wind, open sky, and glowing late-afternoon light\"}}],\"tags\":\"instrumental, cinematic, electronic, hopeful, uplifting, building, rhythmic, pulsing, synth, percussion, pads, warm, urban, spacious\",\"prompt\":\"Instrumental cinematic electronic underscore that begins with a sparse, focused pulse in a bright apartment, gradually builds through a purposeful hallway and energized downtown crosswalk, then opens into a warm, uplifting rooftop finale. Use crisp rhythmic percussion, pulsing bass, glowing synth pads, and a spacious sense of forward motion without overpowering the visuals.\"}"
+      },
+      "recordedTimings": {
+        "ttftMs": 2399,
+        "interChunkDelaysMs": [
+          470, 213, 2, 9, 2, 2, 10, 0, 3, 6, 170, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+          0, 0, 187, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+          0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
+          0, 0, 0, 0, 5, 0, 0, 0, 0, 12, 8, 7, 39, 0, 0, 0, 1, 0, 0, 0, 16, 0,
+          0, 7, 13, 0, 134, 14, 32, 0, 0, 1, 28, 0, 1, 0, 21, 0, 0, 0, 0, 0, 0,
+          0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 105, 0, 0, 0, 0, 0, 0,
+          0, 1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 14, 1, 0, 0, 0, 0, 0, 0,
+          39, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0,
+          0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0,
+          0, 0, 0, 33, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+          0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 28, 24, 0, 0, 25, 0, 0, 0, 1, 8, 0, 0,
+          13, 0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 9, 0, 1, 0, 35, 7, 3,
+          0, 0, 13, 13, 1, 0, 15, 12, 5, 0, 0, 27, 0, 45, 0, 0, 1, 0, 0, 29, 0,
+          0, 0, 0, 102, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0,
+          28, 0, 0, 0, 0, 8, 0, 0, 0, 19, 1, 0, 0, 5, 9, 13, 14, 28, 1, 0, 0, 0,
+          11, 0, 8, 18, 1, 8, 0, 0, 11, 0, 5, 1, 40, 1, 12, 0, 0, 8, 20, 26, 18,
+          16, 6, 7, 5, 20, 12, 13, 1, 2, 16, 1, 113, 0, 0, 0, 0, 0, 1, 0, 0, 0,
+          0, 19, 8, 35, 29, 0, 0, 0, 0, 0, 0, 2, 1, 23, 18, 0, 1, 0, 26, 0, 1,
+          6, 23, 0, 0, 26, 0, 0, 0, 30, 20, 0, 1, 0, 23, 0, 0, 0, 13, 19, 0, 0,
+          0, 14, 0, 0, 19, 19, 17, 1, 0, 0, 2, 16, 15, 100, 1, 0, 0, 0, 2, 0, 1,
+          2, 0, 0, 3, 1, 0, 3, 11, 12, 12, 12, 15, 10, 15, 0, 9, 0, 5, 5, 22, 9,
+          19, 42, 0, 0, 21, 1, 0, 0, 131, 0, 0
+        ],
+        "totalDurationMs": 5864
+      },
+      "metadata": {
+        "systemHash": "8a201535"
+      }
+    }
+  ]
+}

@@ -1,0 +1,335 @@
+import { El } from './gui-el';
+import { GUI } from './gui-lib';
+
+// A reusable floating toolbar anchored at the bottom-center of the map area.
+//
+// Multiple toolbars stack vertically inside a shared container, so additional
+// per-mode toolbars (e.g. feature styling) can coexist with the edit toolbar.
+//
+// The DOM is structured to leave room for a future drag handle without
+// requiring rework: the toolbar element is a flex row with a content slot,
+// and a sibling drag-handle slot can be added later.
+//
+// Constructor options:
+//   name:       optional CSS class added to the toolbar element
+//
+// API:
+//   toolbar.addButton(iconRef, opts) -> ToolbarButton
+//   toolbar.addTextButton(label, opts) -> ToolbarButton
+//   toolbar.addSegmentedControl(caption, items, opts) -> ToolbarSegmentedControl
+//   toolbar.addTextField(caption, opts) -> ToolbarTextField
+//   toolbar.addSeparator()
+//   toolbar.addLabel(text) -> El
+//   toolbar.dock(el)    puts a group of controls kept by another toolbar first
+//   toolbar.show()
+//   toolbar.hide()
+//   toolbar.visible()
+//   toolbar.node()
+//
+// Showing or hiding a toolbar fires 'floating_toolbar_change' on the gui.
+// getVisibleFloatingToolbars(gui) lists the visible ones, bottom first.
+
+export function FloatingToolbar(gui, opts) {
+  opts = opts || {};
+  var root = gui.container.findChild('.mshp-main-map');
+  var stack = root.findChild('.floating-toolbar-stack');
+  if (!stack) {
+    stack = El('div').addClass('floating-toolbar-stack').appendTo(root);
+  }
+  var el = El('div').addClass('floating-toolbar');
+  if (opts.name) el.addClass(opts.name);
+  var content = El('div').addClass('floating-toolbar-content').appendTo(el);
+  var visible = false;
+
+  el.appendTo(stack);
+  el.css('display', 'none');
+  if (!gui.floatingToolbars) gui.floatingToolbars = [];
+  gui.floatingToolbars.push(this);
+
+  // Hide when this gui instance becomes inactive (e.g. multi-instance mode)
+  gui.on('active', updateVisibility);
+  gui.on('inactive', updateVisibility);
+
+  this.addButton = function(iconRef, btnOpts) {
+    return new ToolbarButton(content, iconRef, btnOpts || {});
+  };
+
+  this.addTextButton = function(label, btnOpts) {
+    var button = new ToolbarButton(content, null, btnOpts || {});
+    button.setText(label);
+    return button;
+  };
+
+  // A choice between modes with every label visible and the active one lit.
+  // Preferred over a button that rewrites its own label, which leaves no way
+  // to tell the mode you are in from the mode a click would put you in.
+  // items: [{value, label, tooltip}]
+  this.addSegmentedControl = function(caption, items, ctrlOpts) {
+    return new ToolbarSegmentedControl(content, caption, items, ctrlOpts || {});
+  };
+
+  // A short typed value, committed on Enter or on leaving the field.
+  this.addTextField = function(caption, fieldOpts) {
+    return new ToolbarTextField(content, caption, fieldOpts || {});
+  };
+
+  this.addSeparator = function() {
+    return El('div').addClass('floating-toolbar-separator').appendTo(content);
+  };
+
+  // Text that names what the toolbar is acting on, e.g. a layer
+  this.addLabel = function(text) {
+    return El('span').addClass('floating-toolbar-label').appendTo(content).text(text || '');
+  };
+
+  this.dock = function(groupEl) {
+    var node = groupEl.node();
+    var parent = content.node();
+    if (parent.firstChild != node) {
+      parent.insertBefore(node, parent.firstChild);
+    }
+  };
+
+  this.show = function() {
+    if (visible) return;
+    visible = true;
+    updateVisibility();
+    gui.dispatchEvent('floating_toolbar_change');
+  };
+
+  this.hide = function() {
+    if (!visible) return;
+    visible = false;
+    updateVisibility();
+    gui.dispatchEvent('floating_toolbar_change');
+  };
+
+  this.visible = function() {
+    return visible;
+  };
+
+  this.node = function() {
+    return el.node();
+  };
+
+  // Shown and hidden at once, without a fade: one toolbar often replaces
+  // another (the undo buttons move between a mode's toolbar and their own),
+  // and a toolbar fading out keeps its place in the stack, so a fade made the
+  // toolbars around it jump.
+  function updateVisibility() {
+    var shouldShow = visible && GUI.isActiveInstance(gui);
+    el.css('display', shouldShow ? 'flex' : 'none');
+    el.classed('visible', shouldShow);
+  }
+}
+
+// The stack is a reversed column, so the first toolbar in the DOM is the
+// bottom one.
+export function getVisibleFloatingToolbars(gui) {
+  return (gui.floatingToolbars || []).filter(function(toolbar) {
+    return toolbar.visible();
+  }).sort(function(a, b) {
+    return a.node().compareDocumentPosition(b.node()) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+  });
+}
+
+export function makeToolbarButton(parent, iconRef, opts) {
+  return new ToolbarButton(parent, iconRef, opts || {});
+}
+
+function ToolbarSegmentedControl(parent, caption, items, opts) {
+  var el = El('div').addClass('floating-toolbar-group').appendTo(parent);
+  var changeHandlers = [];
+  var value = null;
+  var segments;
+  if (caption) {
+    El('span').addClass('floating-toolbar-caption').appendTo(el).text(caption);
+  }
+  if (opts.classname) el.addClass(opts.classname);
+  var group = El('div').addClass('floating-toolbar-segments').appendTo(el);
+  segments = items.map(function(item) {
+    var button = new ToolbarButton(group, null, {tooltip: item.tooltip});
+    button.setText(item.label);
+    button.on('click', function() {
+      if (value === item.value) return;
+      setValue(item.value);
+      changeHandlers.forEach(function(fn) { fn(value); });
+    });
+    return {value: item.value, button: button};
+  });
+
+  function setValue(val) {
+    value = val;
+    segments.forEach(function(o) {
+      o.button.setSelected(o.value === val);
+    });
+  }
+
+  // Sets the lit segment without firing 'change', for syncing to outside state.
+  this.setValue = function(val) {
+    setValue(val);
+    return this;
+  };
+
+  this.getValue = function() {
+    return value;
+  };
+
+  this.show = function() {
+    el.show();
+    return this;
+  };
+
+  this.hide = function() {
+    el.hide();
+    return this;
+  };
+
+  this.on = function(event, fn) {
+    if (event == 'change') changeHandlers.push(fn);
+    return this;
+  };
+
+  this.node = function() {
+    return el.node();
+  };
+}
+
+function ToolbarTextField(parent, caption, opts) {
+  var el = El('label').addClass('floating-toolbar-group')
+    .addClass('floating-toolbar-field').appendTo(parent);
+  var changeHandlers = [];
+  var committed = '';
+  var input;
+  if (caption) {
+    El('span').addClass('floating-toolbar-caption').appendTo(el).text(caption);
+  }
+  input = El('input').attr('type', 'text').appendTo(el);
+  if (opts.classname) input.addClass(opts.classname);
+  if (opts.placeholder) input.attr('placeholder', opts.placeholder);
+  if (opts.width) input.css('width', opts.width);
+  if (opts.tooltip) el.attr('data-tooltip', opts.tooltip);
+
+  // Keyboard events reach gui.keyboard through the document, so map shortcuts
+  // would fire while the field has focus. Enter commits, Escape abandons the
+  // edit and leaves the field rather than closing the tool around it.
+  input.on('keydown', function(e) {
+    e.stopPropagation();
+    if (e.keyCode == 13) {
+      input.node().blur();
+    } else if (e.keyCode == 27) {
+      input.node().value = committed;
+      input.node().blur();
+    }
+  });
+
+  // Native change fires on Enter and on leaving an edited field, and not when
+  // Escape has put the original value back.
+  input.on('change', function() {
+    var value = input.node().value.trim();
+    committed = value;
+    changeHandlers.forEach(function(fn) { fn(value); });
+  });
+
+  // Sets the displayed value without firing 'change'.
+  this.setValue = function(value) {
+    committed = value == null ? '' : String(value);
+    input.node().value = committed;
+    return this;
+  };
+
+  this.getValue = function() {
+    return input.node().value.trim();
+  };
+
+  this.show = function() {
+    el.show();
+    return this;
+  };
+
+  this.hide = function() {
+    el.hide();
+    return this;
+  };
+
+  this.on = function(event, fn) {
+    if (event == 'change') changeHandlers.push(fn);
+    return this;
+  };
+
+  this.node = function() {
+    return input.node();
+  };
+}
+
+function ToolbarButton(parent, iconRef, opts) {
+  var btn = El('div').addClass('floating-toolbar-btn').appendTo(parent);
+  if (iconRef) {
+    var iconNode = El('body').findChild(iconRef);
+    if (iconNode) {
+      var icon = iconNode.node().cloneNode(true);
+      if (icon.hasAttribute('id')) icon.removeAttribute('id');
+      btn.node().appendChild(icon);
+    }
+  }
+  var enabled = true;
+  var selected = false;
+  var clickHandlers = [];
+
+  if (opts.tooltip) setTooltip(opts.tooltip);
+
+  // Block native dblclick to avoid the map's double-click zoom
+  btn.on('dblclick', function(e) { e.stopPropagation(); });
+
+  btn.on('click', function(e) {
+    if (!enabled) return;
+    for (var i = 0; i < clickHandlers.length; i++) {
+      clickHandlers[i](e);
+    }
+  });
+
+  this.on = function(event, fn) {
+    if (event == 'click') {
+      clickHandlers.push(fn);
+    } else {
+      btn.on(event, fn);
+    }
+    return this;
+  };
+
+  this.enable = function() { return this.setEnabled(true); };
+  this.disable = function() { return this.setEnabled(false); };
+
+  this.setEnabled = function(b) {
+    enabled = !!b;
+    btn.classed('disabled', !enabled);
+    return this;
+  };
+
+  // A button that stays lit to show which of several tools is armed, e.g. the
+  // label tool's anchored/path creation toggles.
+  this.setSelected = function(b) {
+    selected = !!b;
+    btn.classed('selected', selected);
+    return this;
+  };
+
+  this.selected = function() {
+    return selected;
+  };
+
+  this.setTooltip = setTooltip;
+
+  this.setText = function(text) {
+    btn.addClass('text-btn').text(text);
+    return this;
+  };
+
+  this.node = function() {
+    return btn.node();
+  };
+
+  function setTooltip(text) {
+    btn.attr('data-tooltip', text);
+  }
+}

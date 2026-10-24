@@ -1,0 +1,200 @@
+import { internal, stop, mapshaper } from './gui-core';
+
+export var GUI = {};
+
+GUI.isActiveInstance = function(gui) {
+  return gui == GUI.__active;
+};
+
+GUI.isMac = function() {
+  return navigator.userAgent.includes('Mac');
+};
+
+// What the Alt key is called on the user's keyboard, for help text
+GUI.getAltKeyName = function() {
+  return GUI.isMac() ? 'Option' : 'Alt';
+};
+
+GUI.getPixelRatio = function() {
+  var deviceRatio = window.devicePixelRatio || window.webkitDevicePixelRatio || 1;
+  return deviceRatio > 1 ? 2 : 1;
+};
+
+GUI.browserIsSupported = function() {
+  return typeof ArrayBuffer != 'undefined' &&
+      typeof Blob != 'undefined' && typeof File != 'undefined';
+};
+
+GUI.exportIsSupported = function() {
+  return typeof URL != 'undefined' && URL.createObjectURL &&
+    typeof document.createElement("a").download != "undefined" ||
+    !!window.navigator.msSaveBlob;
+};
+
+// PNG and JPEG export draw the map's SVG on a canvas as an image. WebKit limits
+// SVG images to the system's own fonts, so labels in fonts the user installed
+// (e.g. NYT Franklin) come out in Times. That rules out Safari, and every iOS
+// browser, all of which use WebKit; their user agents name AppleWebKit but
+// not Chrome, Chromium or Edge (iOS Chrome is CriOS, iOS Firefox FxiOS).
+GUI.mapImageExportIsSupported = function() {
+  var ua = navigator.userAgent || '';
+  return !/AppleWebKit/.test(ua) || /(Chrome|Chromium|Edg)\//.test(ua);
+};
+
+// TODO: make this relative to a single GUI instance
+GUI.canSaveToServer = function() {
+  return !!(mapshaper.manifest && mapshaper.manifest.allow_saving) && typeof fetch == 'function';
+};
+
+GUI.setSavedValue = function(name, val) {
+  try {
+    window.localStorage.setItem(name, JSON.stringify(val));
+  } catch(e) {}
+};
+
+GUI.getSavedValue = function(name) {
+  try {
+    return JSON.parse(window.localStorage.getItem(name));
+  } catch(e) {}
+  return null;
+};
+
+GUI.getUrlVars = function() {
+  var q = window.location.search.substring(1);
+  return q.split('&').reduce(function(memo, chunk) {
+    var pair = chunk.split('=');
+    var key = decodeURIComponent(pair[0]);
+    memo[key] = parseVal(pair[1]);
+    return memo;
+  }, {});
+
+  function parseVal(val) {
+    var str = val ? decodeURIComponent(val) : 'true';
+    if (str == 'true' || str == 'false') return JSON.parse(str);
+    return str;
+  }
+};
+
+// Assumes that URL path ends with a filename
+GUI.getUrlFilename = function(url) {
+  var path = /\/\/([^#?]+)/.exec(url);
+  var file = path ? path[1].split('/').pop() : '';
+  return file;
+};
+
+GUI.formatMessageArgs = function(args) {
+  // .replace(/^\[[^\]]+\] ?/, ''); // remove cli annotation (if present)
+  return internal.formatLogArgs(args);
+};
+
+GUI.handleDirectEvent = function(cb) {
+  return function(e) {
+    if (e.target == this) cb();
+  };
+};
+
+// The focused element, if the user is typing into it. Callers use this to keep
+// out of the way: arrow keys should move a caret rather than change layers, and
+// Escape should leave a field rather than close a panel.
+//
+// TEXTAREA is included for the label editor's offscreen textarea, which holds
+// focus for the whole of an editing session.
+GUI.getInputElement = function() {
+  var el = document.activeElement;
+  return (el && (el.tagName == 'INPUT' || el.tagName == 'TEXTAREA' ||
+    el.contentEditable == 'true')) ? el : null;
+};
+
+GUI.textIsSelected = function() {
+  return !!GUI.getInputElement();
+};
+
+GUI.selectElement = function(el) {
+  var range = document.createRange(),
+      sel = window.getSelection();
+  range.selectNodeContents(el);
+  sel.removeAllRanges();
+  sel.addRange(range);
+};
+
+GUI.blurActiveElement = function() {
+  var el = GUI.getInputElement();
+  if (el) el.blur();
+};
+
+// Filter out delayed click events, e.g. so users can highlight and copy text
+// Filter out context menu clicks
+GUI.onClick = function(el, cb) {
+  var time;
+  el.on('mousedown', function() {
+    time = +new Date();
+  });
+  el.on('mouseup', function(e) {
+    if (looksLikeContextClick(e)) {
+      return;
+    }
+    if (+new Date() - time < 300) {
+      cb(e);
+    }
+  });
+};
+
+GUI.onContextClick = function(el, cb) {
+  el.on('mouseup', function(e) {
+    if (looksLikeContextClick(e)) {
+      e.stopPropagation();
+      e.preventDefault();
+      cb(e);
+    }
+  });
+};
+
+function looksLikeContextClick(e) {
+  return e.button > 1 || e.ctrlKey;
+}
+
+// tests if filename is a type that can be used
+// GUI.isReadableFileType = function(filename) {
+//   return !!internal.guessInputFileType(filename) || internal.couldBeDsvFile(filename) ||
+//     internal.isZipFile(filename);
+// };
+
+GUI.parseFreeformOptions = function(raw, cmd) {
+  var str = raw.trim(),
+      parsed;
+  if (!str) {
+    return {};
+  }
+  if (!/^-/.test(str)) {
+    str = '-' + cmd + ' ' + str;
+  }
+  parsed =  internal.parseCommands(str);
+  if (!parsed.length || parsed[0].name != cmd) {
+    stop("Unable to parse command line options");
+  }
+  return parsed[0].options;
+};
+
+// Convert an options object to a command line options string
+// (used by gui-import-control.js)
+// TODO: handle options with irregular string <-> object conversion
+GUI.formatCommandOptions = function(o) {
+  var arr = [];
+  Object.keys(o).forEach(function(key) {
+    var name = key.replace(/_/g, '-');
+    var val = o[key];
+    var str;
+    // TODO: quote values that contain spaces
+    if (Array.isArray(val)) {
+      str = name + '=' + val.join(',');
+    } else if (val === true) {
+      str = name;
+    } else if (val === false) {
+      return;
+    } else {
+      str = name + '=' + val;
+    }
+    arr.push(str);
+  });
+  return arr.join(' ');
+};

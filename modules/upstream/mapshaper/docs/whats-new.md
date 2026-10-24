@@ -1,0 +1,257 @@
+---
+title: What's new
+description: A curated log of recently added user-visible features in Mapshaper, with links into the rest of the docs.
+---
+
+# What's new
+
+This is a curated list of recently added features. For the full list of changes, including bug fixes and internal work, see the [changelog](https://github.com/mbloch/mapshaper/blob/master/CHANGELOG.md) on GitHub.
+
+## October 2026
+
+<div class="whats-new-entry">
+
+**New style effects in the web UI.**
+
+- Inner and outer glows.
+- Dashed lines.
+- Arrowheads or dots at the ends of lines, with an optional fade-in along the line's tail.
+- Pattern fills: hatches, dots, squares and dashes.
+
+→ See [`-style`](/docs/reference.html#-style) to create the same effects on the command line.
+</div>
+
+<div class="whats-new-entry">
+
+**Color palettes.** In the web UI, the Palettes button beside the polygon fill color opens a panel for coloring polygons by a data field.
+
+- Sequential, diverging and categorical color schemes.
+- Preset color ramps, or build your own with the help of perceptually even interpolation.
+- Support for continuous (unclassed) color ramps.
+- A popup editor for adjusting the class breaks of sequential and diverging palettes.
+
+→ See [`-classify`](/docs/reference.html#-classify) for the command line syntax.
+</div>
+
+<div class="whats-new-entry">
+
+**HTML, PNG and JPEG output**
+
+Maps can now be exported as an HTML fragment plus an image, in the manner of the [ai2html](https://github.com/newsdev/ai2html) script for Adobe Illustrator. Options control the image format and resolution, whether the map has a fixed size or fills the width of its container, and whether labels are rendered in SVG or HTML.
+
+Maps can also be exported as PNG or JPEG images, labels included.
+
+→ See [`-o`](/docs/reference.html#-o) for the `format=html`, `format=png` and `format=jpg` output options.
+</div>
+
+## September 2026
+
+<!-- <div class="whats-new-entry">
+
+**New `-labels` command.** [-labels](/docs/reference.html#-labels) styles labels, turns points into labels (`-labels text=NAME`) and adds single labels (`-labels coordinates=x,y text='...'`). Label options such as `font-size=`, `halo-width=` and `callout=` are documented there now, not under `-style`, which covers polygons, lines and point symbols. `-style` still accepts the label options, so existing scripts keep working.
+
+</div> -->
+
+<div class="whats-new-entry">
+
+**Preview mode.** The web UI has a preview toggle that shows what a map will look like when exported. (Currently SVG is the only export format for styled maps; more are planned.) You can continue editing map layers in preview mode.
+
+</div>
+
+<div class="whats-new-entry">
+
+**Improved label editing.**
+
+- Label text is now edited in place, directly on the map.
+- Curved labels follow a path instead of attaching to a point anchor. Create a path by clicking; a smooth curve connects the points.
+- Area text wraps to a set width. Click the map to place a default-sized text block, or drag across to set the width.
+- Callouts connect a label to its anchor with a straight, elbow or curved line, with optional arrowheads. Add them from the Callout section of the label panel.
+- Halos draw an outline around label text to enhance legibility. See the Halo section of the label panel.
+
+</div>
+
+<div class="whats-new-entry">
+
+**Pie and donut symbols.** The `-symbols` command has a new `pie` type. A `values=` list sets the size of each wedge from numbers, field names or expressions, and a `fills=` list sets their colors. Adding `hole=` makes the symbol a donut, either as a radius or, if negative, as a distance inward from the edge.
+
+→ See [`-symbols`](/docs/reference.html#-symbols) and the [styles and symbols guide](/docs/guides/styles-and-symbols.html).
+</div>
+
+## August 2026
+
+<div class="whats-new-entry">
+
+**Repel command.** The `-repel` command removes or reduces overlaps between circle symbols. A `max-shift=` option keeps symbols within a given distance of their true positions. A `polygons=` option constrains symbols to polygon boundaries.
+
+→ See [`-repel`](/docs/reference.html#-repel).
+</div>
+
+<div class="whats-new-entry">
+
+**Isobands.**  The `-contours` command has a new `closed` flag for creating polygon bands.
+
+</div>
+
+<div class="whats-new-entry">
+
+**Clean command improvements.**
+
+- A new `close-outer-gaps` option closes cracks that open onto the outside of a polygon mosaic.
+- The `gap-width=` option is now the preferred way to set the threshold for filling gaps. Gap artifacts tend to be long and thin slivers, so a width parameter is more suitable than the now-deprecated `gap-fill-area=` and `sliver-control=` options.
+
+</div>
+
+<div class="whats-new-entry">
+
+**Snip tool.** The web UI has a snip mode for cutting polyline features apart. Hover over a line to see its vertices, then click a vertex or a point along a segment to divide it in two. The shorter piece becomes a new feature, so on a multipart feature the rest stays connected. Rings take two clicks, since one cut leaves them in one piece.
+
+</div>
+
+## July 2026
+
+<div class="whats-new-entry">
+
+**Saving rasters as GeoTIFF files.** Raster layers can now be exported to a `.tif` GeoTIFF file. Files are compressed by default.
+
+→ See [File formats](/docs/formats/overview.html) and [`-o`](/docs/reference.html#-o).
+</div>
+
+<div class="whats-new-entry">
+
+**Contour lines from rasters.** The `-contours` command traces contour lines from a raster layer &mdash; typically elevation contours from a digital elevation model. Mapshaper picks a sensible spacing between lines from the data itself, or you can set your own with `interval=` or a list of `levels=`. Add `+` to keep the raster layer.
+
+→ See [`-contours`](/docs/reference.html#-contours).
+</div>
+
+<div class="whats-new-entry">
+
+**Blur command.** The `-blur` command takes a radius either in pixels (`-blur 5px`) or as a real-world distance (`-blur 500m`). Slightly blurring an elevation model before running `-contours` is an effective way to get smoother, more generalized contour lines.
+
+→ See [`-blur`](/docs/reference.html#-blur).
+</div>
+
+<div class="whats-new-entry">
+
+**Interrupted and polyhedral world projections.** The `-proj` command supports Interrupted Goode Homolosine (`igh`, `igh_o`), Interrupted Mollweide (`imoll`, `imoll_o`), Buckminster Fuller's Dymaxion map (`dymaxion`, `dymaxion2`), two octahedral butterfly maps (`butterfly`, `butterfly2`), the Cahill-Keyes projection (`cahill_keyes`), Hajime Narukawa's 2022 update to the AuthaGraph projection (`narukawa2022`), and two rectangular world maps using tetrahedral geometry (`markley`, `calm`). The `-graticule` command can generate graticules, polygon footprints and neatlines for all of these projections.
+
+→ See [Interrupted and polyhedral world projections](/docs/guides/projections.html#interrupted-and-polyhedral-world-projections).
+</div>
+
+<div class="whats-new-entry">
+
+**Ruler tool.** The web UI has a ruler mode for measuring distances on the map. It supports great-circle measurements, projected distance readouts, basemap view, and draggable ruler endpoints.
+
+</div>
+
+## June 2026
+
+<div class="whats-new-entry">
+
+**Smooth command.** The `-smooth` command smooths the geometry of polygon and polyline features to a given resolution.
+
+- Sharp corners where straight-line segments meet are preserved by default instead of being rounded.
+- By default, a pre-filter is applied to remove intricate sub-scale detail (jetties, narrow inlets, spikes).
+- The `gain` option controls the amplitude of output curves.
+- The `max-bend-angle` option trades output vertex count against join smoothness.
+
+→ See [`-smooth`](/docs/reference.html#-smooth).
+</div>
+
+<div class="whats-new-entry">
+
+**Buffer command.** The `-buffer` command makes buffers around points, lines and polygons.
+
+- The command uses geodesic distance on lat-long datasets and on projected datasets with the `geodesic` option.
+- Negative `radius` parameters shrink polygons (positive distances expand them).
+- The `topological` option prevents buffers from overlapping nearby polygons.
+- The `fill-gaps` option fills enclosed holes and narrow-mouthed inlets (like a river up to its mouth) without growing the outer boundary.
+
+→ See [`-buffer`](/docs/reference.html#-buffer).
+</div>
+
+## May 2026
+
+<div class="whats-new-entry">
+
+**Raster layer support.** Mapshaper can now import GeoTIFF rasters, plus PNG and JPEG images with world-file georeferencing, preview them in the web UI, clip them with the rectangle tool, and export as images embedded in SVG. Mapshaper's default options for raster importing and projecting rasters should work well for typical image layers. When importing rasters containing data, you may need to set additional options, which are documented in the command reference.
+
+→ See [`-i`](/docs/reference.html#-i-input).
+</div>
+
+<div class="whats-new-entry">
+
+**Point icons with `-style`.** The `-style` command has new `icon=`, `icon-size=` and `icon-color=` options for drawing simple point icons, including circles, squares, rings and stars. Icons can be combined with labels on the same point layer.
+
+→ See [`-style`](/docs/reference.html#-style).
+</div>
+
+<div class="whats-new-entry">
+
+**Undo/redo for web UI commands.** The web UI can now save temporary restore data while you work, so console commands and other data edits can be undone and redone from a pop-up toolbar. **This feature is very new and may have bugs, please report any problems that you encounter**. Undo is on by default and can be turned off from the new History menu.
+
+</div>
+
+<div class="whats-new-entry">
+
+**More grid options.** The `-grid` command can now create rhombus and triangle grids. There are new `cols=`, `rows=` and `cells=` options for controlling the size of the grid cells, as alternatives to the original `interval=` option. A new `cell-scale=` option lets you scale each cell within the grid (creating gaps or overlaps between adjacent cells).
+
+→ See [`-grid`](/docs/reference.html#-grid).
+</div>
+
+<div class="whats-new-entry">
+
+**GeoParquet support.** Mapshaper reads and writes GeoParquet (`.parquet`) files. To use ZSTD compression (instead of the default Snappy compression), add `compression=zstd` to the output options.
+
+→ See [GeoParquet](/docs/formats/geoparquet.html).
+</div>
+
+## April 2026
+
+<div class="whats-new-entry">
+
+**Messages panel.** Warnings and informational messages are now collected in a messages panel. When new messages are available, an icon with a count appears in the header bar; clicking it opens the panel. This keeps important information accessible without interrupting your session with a modal popup.
+
+</div>
+
+<div class="whats-new-entry">
+
+**Command files.** A sequence of Mapshaper commands can be written to a `.txt` file with `#` comments and no shell quoting, and run with `-run <file>` (or just `mapshaper commands.txt`). Command files can also be written in a shell-compatible way, if you want to be able to paste the commands into the terminal or add them to a shell script. **Update:** these files can also be imported and run in the browser UI.
+
+```bash
+mapshaper build.txt
+```
+
+→ See [Command files](/docs/essentials/command-line.html#command-files) in the reference.
+</div>
+
+<div class="whats-new-entry">
+
+**Variable interpolation in commands.** Command files and command lines support `{{VAR}}` placeholders, resolved at run time against environment variables (`{{env.HOME}}`), values set with the new `-vars` and `-defaults` commands, and variables defined dynamically by `-calc`, `-define` and `-each` expressions.
+
+```bash
+mapshaper -vars YEAR=2030 PCT=5 -run build.txt
+```
+
+→ See [Variable interpolation](/docs/essentials/command-line.html#variable-interpolation), [`-vars`](/docs/reference.html#-vars) and [`-defaults`](/docs/reference.html#-defaults).
+</div>
+
+<div class="whats-new-entry">
+
+**Farewell to dissolve2.** The `-dissolve` command now uses Mapshaper's most robust dissolve function, which can handle overlaps, gaps and other topology errors. The legacy faster algorithm is still available as `-dissolve no-repair`. (The old `-dissolve2` is now just an alias for `-dissolve`.)
+
+→ See [`-dissolve`](/docs/reference.html#-dissolve).
+</div>
+
+<div class="whats-new-entry">
+
+**FlatGeobuf and GeoPackage support.** Mapshaper reads and writes FlatGeobuf (`.fgb`) and GeoPackage (`.gpkg`) files.
+
+→ See [FlatGeobuf](/docs/formats/flatgeobuf.html), [GeoPackage](/docs/formats/geopackage.html) and [`-i layers=`](/docs/reference.html#-i-input).
+</div>
+
+<div class="whats-new-entry">
+
+**SVG import.** SVG files exported by Mapshaper can be re-imported &mdash; useful for making stylistic edits.
+
+→ See [SVG](/docs/formats/svg.html).
+</div>

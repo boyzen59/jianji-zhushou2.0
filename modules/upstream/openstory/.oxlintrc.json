@@ -1,0 +1,263 @@
+{
+  "plugins": [
+    "eslint",
+    "typescript",
+    "unicorn",
+    "react",
+    "react-perf",
+    "jsx-a11y",
+    "oxc"
+  ],
+  "jsPlugins": [
+    "./scripts/lint/no-loose-text.ts",
+    "./scripts/lint/restricted-imports.ts"
+  ],
+  "categories": {
+    "correctness": "error"
+  },
+  "ignorePatterns": [
+    "**/mockServiceWorker.js",
+    "*.gen.ts",
+    "src/ui/shadcn/**/*.tsx",
+    "containers/**"
+  ],
+  "rules": {
+    "typescript/no-explicit-any": "error",
+    "typescript/consistent-type-assertions": "error",
+    "typescript/no-unnecessary-type-assertion": "error",
+    "typescript/no-unsafe-type-assertion": "error",
+    "typescript/no-non-null-assertion": "error",
+    // `import { type X } from 'y'` compiles to `import {} from 'y'` under
+    // verbatimModuleSyntax — a side-effect import that keeps y's whole graph
+    // in the client bundle. Only the top-level `import type` form is erased,
+    // so the boundary rule below (allowTypeImports) is only sound if the
+    // inline form cannot exist (#1445).
+    "typescript/no-import-type-side-effects": "error",
+    "typescript/no-floating-promises": "error",
+    "typescript/no-misused-promises": "error",
+    "typescript/await-thenable": "error",
+    "typescript/no-unnecessary-condition": "warn",
+    "eslint/no-console": "error",
+    "unicorn/prefer-optional-catch-binding": "error",
+    "react/rules-of-hooks": "error",
+    // oxlint 1.80 promoted the React Compiler rules into `correctness`, which added
+    // 87 errors on unchanged source (#1404). Downgraded to `warn` so the findings
+    // stay visible without gating CI. #1417 tracks working them down: restore a rule
+    // to "error" and delete its line here once its count reaches zero.
+    "react/refs": "warn",
+    "react/set-state-in-effect": "warn",
+    "react/preserve-manual-memoization": "warn",
+    "react/purity": "warn",
+    "react/immutability": "warn",
+    "react/incompatible-library": "warn",
+    // 1.80 also stopped defaulting these ignore patterns, so idiomatic `_`
+    // throwaways and omit-a-key rest destructuring began erroring.
+    "eslint/no-unused-vars": [
+      "error",
+      {
+        "argsIgnorePattern": "^_",
+        "varsIgnorePattern": "^_",
+        "caughtErrorsIgnorePattern": "^_",
+        "destructuredArrayIgnorePattern": "^_",
+        "ignoreRestSiblings": true
+      }
+    ],
+    "openstory/no-loose-text": "error",
+    // ── Import boundaries (#1445, #1489) ─────────────────────────────────
+    // One rule per concern, so each override below answers exactly one
+    // question — "which files may do X" — and never restates another rule.
+    // Every file starts with all four bans; overrides lift one at a time
+    // (`platform-domain-blind` is the inverse: on for src/platform/** only).
+    // `import type` never counts (TypeScript erases it); the inline
+    // `import { type X }` form is banned by `no-import-type-side-effects`.
+    // The transitive backstop is src/platform/client-server-boundary.test.ts;
+    // src/platform/server/db/db-access-allowlist.test.ts pins the db
+    // allowlists by resolving relative imports the linter cannot see.
+    "boundaries/no-raw-db": [
+      "error",
+      {
+        "modules": ["#db-client"],
+        "message": "#db-client is the raw D1 handle. Only the scoped-db factory, Better Auth, the pricing/cron jobs and the seed read it (override `boundaries/no-raw-db` below + db-access-allowlist.test.ts). Everything team-scoped goes through context.scopedDb."
+      }
+    ],
+    "boundaries/no-scoped-factory": [
+      "error",
+      {
+        "modules": ["@/platform/server/db/scoped"],
+        "names": ["createScopedDb", "createSystemAdminScopedDb"],
+        "message": "A ScopedDb is minted only by the request middlewares and the workflow base (override `boundaries/no-scoped-factory` below). Use context.scopedDb."
+      }
+    ],
+    "boundaries/no-sql": [
+      "error",
+      {
+        "modules": ["drizzle-orm", "drizzle-orm/*", "!drizzle-orm/zod"],
+        "message": "SQL lives in the db layer only: src/**/server/db/** (scoped-db modules), the schema, the seeds. Add a method there and call it through scopedDb — do not pass a Database handle into a domain module. drizzle-orm/zod (schema-derived validators) is fine anywhere."
+      }
+    ],
+    "boundaries/no-server-imports": [
+      "error",
+      {
+        "modules": ["@/**/server/*", "@/**/server/**"],
+        "message": "src/**/server/** is server-only and must not ship to the browser. Import a domain-root helper, or make this a type-only import. Server fns (*.fn.ts) may import it inside .handler()."
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": ["*.test.ts", "*.spec.ts", "*.gen.ts", "*.stories.tsx"],
+      "rules": {
+        "typescript/no-explicit-any": "warn",
+        "typescript/no-floating-promises": "off",
+        "eslint/no-console": "off"
+      }
+    },
+    {
+      "files": [
+        "scripts/**/*.ts",
+        "e2e/**/*.ts",
+        "src/platform/logger.ts",
+        "src/mocks/**/*.ts"
+      ],
+      "rules": {
+        "react/rules-of-hooks": "off",
+        "eslint/no-console": "off"
+      }
+    },
+    {
+      // Server code may import server code. Server fns are here because the
+      // compiler strips `.handler()` (the boundary test models that
+      // stripping); the root-level routes are pure server routes whose only
+      // `createFileRoute` option is `server` (pruned from the client tree);
+      // tests never ship.
+      "files": [
+        "src/**/server/**",
+        "src/**/*.fn.ts",
+        "src/server.ts",
+        "src/instrumentation.ts",
+        "src/routes/api/**",
+        "src/routes/*well-known/**",
+        "src/routes/oauth/login.ts",
+        "src/routes/mcp.ts",
+        "src/routes/r2.$.ts",
+        "src/routes/llms*.ts",
+        "src/**/*.test.ts",
+        "scripts/**"
+      ],
+      "rules": { "boundaries/no-server-imports": "off" }
+    },
+    {
+      // The db layer writes SQL: scoped-db modules (`<domain>/server/db/<table>.ts`),
+      // the schema and clients, the seeds, the ScopedDb aggregate. Scripts and
+      // the CLI configs drive drizzle directly; tests build their own harness.
+      "files": [
+        "src/**/server/db/**",
+        "src/server.ts",
+        "src/platform/server/auth/cli-config.ts",
+        "src/platform/server/test/seed.ts",
+        "src/platform/server/cron/reconcile-all.ts",
+        "src/billing/server/reconcile-fal-billing.ts",
+        "src/billing/server/refresh-fal-pricing.ts",
+        "src/billing/server/fal-pricing-live.ts",
+        "src/billing/server/seed-model-pricing.ts",
+        "src/**/*.test.ts",
+        "scripts/**"
+      ],
+      "rules": { "boundaries/no-sql": "off" }
+    },
+    {
+      // Raw `#db-client` readers: platform-wide (not team-scoped) tables or
+      // the scoped-db factory itself. Pinned by db-access-allowlist.test.ts.
+      // The four pricing/reconcile jobs + the cron dispatcher are one
+      // capability without a db-layer module yet (#1535); they collapse to
+      // one entry when it lands.
+      "files": [
+        "src/platform/server/db/scoped.ts",
+        "src/platform/server/db/client.ts",
+        "src/platform/server/auth/config.ts",
+        "src/platform/server/cron/reconcile-all.ts",
+        "src/billing/server/reconcile-fal-billing.ts",
+        "src/models/server/reconcile-byteplus-assets.ts",
+        "src/billing/server/refresh-fal-pricing.ts",
+        "src/billing/server/fal-pricing-live.ts",
+        "src/billing/server/seed-model-pricing.ts",
+        "src/platform/server/test/seed.ts"
+      ],
+      "rules": { "boundaries/no-raw-db": "off" }
+    },
+    {
+      // Request boundaries (middlewares/MCP) and the workflow base mint the scoped db for
+      // handlers / runs. Pinned by db-access-allowlist.test.ts.
+      "files": [
+        "src/platform/middleware.fn.ts",
+        "src/billing/stripe-webhook-middleware.fn.ts",
+        "src/platform/server/mcp/server.ts",
+        "src/platform/server/workflow/base-workflow.ts"
+      ],
+      "rules": { "boundaries/no-scoped-factory": "off" }
+    },
+    {
+      // Platform is domain-blind (#1489): infrastructure may not value-import
+      // a product domain; a file that needs one belongs to that domain.
+      "files": ["src/platform/**"],
+      "rules": {
+        "boundaries/platform-domain-blind": [
+          "error",
+          {
+            // Everything under src/ is a product domain unless named here, so a
+            // new domain folder is covered without touching this list, and a
+            // new non-domain folder fails loudly until it is added.
+            "modules": [
+              "@/**",
+              "!@/platform/**",
+              "!@/ui/**",
+              "!@/mocks/**",
+              "!@/test/**",
+              "!@/types/**",
+              "!@/styles/**"
+            ],
+            "message": "src/platform is domain-blind: it may not value-import a product domain. Move this file to the domain it is about (its server/ half if it needs server code), or make the import type-only. Composition roots are listed in the `boundaries/platform-domain-blind` override."
+          }
+        ]
+      }
+    },
+    {
+      // src/routes is the router's input: every file in it becomes a route
+      // (there is no routeFileIgnorePattern). Tests for a route's handler
+      // live next to the handler logic in the domain's server/ folder
+      // (e.g. platform/server/api-v1/device-routes.test.ts).
+      "files": [
+        "src/routes/**/*.test.ts",
+        "src/routes/**/*.test.tsx",
+        "src/routes/**/__tests__/**",
+        "src/routes/**/*.stories.tsx"
+      ],
+      "rules": {
+        "boundaries/wrong-place": [
+          "error",
+          {
+            "message": "Tests and stories do not live in src/routes — the router turns every file here into a route. Put the test next to the handler logic it covers (the domain's server/ folder)."
+          }
+        ]
+      }
+    },
+    {
+      // Composition roots: the few platform files whose job is to wire every
+      // domain together. Keep this list short — a new entry usually means a
+      // file that belongs in a domain. Pinned by src/platform/domain-blind.test.ts.
+      "files": [
+        "src/platform/server/db/scoped.ts",
+        "src/platform/server/db/scoped-workflow.ts",
+        "src/platform/server/db/scoped/admin.ts",
+        "src/platform/server/db/seed-system-templates.ts",
+        "src/platform/server/api-v1/**",
+        "src/platform/server/mcp/tools/**",
+        "src/platform/ui/realtime/query-cache-updater.ts",
+        "src/platform/server/workflow/base-workflow.ts",
+        "src/platform/**/*.test.ts",
+        "src/platform/**/*.test.tsx"
+      ],
+      "rules": { "boundaries/platform-domain-blind": "off" }
+    }
+  ]
+}

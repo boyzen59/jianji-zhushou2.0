@@ -1,0 +1,358 @@
+/**
+ * The recast snapshots are built at the trigger, before the sheet the awaited
+ * child will generate exists — so the subject's sheet enters as a sentinel and
+ * the workflow substitutes the real one in memory.
+ *
+ * The invariant that matters: a merged snapshot must be byte-identical to the
+ * snapshot the trigger WOULD have built had the sheet already existed. If it
+ * isn't, the regenerated image is stamped with a hash nothing can reproduce
+ * and every shot reports permanently stale.
+ */
+
+import { describe, expect, it } from 'vitest';
+import type { Scene } from '@/shots/scene-analysis.schema';
+import type {
+  CastCharacterWithSheet,
+  SequenceElement,
+  SequenceLocationWithReference,
+  Shot,
+} from '@/platform/server/db/schema';
+import { buildRegenerateShotSnapshot } from '@/shots/server/workflows/regenerate-shots-snapshot';
+import {
+  mergeRecastSheetIntoSnapshots,
+  PENDING_SHEET_HASH,
+  PENDING_SHEET_URL,
+} from './recast-snapshot';
+
+const NOW = new Date('2026-08-07T00:00:00Z');
+const PROMPT = 'Jack at the docks at dusk';
+const NEW_SHEET_URL = 'https://example.com/jack-recast.png';
+const NEW_SHEET_HASH = 'jack-hash-v2';
+
+function makeCharacter(
+  overrides: Partial<CastCharacterWithSheet> = {}
+): CastCharacterWithSheet {
+  const character: CastCharacterWithSheet = {
+    id: 'c1',
+    sequenceId: 'seq1',
+    characterId: 'jack',
+    name: 'Jack',
+    age: '30s',
+    gender: null,
+    ethnicity: null,
+    physicalDescription: null,
+    standardClothing: null,
+    legacyDistinguishingFeatures: null,
+    personality: null,
+    movement: null,
+    voiceOnly: false,
+    isPerson: true,
+    rendering: 'Photoreal live action',
+    voiceId: null,
+    voiceDescription: null,
+    voicePreviews: null,
+    useVoice: null,
+    consistencyTag: 'jack-the-pi',
+    sheetImageUrl: 'https://example.com/jack-old.png',
+    sheetImagePath: null,
+    sheetPortraitUrl: null,
+    sheetStatus: 'completed',
+    sheetGeneratedAt: NOW,
+    sheetError: null,
+    sheetInputHash: 'jack-hash-v1',
+    selectedSheetVersionId: null,
+    // Wearing its default look (#2015).
+    lookId: 'default-look',
+    lookName: 'Default',
+    looks: [],
+    styling: null,
+    // Cast in its sequence (#2017).
+    castId: 'cast-1',
+    teamId: 'team-1',
+    selectedBibleVersionId: 'bible-1',
+    pendingPromoteSheetVersionId: null,
+    selectedVoiceVersionId: null,
+    pendingPromoteVoiceVersionId: null,
+    firstMentionLine: null,
+    firstMentionText: null,
+    firstMentionSceneId: null,
+    deletedAt: null,
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+  return { ...character, ...overrides };
+}
+
+function makeLocation(
+  overrides: Partial<SequenceLocationWithReference> = {}
+): SequenceLocationWithReference {
+  const location: SequenceLocationWithReference = {
+    id: 'l1',
+    teamId: 'team-1',
+    legacyLibraryReferenceHash: null,
+    linkId: 'link-1',
+    attached: false,
+    sequenceId: 'seq1',
+    locationId: 'docks',
+    name: 'The Docks',
+    type: 'exterior',
+    description: 'A weathered pier',
+    architecturalStyle: null,
+    keyFeatures: null,
+    ambiance: null,
+    rendering: 'Photoreal live action',
+    consistencyTag: 'the-docks',
+    referenceImageUrl: 'https://example.com/docks-old.png',
+    referenceImagePath: null,
+    referencePortraitUrl: null,
+    referenceStatus: 'completed',
+    referenceGeneratedAt: NOW,
+    referenceError: null,
+    referenceInputHash: 'docks-hash-v1',
+    selectedReferenceVersionId: null,
+    selectedBibleVersionId: null,
+    pendingPromoteReferenceVersionId: null,
+    firstMentionSceneId: null,
+    firstMentionText: null,
+    firstMentionLine: null,
+    deletedAt: null,
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+  return { ...location, ...overrides };
+}
+
+const SHOT: Shot = {
+  id: 'shot1',
+  sequenceId: 'seq1',
+  sceneId: 's1',
+  shotNumber: 1,
+  durationMs: 3000,
+  useStartFrame: null,
+  selectedMotionPromptVersionId: null,
+  selectedSpecVersionId: null,
+  pendingSpecVersionId: null,
+  audioClips: null,
+  renderSegmentId: null,
+  deletedAt: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+};
+
+const SCENE: Scene = {
+  sceneId: 's1',
+  sceneNumber: 1,
+  originalScript: { extract: '', dialogue: [] },
+  continuity: {
+    characterTags: ['jack-the-pi'],
+    environmentTag: 'the-docks',
+    colorPalette: '',
+    lightingSetup: '',
+    styleTag: '',
+  },
+};
+
+const NO_ELEMENTS: SequenceElement[] = [];
+
+const BUILD_DEFAULTS = {
+  shot: SHOT,
+  scene: SCENE,
+  imagePrompt: PROMPT,
+  elements: NO_ELEMENTS,
+  imageModel: 'nano_banana_2' as const,
+  aspectRatio: '16:9' as const,
+};
+
+const MERGE_DEFAULTS = {
+  sequenceId: 'seq1',
+  imageModel: 'nano_banana_2' as const,
+  aspectRatio: '16:9' as const,
+};
+
+describe('mergeRecastSheetIntoSnapshots', () => {
+  it('reproduces the snapshot the trigger would have built with the new character sheet', async () => {
+    const pending = await buildRegenerateShotSnapshot({
+      ...BUILD_DEFAULTS,
+      characters: [
+        makeCharacter({
+          sheetImageUrl: PENDING_SHEET_URL,
+          sheetInputHash: PENDING_SHEET_HASH,
+        }),
+      ],
+      locations: [makeLocation()],
+    });
+    const expected = await buildRegenerateShotSnapshot({
+      ...BUILD_DEFAULTS,
+      characters: [
+        makeCharacter({
+          sheetImageUrl: NEW_SHEET_URL,
+          sheetInputHash: NEW_SHEET_HASH,
+        }),
+      ],
+      locations: [makeLocation()],
+    });
+
+    const merged = await mergeRecastSheetIntoSnapshots({
+      ...MERGE_DEFAULTS,
+      shotSnapshots: [pending],
+      sheetImageUrl: NEW_SHEET_URL,
+      sheetInputHash: NEW_SHEET_HASH,
+    });
+
+    expect(merged.shotSnapshots).toEqual([expected]);
+  });
+
+  it('reproduces the snapshot the trigger would have built with the new location reference', async () => {
+    const pending = await buildRegenerateShotSnapshot({
+      ...BUILD_DEFAULTS,
+      characters: [makeCharacter()],
+      locations: [
+        makeLocation({
+          referenceImageUrl: PENDING_SHEET_URL,
+          referenceInputHash: PENDING_SHEET_HASH,
+        }),
+      ],
+    });
+    const expected = await buildRegenerateShotSnapshot({
+      ...BUILD_DEFAULTS,
+      characters: [makeCharacter()],
+      locations: [
+        makeLocation({
+          referenceImageUrl: NEW_SHEET_URL,
+          referenceInputHash: NEW_SHEET_HASH,
+        }),
+      ],
+    });
+
+    const merged = await mergeRecastSheetIntoSnapshots({
+      ...MERGE_DEFAULTS,
+      shotSnapshots: [pending],
+      sheetImageUrl: NEW_SHEET_URL,
+      sheetInputHash: NEW_SHEET_HASH,
+    });
+
+    expect(merged.shotSnapshots).toEqual([expected]);
+  });
+
+  it('leaves a snapshot that never referenced the recast subject untouched', async () => {
+    const untouched = await buildRegenerateShotSnapshot({
+      ...BUILD_DEFAULTS,
+      characters: [makeCharacter()],
+      locations: [makeLocation()],
+    });
+
+    const merged = await mergeRecastSheetIntoSnapshots({
+      ...MERGE_DEFAULTS,
+      shotSnapshots: [untouched],
+      sheetImageUrl: NEW_SHEET_URL,
+      sheetInputHash: NEW_SHEET_HASH,
+    });
+
+    expect(merged.shotSnapshots).toEqual([untouched]);
+  });
+
+  it('drops the sentinel hash when the sheet was written without one', async () => {
+    const pending = await buildRegenerateShotSnapshot({
+      ...BUILD_DEFAULTS,
+      characters: [
+        makeCharacter({
+          sheetImageUrl: PENDING_SHEET_URL,
+          sheetInputHash: PENDING_SHEET_HASH,
+        }),
+      ],
+      locations: [makeLocation()],
+    });
+    const expected = await buildRegenerateShotSnapshot({
+      ...BUILD_DEFAULTS,
+      characters: [
+        makeCharacter({
+          sheetImageUrl: NEW_SHEET_URL,
+          sheetInputHash: null,
+        }),
+      ],
+      locations: [makeLocation()],
+    });
+
+    const merged = await mergeRecastSheetIntoSnapshots({
+      ...MERGE_DEFAULTS,
+      shotSnapshots: [pending],
+      sheetImageUrl: NEW_SHEET_URL,
+      sheetInputHash: null,
+    });
+
+    expect(merged.shotSnapshots).toEqual([expected]);
+  });
+
+  it('rehashes the batch so the regenerate child validates the merged payload', async () => {
+    const pending = await buildRegenerateShotSnapshot({
+      ...BUILD_DEFAULTS,
+      characters: [
+        makeCharacter({
+          sheetImageUrl: PENDING_SHEET_URL,
+          sheetInputHash: PENDING_SHEET_HASH,
+        }),
+      ],
+      locations: [makeLocation()],
+    });
+
+    const merged = await mergeRecastSheetIntoSnapshots({
+      ...MERGE_DEFAULTS,
+      shotSnapshots: [pending],
+      sheetImageUrl: NEW_SHEET_URL,
+      sheetInputHash: NEW_SHEET_HASH,
+    });
+    const remerged = await mergeRecastSheetIntoSnapshots({
+      ...MERGE_DEFAULTS,
+      shotSnapshots: merged.shotSnapshots,
+      sheetImageUrl: NEW_SHEET_URL,
+      sheetInputHash: NEW_SHEET_HASH,
+    });
+
+    // Idempotent: re-running the merge over already-merged snapshots is a
+    // no-op, so a step replay cannot double-substitute.
+    expect(remerged.snapshotInputHash).toBe(merged.snapshotInputHash);
+    expect(merged.snapshotInputHash).not.toBe(PENDING_SHEET_HASH);
+  });
+
+  it('carries a voice-only character (no sheet, #1585) through untouched', async () => {
+    const narrator = makeCharacter({
+      id: 'c2',
+      characterId: 'narrator',
+      name: 'Narrator',
+      voiceOnly: true,
+      isPerson: true,
+      rendering: 'Photoreal live action',
+      sheetImageUrl: null,
+      sheetInputHash: null,
+      consistencyTag: 'narrator',
+    });
+    const build = (jack: CastCharacterWithSheet) =>
+      buildRegenerateShotSnapshot({
+        ...BUILD_DEFAULTS,
+        characters: [jack, narrator],
+        locations: [makeLocation()],
+      });
+    const pending = await build(
+      makeCharacter({
+        sheetImageUrl: PENDING_SHEET_URL,
+        sheetInputHash: PENDING_SHEET_HASH,
+      })
+    );
+    const expected = await build(
+      makeCharacter({
+        sheetImageUrl: NEW_SHEET_URL,
+        sheetInputHash: NEW_SHEET_HASH,
+      })
+    );
+
+    const merged = await mergeRecastSheetIntoSnapshots({
+      ...MERGE_DEFAULTS,
+      shotSnapshots: [pending],
+      sheetImageUrl: NEW_SHEET_URL,
+      sheetInputHash: NEW_SHEET_HASH,
+    });
+
+    expect(merged.shotSnapshots).toEqual([expected]);
+    expect(narrator.voiceOnly).toBe(true);
+  });
+});

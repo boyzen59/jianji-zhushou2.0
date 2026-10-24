@@ -1,0 +1,1193 @@
+/**
+ * Tests for `executeSmartRetry` (#839).
+ *
+ * Pins the orchestration the June 6 incident exposed:
+ *   - the generation mutex gates EVERY retry shape — a sequence marked
+ *     'failed' does not imply its workflow tree is dead, so a retry racing a
+ *     live pipeline must be rejected before anything is triggered;
+ *   - the full-retry fallback goes through `triggerStoryboard` (the mutex /
+ *     status-write owner), never a bare trigger;
+ *   - the sequence-level 'failed' flag is only cleared when something was
+ *     actually retried — flipping to 'completed' after a no-op retry is the
+ *     lying-status class this PR exists to kill.
+ *
+ * Failure *detection* lives in `analyzeFailures` (its own test file); the
+ * real implementation is used here, driven by shot/sequence fixtures.
+ */
+
+import { describe, expect, test, vi } from 'vitest';
+import { TEST_FAL_PRICING as FAL_PRICING } from '@/billing/fal-pricing-fixture';
+import type { AssemblableMotionPrompt } from '@/shots/scene-analysis.schema';
+import type {
+  CharacterMinimal,
+  Frame,
+  FramePromptVersion,
+  FrameVariant,
+  Sequence,
+  Shot,
+  ShotPromptVersion,
+  VideoVariant,
+} from '@/platform/server/db/schema';
+import type { ScopedDb } from '@/platform/server/db/scoped';
+import {
+  frameFixture,
+  frameVariantFixture,
+  videoVariantFixture,
+} from '@/mocks/frame-fixtures';
+import { toShotView, type ImageStatus, type ShotView } from '@/shots/shot-view';
+import { estimateImageCost, gateEstimate } from '@/billing/cost-estimation';
+import { ZERO_MICROS } from '@/billing/money';
+import { asStub } from '@/test/as-stub';
+
+const assertNoActiveStoryboardMock = vi.fn();
+const triggerStoryboardMock = vi.fn();
+vi.doMock('@/sequences/server/launchers', async () => {
+  const real = await vi.importActual('@/sequences/server/launchers');
+  return {
+    ...real,
+    assertNoActiveStoryboard: assertNoActiveStoryboardMock,
+    triggerStoryboard: triggerStoryboardMock,
+  };
+});
+
+const triggerWorkflowMock = vi.fn();
+vi.doMock('@/platform/server/workflow/client', () => ({
+  triggerWorkflow: triggerWorkflowMock,
+  // Image, motion and music-prompt retries go through the keyed trigger
+  // (#1460); without a run key it is the plain one.
+  triggerWorkflowRun: async (
+    path: unknown,
+    body: unknown,
+    options?: { deduplicationId?: string }
+  ) => ({
+    workflowRunId: await triggerWorkflowMock(
+      path,
+      body,
+      ...(options?.deduplicationId ? [options] : [])
+    ),
+    reused: false,
+  }),
+}));
+
+const reserveRunCreditsMock = vi.fn();
+const realPreflight = await import('@/billing/server/preflight');
+vi.doMock('@/billing/server/preflight', () => ({
+  reserveRunCredits: reserveRunCreditsMock,
+  releaseReservationOnThrow: async (
+    _db: unknown,
+    _id: unknown,
+    work: () => Promise<unknown>
+  ) => work(),
+}));
+
+const notifySequenceReadyMock = vi.fn();
+vi.doMock('@/sequences/server/notify-sequence-ready', () => ({
+  notifySequenceReady: notifySequenceReadyMock,
+  sequenceScenesUrl: (id: string) =>
+    `https://openstory.so/sequences/${id}/scenes`,
+}));
+
+// The live pricing loader reads D1 (unavailable under node tests).
+vi.doMock('@/billing/server/fal-pricing-live', () => ({
+  getEffectiveFalPricing: async () => FAL_PRICING,
+}));
+
+// Dynamic imports so the mocks above apply (vi.doMock is not hoisted).
+const { executeSmartRetry } = await import('@/sequences/server/smart-retry');
+const { GenerationInProgressError } =
+  await import('@/sequences/server/launchers');
+
+const NOW = new Date('2026-06-07T00:00:00.000Z');
+
+function makeSequence(overrides: Partial<Sequence> = {}): Sequence {
+  return {
+    id: 'seq_1',
+    teamId: 't1',
+    title: 'A sequence',
+    script: 'INT. LAB — NIGHT',
+    status: 'failed',
+    statusError: 'Generation was interrupted',
+    workflowRunId: null,
+    createdAt: NOW,
+    updatedAt: NOW,
+    createdBy: 'u1',
+    updatedBy: 'u1',
+    styleId: 'style_1',
+    styleConfig: {
+      version: 2,
+      look: {
+        mood: 'quiet',
+        artStyle: 'watercolour',
+        lighting: 'soft light',
+        colorPalette: ['silver', 'blue'],
+        colorGrading: 'cool shadows',
+      },
+      motion: { camera: 'locked' },
+      references: [],
+    },
+    selectedStyleVersionId: null,
+    aspectRatio: '16:9',
+    resolution: '720p',
+    analysisModel: 'anthropic/claude-haiku-4.5',
+    analysisDurationMs: 0,
+    imageModel: 'nano_banana_2',
+    videoModel: 'kling_2_5',
+    workflow: null,
+    musicUrl: null,
+    musicPath: null,
+    // Music completed by default so tests exercise the image paths without
+    // tripping the music / music-prompt retry branches.
+    musicStatus: 'completed',
+    musicGeneratedAt: null,
+    musicError: null,
+    musicModel: null,
+    musicPrompt: 'ambient synths',
+    musicTags: null,
+    musicPromptInputHash: null,
+    includeMusic: true,
+    selectedMusicVariantId: null,
+    selectedMusicPromptVersionId: null,
+    pendingPromoteMusicVariantId: null,
+    posterUrl: null,
+    readyEmailSentAt: null,
+    generationStopAt: 'images',
+    generateStartFrames: true,
+    generateVoices: false,
+    draftMotion: false,
+    targetDurationSeconds: null,
+    suggestedLocationIds: null,
+    ...overrides,
+  };
+}
+
+/**
+ * A shot's rows, authored as themselves: the still's lifecycle on the anchor
+ * frame (#989), the still on its selected `frame_variants` row and the video
+ * status on the segment's primary render (#1067). `makeContext` serves these
+ * back through the scoped-DB stub, so `executeSmartRetry` assembles the same
+ * `ShotView` the real read path would.
+ */
+type ShotFixtureOptions = Partial<Shot> & {
+  /** Carried by the frame's newest primary still render (#1942). */
+  imageStatus?: ImageStatus;
+  imageUrl?: FrameVariant['url'];
+  imagePrompt?: string | null;
+  videoStatus?: VideoVariant['status'] | null;
+  motionPrompt?: AssemblableMotionPrompt | null;
+};
+
+function makeShot({
+  imageStatus = 'completed',
+  imageUrl = 'https://cdn/thumb.jpg',
+  imagePrompt = null,
+  videoStatus = 'pending',
+  motionPrompt = { fullPrompt: 'slow pan', dialogue: null, audio: null },
+  ...overrides
+}: ShotFixtureOptions = {}): ShotView {
+  const shot: Shot = {
+    id: 'shot-1',
+    sequenceId: 'seq_1',
+    sceneId: null,
+    shotNumber: 1,
+    durationMs: 3000,
+    useStartFrame: null,
+    selectedMotionPromptVersionId: null,
+    selectedSpecVersionId: null,
+    pendingSpecVersionId: null,
+    audioClips: null,
+    renderSegmentId: null,
+    deletedAt: null,
+    createdAt: NOW,
+    updatedAt: NOW,
+    ...overrides,
+  };
+  // The frame keeps its own id — distinct from the shot id (#989); only
+  // `shotId` links them.
+  const frameId = `frame-${shot.id}`;
+  const frame: Frame = frameFixture({
+    id: frameId,
+    shotId: shot.id,
+    sequenceId: shot.sequenceId,
+    selectedImageVersionId: imageUrl === null ? null : `${frameId}-v1`,
+    selectedImagePromptVersionId: imagePrompt === null ? null : `${frameId}-ip`,
+    createdAt: NOW,
+    updatedAt: NOW,
+  });
+  return toShotView(shot, frame, {
+    preview: null,
+    image:
+      imageUrl === null
+        ? null
+        : frameVariantFixture({
+            id: `${frameId}-v1`,
+            frameId,
+            sequenceId: shot.sequenceId,
+            url: imageUrl,
+          }),
+    imagePromptVersion:
+      imagePrompt === null ? null : promptVersionFixture(frameId, imagePrompt),
+    primaryImage:
+      imageStatus === 'generating' || imageStatus === 'failed'
+        ? frameVariantFixture({
+            id: `${frameId}-primary`,
+            frameId,
+            sequenceId: shot.sequenceId,
+            status: imageStatus,
+            url: null,
+          })
+        : null,
+    // Selection only ever points at a completed render; these fixtures drive
+    // the lifecycle through the primary render instead.
+    video: null,
+    primaryVideo:
+      videoStatus === null
+        ? null
+        : videoVariantFixture({
+            id: `${shot.id}-primary`,
+            // The degenerate one-shot segment reuses the shot's id, the same
+            // idempotency key `renderSegments.ensureForShot` uses.
+            renderSegmentId: shot.id,
+            sequenceId: shot.sequenceId,
+            status: videoStatus,
+            generatedAt: null,
+            manifest: [
+              {
+                shotId: shot.id,
+                motionPromptVersionId: null,
+                frameVersionId: null,
+                usesStartFrame: true,
+                durationMs: shot.durationMs ?? 3000,
+                audioClipIds: [],
+                audioSourceKey: null,
+                dialogueKey: null,
+                referenceKeys: [],
+              },
+            ],
+            createdAt: NOW,
+            updatedAt: NOW,
+          }),
+    motionPrompt,
+  });
+}
+
+function promptVersionFixture(
+  frameId: string,
+  text: string
+): FramePromptVersion {
+  return {
+    id: `${frameId}-ip`,
+    frameId,
+    text,
+    components: null,
+    source: 'ai-generated',
+    specVersionId: null,
+    inputHash: null,
+    analysisModel: null,
+    status: 'completed',
+    pendingInputHash: null,
+    workflowRunId: null,
+    createdAt: NOW,
+    createdBy: null,
+  };
+}
+
+function motionVersionFixture(
+  shot: ShotView,
+  motionPrompt: AssemblableMotionPrompt
+): ShotPromptVersion {
+  return {
+    id: `${shot.id}-mv`,
+    shotId: shot.id,
+    promptType: 'motion',
+    text: motionPrompt.fullPrompt,
+    components: null,
+    parameters: null,
+    dialogue: null,
+    audio: null,
+    audioClips: null,
+    usesStartFrame: true,
+    source: 'ai-generated',
+    specVersionId: null,
+    inputHash: null,
+    analysisModel: null,
+    status: 'completed',
+    pendingInputHash: null,
+    workflowRunId: null,
+    createdAt: NOW,
+    createdBy: null,
+  };
+}
+
+/**
+ * The model each shot's selected image / video version was rendered with
+ * (#1066) — `shotId → model`, exactly what the scoped bulk reads return.
+ */
+type SelectedModels = {
+  image?: Map<string, string>;
+  video?: Map<string, string>;
+  /** `shotId → model` of each shot's newest FAILED version (#1066). */
+  failedImage?: Map<string, string>;
+  failedVideo?: Map<string, string>;
+};
+
+function makeContext(
+  sequence: Sequence,
+  shots: ShotView[],
+  selectedModels: SelectedModels = {}
+) {
+  const updateStatus = vi.fn();
+  const claimMusic = vi.fn(async (): Promise<string | null> => 'music_row_1');
+  const listBySequence = vi.fn(async () => shots);
+  const ensureAnchorFrames = vi.fn(async () => {});
+  // The source re-assembles each `ShotView` from these reads, so serve back the
+  // rows the fixtures built (anchors keyed by shotId, never id-reuse).
+  const listAnchorsBySequence = vi.fn(async () => shots.map((s) => s.frame));
+  // The still itself is the selected `frame_variants` row (#1067).
+  const getSelectedByFrameIds = vi.fn(
+    async () =>
+      new Map(shots.flatMap((s) => (s.image ? [[s.frame.id, s.image]] : [])))
+  );
+  // The image prompt resolves from the frame's selected version (#1067); the
+  // backfill guarantees one exists wherever a prompt does.
+  const getSelectedPromptByFrameIds = vi.fn(
+    async () =>
+      new Map(
+        shots.flatMap((s) =>
+          s.imagePromptVersion ? [[s.frame.id, s.imagePromptVersion]] : []
+        )
+      )
+  );
+  const listWithSheets = vi.fn(async (): Promise<CharacterMinimal[]> => []);
+  const listCharacters = vi.fn(async () => []);
+  // Model identity lives on the version that produced each asset (#1066); an
+  // empty map means nothing has been rendered yet → shots inherit the sequence
+  // default, preserving the legacy single-model path.
+  const listSelectedImageModels = vi.fn(
+    async () => selectedModels.image ?? new Map<string, string>()
+  );
+  const listSelectedVideoModels = vi.fn(
+    async () => selectedModels.video ?? new Map<string, string>()
+  );
+  // The failed-attempt tier (#1066): every shot smart retry touches is in a
+  // failed state, so the model that failed outranks the older selected one.
+  const listFailedImageModels = vi.fn(
+    async () => selectedModels.failedImage ?? new Map<string, string>()
+  );
+  const listFailedVideoModels = vi.fn(
+    async () => selectedModels.failedVideo ?? new Map<string, string>()
+  );
+  // The motion prompt resolves from the shot's selected version (#713); the
+  // backfill guarantees one exists wherever a prompt does.
+  const motionVersionByShot = new Map(
+    shots.flatMap((s) =>
+      s.motionPrompt ? [[s.id, motionVersionFixture(s, s.motionPrompt)]] : []
+    )
+  );
+  const getSelectedMotionByShots = vi.fn(
+    async (shotIds: string[]) =>
+      new Map(
+        shotIds.flatMap((shotId) => {
+          const version = motionVersionByShot.get(shotId);
+          return version ? [[shotId, version] as const] : [];
+        })
+      )
+  );
+  const stub = {
+    apiKeys: { hasUsableKey: vi.fn(async () => true) },
+    billing: {
+      hasEnoughCredits: vi.fn(async () => false),
+      createReservation: vi.fn(async () => ({ ok: false })),
+    },
+    shots: { listBySequence, ensureAnchorFrames },
+    frames: { listAnchorsBySequence },
+    // Continuity/location context resolves through `sceneId` → `scenes` now;
+    // these fixtures carry no scenes, so every shot resolves to a null scene.
+    scenes: { listBySequence: vi.fn(async () => []) },
+    sceneScriptVersions: {
+      listSelectedBySequence: vi.fn(async () => []),
+    },
+    framePromptVersions: { getSelectedByFrameIds: getSelectedPromptByFrameIds },
+    frameVariants: {
+      listSelectedModelsBySequence: listSelectedImageModels,
+      listLastFailedModelsBySequence: listFailedImageModels,
+      getSelectedByFrameIds,
+      getPrimaryByFrameIds: vi.fn(
+        async () =>
+          new Map(
+            shots.flatMap((s) =>
+              s.primaryImage ? [[s.frame.id, s.primaryImage]] : []
+            )
+          )
+      ),
+    },
+    videoVariants: {
+      listSelectedModelsBySequence: listSelectedVideoModels,
+      listLastFailedModelsBySequence: listFailedVideoModels,
+      // Video status derives from the segment's newest primary render (#1067).
+      getSelectedByShotIds: vi.fn(async () => new Map<string, VideoVariant>()),
+      getPrimaryByShotIds: vi.fn(
+        async () =>
+          new Map(
+            shots.flatMap((s) =>
+              s.primaryVideo ? [[s.id, s.primaryVideo]] : []
+            )
+          )
+      ),
+    },
+    characters: { listWithSheets, list: listCharacters },
+    sequenceElements: { list: vi.fn(async () => []) },
+    locations: { listWithReferences: vi.fn(async () => []) },
+    // No shot dialogue rows: the retry reads the motion row's mirror (#1657).
+    shotDialogue: { getSelectedBySequence: vi.fn(async () => []) },
+    shotPromptVersions: { getSelectedMotionByShots },
+    sequence: vi.fn(() => ({ updateStatus })),
+    sequenceVariants: { claimMusic, failMusicClaim: vi.fn(async () => {}) },
+    teamManagement: {
+      getMemberEmail: vi.fn(async () => 'owner@example.com'),
+    },
+  };
+  // minimal ScopedDb stub exposing only what executeSmartRetry touches
+  const scopedDb = asStub<ScopedDb>(stub);
+  return {
+    context: { sequence, user: { id: 'u1' }, teamId: 't1', scopedDb },
+    scopedDb,
+    updateStatus,
+    listBySequence,
+    listWithSheets,
+    claimMusic,
+    createReservation: stub.billing.createReservation,
+  };
+}
+
+function resetMocks() {
+  assertNoActiveStoryboardMock.mockReset();
+  assertNoActiveStoryboardMock.mockResolvedValue(undefined);
+  triggerStoryboardMock.mockReset();
+  triggerStoryboardMock.mockResolvedValue({ workflowRunId: 'wf_new' });
+  triggerWorkflowMock.mockReset();
+  triggerWorkflowMock.mockResolvedValue('wf_child');
+  reserveRunCreditsMock.mockReset();
+  reserveRunCreditsMock.mockResolvedValue(undefined);
+  notifySequenceReadyMock.mockReset();
+  notifySequenceReadyMock.mockResolvedValue('sent');
+}
+
+describe('executeSmartRetry — music credits', () => {
+  test('blocks native music for a fal BYOK team with insufficient credits', async () => {
+    resetMocks();
+    reserveRunCreditsMock.mockImplementation(realPreflight.reserveRunCredits);
+    const { context, createReservation, claimMusic } = makeContext(
+      makeSequence({ musicStatus: 'failed', musicModel: 'elevenlabs_music' }),
+      [makeShot({ videoStatus: 'completed' })]
+    );
+
+    await expect(executeSmartRetry(context)).rejects.toThrow(
+      'Insufficient credits to retry failed items'
+    );
+    expect(createReservation).toHaveBeenCalledTimes(1);
+    expect(claimMusic).not.toHaveBeenCalled();
+    expect(triggerWorkflowMock).not.toHaveBeenCalled();
+  });
+
+  test('passes the native music reservation to the workflow', async () => {
+    resetMocks();
+    reserveRunCreditsMock.mockImplementation(realPreflight.reserveRunCredits);
+    const { context } = makeContext(
+      makeSequence({ musicStatus: 'failed', musicModel: 'elevenlabs_music' }),
+      [makeShot({ videoStatus: 'completed' })]
+    );
+    vi.spyOn(context.scopedDb.billing, 'createReservation').mockResolvedValue({
+      ok: true,
+      reservationId: 'res_music',
+      remaining: ZERO_MICROS,
+      replay: false,
+    });
+
+    await executeSmartRetry(context);
+
+    expect(triggerWorkflowMock).toHaveBeenCalledWith(
+      '/music',
+      expect.objectContaining({
+        model: 'elevenlabs_music',
+        reservationId: 'res_music',
+        ownsReservation: true,
+        variantId: 'music_row_1',
+      })
+    );
+  });
+
+  test('a retry that lost the music claim starts no run and frees its credits', async () => {
+    resetMocks();
+    reserveRunCreditsMock.mockResolvedValue('res_music');
+    const { context, claimMusic } = makeContext(
+      makeSequence({ musicStatus: 'failed', musicModel: 'elevenlabs_music' }),
+      [makeShot({ videoStatus: 'completed' })]
+    );
+    claimMusic.mockResolvedValue(null);
+    const zeroReservation = vi.fn(async () => {});
+    Object.assign(context.scopedDb.billing, { zeroReservation });
+
+    await executeSmartRetry(context);
+
+    expect(claimMusic).toHaveBeenCalledWith(
+      expect.objectContaining({ isPrimary: true, ifPendingIs: null })
+    );
+    expect(triggerWorkflowMock).not.toHaveBeenCalledWith(
+      '/music',
+      expect.anything()
+    );
+    expect(zeroReservation).toHaveBeenCalledWith('res_music');
+  });
+
+  test('keeps fal BYOK for ACE-Step and retries the model that was priced', async () => {
+    resetMocks();
+    reserveRunCreditsMock.mockImplementation(realPreflight.reserveRunCredits);
+    const { context, createReservation } = makeContext(
+      makeSequence({ musicStatus: 'failed', musicModel: 'ace_step' }),
+      [makeShot({ videoStatus: 'completed' })]
+    );
+
+    await executeSmartRetry(context);
+
+    expect(createReservation).not.toHaveBeenCalled();
+    expect(triggerWorkflowMock).toHaveBeenCalledWith(
+      '/music',
+      expect.objectContaining({ model: 'ace_step', reservationId: undefined })
+    );
+  });
+});
+
+describe('executeSmartRetry — generation mutex (#839)', () => {
+  test('live storyboard run → rejects before reading shots or triggering anything', async () => {
+    resetMocks();
+    assertNoActiveStoryboardMock.mockRejectedValue(
+      new GenerationInProgressError()
+    );
+    const { context, listBySequence, updateStatus } = makeContext(
+      makeSequence(),
+      []
+    );
+
+    await expect(executeSmartRetry(context)).rejects.toBeInstanceOf(
+      GenerationInProgressError
+    );
+    expect(listBySequence).not.toHaveBeenCalled();
+    expect(triggerStoryboardMock).not.toHaveBeenCalled();
+    expect(triggerWorkflowMock).not.toHaveBeenCalled();
+    expect(updateStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe('executeSmartRetry — full retry fallback', () => {
+  test('delegates to triggerStoryboard, which owns the mutex and status writes', async () => {
+    resetMocks();
+    // No shots + failed sequence → analyzeFailures says full retry.
+    const { context, scopedDb, updateStatus } = makeContext(makeSequence(), []);
+
+    const result = await executeSmartRetry(context);
+
+    expect(triggerStoryboardMock).toHaveBeenCalledTimes(1);
+    expect(reserveRunCreditsMock).toHaveBeenCalledTimes(1);
+    expect(triggerStoryboardMock).toHaveBeenCalledWith(
+      scopedDb,
+      expect.objectContaining({
+        sequenceId: 'seq_1',
+        teamId: 't1',
+        reservationId: undefined,
+      })
+    );
+    expect(triggerWorkflowMock).not.toHaveBeenCalled();
+    // The launcher owns the 'processing' write — no direct status write here.
+    expect(updateStatus).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      retryType: 'full',
+      retriedItems: ['full storyboard'],
+    });
+  });
+});
+
+describe('executeSmartRetry — partial retry status reset', () => {
+  test('nothing retriable → throws instead of silently marking the sequence completed', async () => {
+    resetMocks();
+    // A failed image with no prompt anywhere (no imagePrompt, and no scene to
+    // fall back to) is detected as a failure but can't be retried.
+    const shot = makeShot({
+      imageStatus: 'failed',
+      imagePrompt: null,
+    });
+    const { context, updateStatus } = makeContext(makeSequence(), [shot]);
+
+    await expect(executeSmartRetry(context)).rejects.toThrow(
+      /regenerate the sequence/
+    );
+    expect(triggerWorkflowMock).not.toHaveBeenCalled();
+    expect(updateStatus).not.toHaveBeenCalled();
+  });
+
+  test('retried images → triggers /image per shot and clears the failed flag', async () => {
+    resetMocks();
+    const shot = makeShot({
+      imageStatus: 'failed',
+      imagePrompt: 'A cinematic shot of the lab',
+    });
+    const { context, updateStatus } = makeContext(makeSequence(), [shot]);
+
+    const result = await executeSmartRetry(context);
+
+    expect(triggerWorkflowMock).toHaveBeenCalledTimes(1);
+    expect(triggerWorkflowMock).toHaveBeenCalledWith(
+      '/image',
+      expect.objectContaining({
+        shotId: 'shot-1',
+        prompt: 'A cinematic shot of the lab',
+        sequenceId: 'seq_1',
+      })
+    );
+    expect(updateStatus).toHaveBeenCalledWith('completed');
+    expect(result).toMatchObject({
+      retryType: 'smart',
+      retriedItems: ['1 image(s)'],
+    });
+  });
+
+  test('mixed shots: skipped prompt-less shot is not counted as retried', async () => {
+    resetMocks();
+    // The counting regression #839's review flagged: reporting
+    // failedImageShots.length would claim "2 image(s)" here even though
+    // only one shot is actually retriable.
+    const retriable = makeShot({
+      id: 'shot-1',
+      imageStatus: 'failed',
+      imagePrompt: 'A cinematic shot of the lab',
+    });
+    const skipped = makeShot({
+      id: 'shot-2',
+      shotNumber: 2,
+      imageStatus: 'failed',
+      imagePrompt: null,
+    });
+    const { context, updateStatus } = makeContext(makeSequence(), [
+      retriable,
+      skipped,
+    ]);
+
+    const result = await executeSmartRetry(context);
+
+    expect(triggerWorkflowMock).toHaveBeenCalledTimes(1);
+    expect(triggerWorkflowMock).toHaveBeenCalledWith(
+      '/image',
+      expect.objectContaining({ shotId: 'shot-1' })
+    );
+    expect(result).toMatchObject({
+      retryType: 'smart',
+      retriedItems: ['1 image(s)'],
+    });
+    expect(updateStatus).toHaveBeenCalledWith('completed');
+  });
+
+  test('failed motion → triggers /motion-batch with image url, prompt and duration', async () => {
+    resetMocks();
+    const shot = makeShot({
+      videoStatus: 'failed',
+      imageStatus: 'completed',
+      imageUrl: 'https://cdn/thumb.jpg',
+      motionPrompt: {
+        fullPrompt: 'slow pan across the lab',
+        dialogue: null,
+        audio: null,
+      },
+      durationMs: 5000,
+    });
+    const { context, updateStatus } = makeContext(makeSequence(), [shot]);
+
+    const result = await executeSmartRetry(context);
+
+    expect(triggerWorkflowMock).toHaveBeenCalledTimes(1);
+    expect(triggerWorkflowMock).toHaveBeenCalledWith(
+      '/motion-batch',
+      expect.objectContaining({
+        sequenceId: 'seq_1',
+        includeMusic: false,
+        shots: [
+          expect.objectContaining({
+            shotId: 'shot-1',
+            imageUrl: 'https://cdn/thumb.jpg',
+            prompt: expect.stringContaining('slow pan across the lab'),
+            duration: 5,
+          }),
+        ],
+      })
+    );
+    expect(result).toMatchObject({
+      retryType: 'smart',
+      retriedItems: ['1 motion video(s)'],
+    });
+    expect(updateStatus).toHaveBeenCalledWith('completed');
+  });
+
+  test.each([true, false])(
+    'motion retry retains cast references with useStartFrame=%s',
+    async (useStartFrame) => {
+      resetMocks();
+      const shot = makeShot({
+        videoStatus: 'failed',
+        useStartFrame,
+        motionPrompt: {
+          fullPrompt: 'Sarah walks through the lab',
+          dialogue: null,
+          audio: null,
+        },
+      });
+      const { context, listWithSheets } = makeContext(makeSequence(), [shot]);
+      listWithSheets.mockResolvedValue([
+        {
+          id: 'char-sarah',
+          characterId: 'sarah',
+          name: 'Sarah',
+          sheetImageUrl: 'https://cdn/sarah.png',
+          sheetStatus: 'completed',
+          sheetInputHash: 'hash',
+          selectedSheetVersionId: 'sheet-1',
+          // Wearing its default look (#2015).
+          lookId: 'default-look',
+          lookName: 'Default',
+          looks: [],
+          physicalDescription: 'Short dark hair',
+          voiceOnly: false,
+          isPerson: true,
+          consistencyTag: 'sarah',
+        },
+      ]);
+
+      await executeSmartRetry(context);
+
+      expect(triggerWorkflowMock).toHaveBeenCalledWith(
+        '/motion-batch',
+        expect.objectContaining({
+          shots: [
+            expect.objectContaining({
+              referenceOnly: !useStartFrame,
+              referenceImages: [
+                expect.objectContaining({
+                  referenceImageUrl: 'https://cdn/sarah.png',
+                  provenanceKey: 'character:char-sarah:sheet-1',
+                }),
+              ],
+            }),
+          ],
+        })
+      );
+    }
+  );
+
+  test('two failed shots in one scene record the conversation once (#1703)', async () => {
+    resetMocks();
+    const shotA = makeShot({
+      id: 'shot-a',
+      sceneId: 'scene-1',
+      shotNumber: 1,
+      videoStatus: 'failed',
+      imageStatus: 'completed',
+      imageUrl: 'https://cdn/a.jpg',
+    });
+    const shotB = makeShot({
+      id: 'shot-b',
+      sceneId: 'scene-1',
+      shotNumber: 2,
+      videoStatus: 'failed',
+      imageStatus: 'completed',
+      imageUrl: 'https://cdn/b.jpg',
+    });
+    const { context } = makeContext(
+      makeSequence({ videoModel: 'seedance_v2' }),
+      [shotA, shotB]
+    );
+    // test stub
+    const stub = asStub<{
+      shotDialogue: {
+        getSelectedBySequence: () => Promise<unknown>;
+      };
+      characters: { list: () => Promise<unknown> };
+    }>(context.scopedDb);
+    stub.shotDialogue.getSelectedBySequence = () =>
+      Promise.resolve([
+        {
+          shotId: 'shot-a',
+          id: 'sdv-a',
+          lines: [{ character: 'Woman', line: 'Hello', tone: 'calm' }],
+        },
+        {
+          shotId: 'shot-b',
+          id: 'sdv-b',
+          lines: [{ character: 'Woman', line: 'There', tone: 'calm' }],
+        },
+      ]);
+    stub.characters.list = () =>
+      Promise.resolve([{ name: 'Woman', voiceId: 'voice-woman' }]);
+
+    await executeSmartRetry(context);
+
+    expect(triggerWorkflowMock).toHaveBeenCalledTimes(1);
+    expect(triggerWorkflowMock).toHaveBeenCalledWith(
+      '/motion-batch',
+      expect.objectContaining({
+        dialogueSpeech: expect.objectContaining({
+          scenes: [
+            expect.objectContaining({
+              voiced: expect.arrayContaining([
+                expect.objectContaining({ shotId: 'shot-a' }),
+                expect.objectContaining({ shotId: 'shot-b' }),
+              ]),
+            }),
+          ],
+        }),
+        shots: expect.arrayContaining([
+          expect.objectContaining({ shotId: 'shot-a' }),
+          expect.objectContaining({ shotId: 'shot-b' }),
+        ]),
+      })
+    );
+  });
+
+  test('cancelled motion is NOT a failure — never selected for retry (#1108)', async () => {
+    resetMocks();
+    // Identical to the retriable failed-motion shape above except the status:
+    // a deliberate user cancel must not be re-run and re-billed by Retry
+    // failed. With nothing else failed, smart retry finds no work at all.
+    const shot = makeShot({
+      videoStatus: 'cancelled',
+      imageStatus: 'completed',
+      imageUrl: 'https://cdn/thumb.jpg',
+      motionPrompt: {
+        fullPrompt: 'slow pan across the lab',
+        dialogue: null,
+        audio: null,
+      },
+      durationMs: 5000,
+    });
+    const { context } = makeContext(
+      makeSequence({ status: 'completed', statusError: null }),
+      [shot]
+    );
+
+    await expect(executeSmartRetry(context)).rejects.toThrow();
+    expect(triggerWorkflowMock).not.toHaveBeenCalled();
+    expect(triggerStoryboardMock).not.toHaveBeenCalled();
+  });
+
+  test('sequence not marked failed → no status write after retrying', async () => {
+    resetMocks();
+    const shot = makeShot({
+      imageStatus: 'failed',
+      imagePrompt: 'A cinematic shot of the lab',
+    });
+    const { context, updateStatus } = makeContext(
+      makeSequence({ status: 'completed', statusError: null }),
+      [shot]
+    );
+
+    await executeSmartRetry(context);
+
+    expect(updateStatus).not.toHaveBeenCalled();
+  });
+
+  test('no failures at all → throws', async () => {
+    resetMocks();
+    const { context } = makeContext(
+      makeSequence({ status: 'completed', statusError: null }),
+      [makeShot()]
+    );
+
+    await expect(executeSmartRetry(context)).rejects.toThrow(
+      'No failures found to retry'
+    );
+  });
+});
+
+describe('executeSmartRetry — per-asset model selection (#1066)', () => {
+  test("retries each failed image with its selected version's model, summing cost per model", async () => {
+    resetMocks();
+    // Two failed image shots whose selected image versions were rendered by
+    // different models — both differing from the sequence default
+    // ('nano_banana_2').
+    const shotA = makeShot({
+      id: 'shot-a',
+      sceneId: 'scene-a',
+      imageStatus: 'failed',
+      imagePrompt: 'Look A',
+    });
+    const shotB = makeShot({
+      id: 'shot-b',
+      sceneId: 'scene-b',
+      imageStatus: 'failed',
+      imagePrompt: 'Look B',
+    });
+    const { context } = makeContext(makeSequence(), [shotA, shotB], {
+      image: new Map([
+        ['shot-a', 'gpt_image_2'],
+        ['shot-b', 'flux_2_max'],
+      ]),
+    });
+
+    await executeSmartRetry(context);
+
+    // Each shot retries with the model that produced its current still, not
+    // the sequence default.
+    expect(triggerWorkflowMock).toHaveBeenCalledWith(
+      '/image',
+      expect.objectContaining({
+        shotId: 'shot-a',
+        model: 'gpt_image_2',
+        ownsReservation: true,
+      })
+    );
+    expect(triggerWorkflowMock).toHaveBeenCalledWith(
+      '/image',
+      expect.objectContaining({
+        shotId: 'shot-b',
+        model: 'flux_2_max',
+        ownsReservation: true,
+      })
+    );
+
+    // One hold per shot so leftover zeros cannot kill a sibling envelope.
+    const gptCost = gateEstimate(
+      estimateImageCost('gpt_image_2', '16:9', 1, {
+        pricing: FAL_PRICING,
+        resolution: '720p',
+      }),
+      {
+        model: 'gpt_image_2',
+        operation: 'smart-retry:image',
+      }
+    );
+    const fluxCost = gateEstimate(
+      estimateImageCost('flux_2_max', '16:9', 1, {
+        pricing: FAL_PRICING,
+        resolution: '720p',
+      }),
+      {
+        model: 'flux_2_max',
+        operation: 'smart-retry:image',
+      }
+    );
+    expect(reserveRunCreditsMock).toHaveBeenCalledTimes(2);
+    expect(reserveRunCreditsMock.mock.calls[0]?.[1]).toEqual(gptCost);
+    expect(reserveRunCreditsMock.mock.calls[1]?.[1]).toEqual(fluxCost);
+  });
+
+  test("retries each failed motion video with its selected version's model", async () => {
+    resetMocks();
+    const shotA = makeShot({
+      id: 'shot-a',
+      sceneId: 'scene-a',
+      videoStatus: 'failed',
+      imageStatus: 'completed',
+      imageUrl: 'https://cdn/a.jpg',
+    });
+    const shotB = makeShot({
+      id: 'shot-b',
+      sceneId: 'scene-b',
+      videoStatus: 'failed',
+      imageStatus: 'completed',
+      imageUrl: 'https://cdn/b.jpg',
+    });
+    const { context } = makeContext(makeSequence(), [shotA, shotB], {
+      video: new Map([
+        ['shot-a', 'seedance_v2'],
+        ['shot-b', 'kling_v3_pro'],
+      ]),
+    });
+
+    await executeSmartRetry(context);
+
+    expect(triggerWorkflowMock).toHaveBeenCalledTimes(1);
+    expect(triggerWorkflowMock).toHaveBeenCalledWith(
+      '/motion-batch',
+      expect.objectContaining({
+        ownsReservation: true,
+        shots: expect.arrayContaining([
+          expect.objectContaining({ shotId: 'shot-a', model: 'seedance_v2' }),
+          expect.objectContaining({
+            shotId: 'shot-b',
+            model: 'kling_v3_pro',
+          }),
+        ]),
+      })
+    );
+  });
+
+  test('retries the model that FAILED, not the older successful one', async () => {
+    resetMocks();
+    // shot-a's still came from gpt_image_2. The user then tried flux_2_max and
+    // it failed — that failed version is not selectable, so without the
+    // failed-attempt tier the retry would silently re-run gpt_image_2: the
+    // model the user had already moved on from.
+    const shotA = makeShot({
+      id: 'shot-a',
+      sceneId: 'scene-a',
+      imageStatus: 'failed',
+      imagePrompt: 'Look A',
+    });
+    const { context } = makeContext(makeSequence(), [shotA], {
+      image: new Map([['shot-a', 'gpt_image_2']]),
+      failedImage: new Map([['shot-a', 'flux_2_max']]),
+    });
+
+    await executeSmartRetry(context);
+
+    expect(triggerWorkflowMock).toHaveBeenCalledWith(
+      '/image',
+      expect.objectContaining({ shotId: 'shot-a', model: 'flux_2_max' })
+    );
+    // …and it is priced as flux_2_max, so the estimate matches the charge.
+    expect(reserveRunCreditsMock.mock.calls[0]?.[1]).toEqual(
+      gateEstimate(
+        estimateImageCost('flux_2_max', '16:9', 1, {
+          pricing: FAL_PRICING,
+          resolution: '720p',
+        }),
+        {
+          model: 'flux_2_max',
+          operation: 'smart-retry:image',
+        }
+      )
+    );
+  });
+
+  test('retries the failed video model over the older selected one', async () => {
+    resetMocks();
+    const shotA = makeShot({
+      id: 'shot-a',
+      sceneId: 'scene-a',
+      videoStatus: 'failed',
+      imageStatus: 'completed',
+      imageUrl: 'https://cdn/a.jpg',
+    });
+    const { context } = makeContext(makeSequence(), [shotA], {
+      video: new Map([['shot-a', 'seedance_v2']]),
+      failedVideo: new Map([['shot-a', 'gemini_omni_flash']]),
+    });
+
+    await executeSmartRetry(context);
+
+    expect(triggerWorkflowMock).toHaveBeenCalledWith(
+      '/motion-batch',
+      expect.objectContaining({
+        shots: [
+          expect.objectContaining({
+            shotId: 'shot-a',
+            model: 'gemini_omni_flash',
+          }),
+        ],
+      })
+    );
+  });
+
+  test('falls back to the sequence default when nothing was ever rendered', async () => {
+    resetMocks();
+    const shotA = makeShot({
+      id: 'shot-a',
+      sceneId: 'scene-a',
+      imageStatus: 'failed',
+      imagePrompt: 'Look A',
+    });
+    const { context } = makeContext(makeSequence(), [shotA]);
+
+    await executeSmartRetry(context);
+
+    expect(triggerWorkflowMock).toHaveBeenCalledWith(
+      '/image',
+      expect.objectContaining({ shotId: 'shot-a', model: 'nano_banana_2' })
+    );
+  });
+});
+
+describe('executeSmartRetry — resolution forwarding (#1570)', () => {
+  test('forwards the sequence resolution onto the still-generation workflow input', async () => {
+    resetMocks();
+    const shot = makeShot({
+      imageStatus: 'failed',
+      imagePrompt: 'A cinematic shot of the lab',
+    });
+    const { context } = makeContext(makeSequence({ resolution: '1080p' }), [
+      shot,
+    ]);
+
+    await executeSmartRetry(context);
+
+    expect(triggerWorkflowMock).toHaveBeenCalledWith(
+      '/image',
+      expect.objectContaining({
+        shotId: 'shot-1',
+        resolution: '1080p',
+      })
+    );
+  });
+});
+
+describe('executeSmartRetry — planned retry (#1461)', () => {
+  // A dry run's one write is the idempotent anchor-frame repair every read path also makes.
+  test('a dry run plans the same items and starts, reserves and resets nothing', async () => {
+    resetMocks();
+    const shot = makeShot({
+      imageStatus: 'failed',
+      imagePrompt: 'A cinematic shot of the lab',
+    });
+    const dry = makeContext(makeSequence(), [shot]);
+    const plan = await executeSmartRetry(dry.context, { dryRun: true });
+    expect(triggerWorkflowMock).not.toHaveBeenCalled();
+    expect(reserveRunCreditsMock).not.toHaveBeenCalled();
+    expect(dry.updateStatus).not.toHaveBeenCalled();
+
+    const launched: string[] = [];
+    triggerWorkflowMock.mockResolvedValue('image-run-1');
+    const real = makeContext(makeSequence(), [shot]);
+    const run = await executeSmartRetry(real.context, {
+      onLaunched: async (id) => {
+        launched.push(id);
+      },
+    });
+    expect(run.planned).toEqual(plan.planned);
+    expect(plan.planned.images).toEqual([
+      { shotId: 'shot-1', model: expect.any(String) },
+    ]);
+    // Images reserve against fal, so a fal key waives the plan's check.
+    expect(plan.creditProviders).toEqual(['fal']);
+    expect(launched).toEqual(['image-run-1']);
+  });
+
+  test('smartOnly refuses a full-storyboard fallback instead of expanding it', async () => {
+    resetMocks();
+    const { context } = makeContext(makeSequence({ status: 'failed' }), []);
+    await expect(
+      executeSmartRetry(context, { dryRun: true, smartOnly: true })
+    ).rejects.toThrow(/full storyboard/);
+    expect(triggerStoryboardMock).not.toHaveBeenCalled();
+  });
+
+  test('a full-storyboard dry run prices it and reserves or starts nothing', async () => {
+    resetMocks();
+    const { context } = makeContext(makeSequence(), []);
+    const plan = await executeSmartRetry(context, { dryRun: true });
+    expect(plan.planned.retryType).toBe('full');
+    expect(reserveRunCreditsMock).not.toHaveBeenCalled();
+    expect(triggerStoryboardMock).not.toHaveBeenCalled();
+  });
+
+  test('a music dry run takes no claim and starts nothing', async () => {
+    resetMocks();
+    const { context, claimMusic, createReservation } = makeContext(
+      makeSequence({ musicStatus: 'failed', musicModel: 'elevenlabs_music' }),
+      [makeShot({ videoStatus: 'completed' })]
+    );
+    const plan = await executeSmartRetry(context, { dryRun: true });
+    expect(plan.planned.music).toBe(true);
+    // ElevenLabs music spends the platform key: no team key waives the plan.
+    expect(plan.creditProviders).toEqual([]);
+    expect(claimMusic).not.toHaveBeenCalled();
+    expect(createReservation).not.toHaveBeenCalled();
+    expect(reserveRunCreditsMock).not.toHaveBeenCalled();
+    expect(triggerWorkflowMock).not.toHaveBeenCalled();
+  });
+});

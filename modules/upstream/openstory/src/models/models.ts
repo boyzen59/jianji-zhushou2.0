@@ -1,0 +1,1080 @@
+/**
+ * FAL AI model definitions
+ * Separated to avoid circular dependencies between service and client modules
+ */
+
+// Value import, but one-way: grok-native imports this module type-only, so
+// there is no runtime cycle.
+import { isNativeGrokVideoModel } from './grok-native';
+import type { AnalysisModelId } from './models.config';
+import type { AspectRatio } from './aspect-ratios';
+import type { MotionEndpointId } from '@/motion/server/endpoint-map';
+import { modelSupportsAspectRatio } from '@/motion/model-capabilities';
+// Type-only: the Seedream adapter narrows `model` to a literal union, so the
+// catalog's `byteplusId` has to be that union rather than a bare string —
+// a retired id then fails typecheck instead of at request time (#1157).
+import type { BytePlusImageModel } from '@tanstack/ai-byteplus';
+
+import { getLogger } from '@/platform/logger';
+
+const logger = getLogger(['openstory', 'ai', 'models']);
+
+// ============================================================================
+// Text (Chat/LLM) Models — OpenRouter
+// ============================================================================
+
+/**
+ * Valid text model IDs for OpenRouter chat/LLM calls.
+ * Derived from our curated SCRIPT_ANALYSIS_MODELS list in models.config.ts.
+ * (The @tanstack/ai-openrouter adapter's built-in model list is stale.)
+ */
+export type TextModel = AnalysisModelId;
+
+/**
+ * Image-to-video models (for motion generation)
+ *
+ * API-contract details (durations, aspect ratios, image URL field names) are
+ * derived from OpenAPI schemas — see MOTION_ENDPOINT_META and MOTION_TRANSFORMS
+ * in src/motion/server/endpoint-map.ts.
+ *
+ * Only model-level metadata lives here: identity, audio override, performance.
+ */
+
+/**
+ * Ark's Seedance style note is "no more than 500 Chinese characters or 1,000
+ * English words", and nothing enforces it (#1754). 1,000 English words is
+ * about 5.5 characters each, so the counter warns above 5,500 characters —
+ * the same unit as every other model (#1763).
+ */
+const SEEDANCE_PROMPT_LENGTH = {
+  maxPromptLength: 5500,
+} as const;
+
+export const IMAGE_TO_VIDEO_MODELS = {
+  grok_imagine_video_1_5: {
+    id: 'xai/grok-imagine-video/v1.5/image-to-video',
+    name: 'Grok Imagine Video 1.5',
+    vendor: 'SpaceXAI',
+    license: 'proprietary' as const,
+    qualityRank: 1,
+    // xAI answers 400 "Prompt length exceeds the maximum allowed length of
+    // 4096" past this, so it is a real ceiling (#1754). The 2500 we first
+    // wrote here was wrong — the live API's number is 4096.
+    maxPromptLength: 4096,
+    enforcesPromptLimit: true,
+    supportsAudio: false,
+    // One take per clip — packing would invent in-clip cuts Grok cannot follow.
+    supportsInClipMultiShot: false,
+    performance: { estimatedGenerationTime: 33, quality: 'best' as const },
+  },
+  gemini_omni_flash: {
+    id: 'fal-ai/gemini-omni-1.1-flash/image-to-video',
+    name: 'Gemini Omni Flash 1.1',
+    vendor: 'Google',
+    license: 'proprietary' as const,
+    qualityRank: 3,
+    // Always generates synchronized audio (dialogue, ambience, score). Neither
+    // the fal schema nor the Interactions API expose a generate_audio toggle
+    // (`videoModelSupportsAudio` is false), so audio direction is in-prompt
+    // and the scene-editor SFX checkbox stays hidden.
+    supportsAudio: false,
+    // Defaults to multi-shot; a 1-shot segment pins "single unbroken scene".
+    supportsInClipMultiShot: true,
+    // fal's schema declares 20000 and rejects past it (#1754).
+    maxPromptLength: 20000,
+    enforcesPromptLimit: true,
+    performance: { estimatedGenerationTime: 20, quality: 'best' as const },
+  },
+  kling_v3_pro: {
+    id: 'fal-ai/kling-video/v3/pro/image-to-video',
+    name: 'Kling 3.0 Omni',
+    vendor: 'Kling',
+    license: 'proprietary' as const,
+    qualityRank: 4,
+    // fal's schema declares 2500 and rejects past it (#1754).
+    maxPromptLength: 2500,
+    enforcesPromptLimit: true,
+    supportsAudio: true,
+    // Packed via `multi_prompt[]` (1–15s per shot) + `shot_type: customize`.
+    supportsInClipMultiShot: true,
+    performance: { estimatedGenerationTime: 306, quality: 'best' as const },
+  },
+  minimax_h3_max: {
+    id: 'minimax/h3-max/image-to-video',
+    name: 'MiniMax H3 Max',
+    vendor: 'MiniMax',
+    license: 'proprietary' as const,
+    qualityRank: 4,
+    // Always generates audio (lip-synced dialogue, ambience, score) with no
+    // API switch — the schema has no generate_audio, so the builder must
+    // direct it in-prompt. See buildMinimaxH3Prompt.
+    supportsAudio: true,
+    // Timed shot list in the prompt.
+    supportsInClipMultiShot: true,
+    // fal's schema declares 50000 and rejects past it; our old 2500 was
+    // invented and quietly cut four fifths of a long prompt (#1754).
+    maxPromptLength: 50000,
+    enforcesPromptLimit: true,
+    // PostHog p50 9.7s (n=74, 30d ending 2026-09-01).
+    performance: { estimatedGenerationTime: 10, quality: 'best' as const },
+  },
+  seedance_v2: {
+    id: 'bytedance/seedance-2.0/enterprise/v2/image-to-video',
+    name: 'Seedance 2.0',
+    vendor: 'ByteDance',
+    license: 'proprietary' as const,
+    qualityRank: 2,
+    ...SEEDANCE_PROMPT_LENGTH,
+    supportsAudio: true,
+    // Shot 1/2/3 prose + `cut to`.
+    supportsInClipMultiShot: true,
+    performance: { estimatedGenerationTime: 208, quality: 'best' as const },
+    // Native BytePlus Ark route (#1519). fal enterprise 2.0 stays the fal via
+    // (it takes photoreal faces without asset ingest, unlike public 2.0), so
+    // this model is offered everywhere and only the route changes.
+    byteplusId: 'dreamina-seedance-2-0-260128' as const,
+  },
+  seedance_v2_5: {
+    id: 'bytedance/seedance-2.5/image-to-video',
+    name: 'Seedance 2.5',
+    vendor: 'ByteDance',
+    license: 'proprietary' as const,
+    qualityRank: 1,
+    ...SEEDANCE_PROMPT_LENGTH,
+    supportsAudio: true,
+    // Shot N (0-Ns) paragraphs; 2.5 timestamps, no `cut to`.
+    supportsInClipMultiShot: true,
+    performance: { estimatedGenerationTime: 208, quality: 'best' as const },
+    // Offered only where the BytePlus via is live (#1519): public fal 2.5
+    // 400s photoreal faces without Ark `asset://` ingest, so on a fal-only
+    // deployment (production, while the Ark hold stands) it stays out of the
+    // pickers and the pricing page. See `isOfferedVideoModel`.
+    requiresVia: 'byteplus' as const,
+    // Native BytePlus Ark route (#1157). Must be activated in the Ark console
+    // first — an unopened model answers 404 ModelNotOpen at request time. The
+    // Ark route requests 720p (see BYTEPLUS_RESOLUTION); the rate card's
+    // $10.70/1M-token entry is exact for that tier only. fal has no
+    // enterprise 2.5 (those paths 404); public 2.5 is the fal via.
+    byteplusId: 'dreamina-seedance-2-5-260628' as const,
+    // Ark draft mode (#1756): a 480p preview, then a 1080p final rendered
+    // from the draft's task id. Ark-only — fal exposes no such flag, and the
+    // 2.0 family has no draft mode. See `supportsDraftMode`.
+    draftMode: true as const,
+  },
+  seedance_v2_mini: {
+    id: 'bytedance/seedance-2.0/mini/image-to-video',
+    name: 'Seedance 2.0 Mini',
+    vendor: 'ByteDance',
+    license: 'proprietary' as const,
+    qualityRank: 6,
+    ...SEEDANCE_PROMPT_LENGTH,
+    supportsAudio: true,
+    // Same in-clip syntax as Seedance 2.0.
+    supportsInClipMultiShot: true,
+    performance: { estimatedGenerationTime: 120, quality: 'best' as const },
+    // Half the 2.0 rate, 720p ceiling, 4–15s. fal has no enterprise mini, so
+    // like 2.5 the public fal endpoint 400s photoreal faces: offered only
+    // where the BytePlus via (with asset ingest) is live (#1519).
+    requiresVia: 'byteplus' as const,
+    byteplusId: 'dreamina-seedance-2-0-mini-260615' as const,
+  },
+} as const;
+
+/**
+ * The prompt ceiling the via actually enforces, or undefined where none is
+ * documented (#1754). Only this number refuses a prompt; `maxPromptLength` is
+ * a recommendation that earns a warning and is still sent whole.
+ */
+export function videoPromptHardLimit(
+  model: ImageToVideoModel
+): number | undefined {
+  const config = IMAGE_TO_VIDEO_MODELS[model];
+  return 'enforcesPromptLimit' in config ? config.maxPromptLength : undefined;
+}
+
+/**
+ * Available models for image generation with rich metadata
+ */
+export const IMAGE_MODELS = {
+  nano_banana_2: {
+    id: 'fal-ai/nano-banana-2' as const,
+    name: 'Nano Banana 2',
+    vendor: 'Google',
+    license: 'proprietary' as const,
+    qualityRank: 1,
+    description: "Google's latest fast image generation and editing model",
+    maxPromptLength: 50000,
+  },
+  nano_banana_2_lite: {
+    id: 'google/nano-banana-2-lite' as const,
+    name: 'Nano Banana 2 Lite',
+    vendor: 'Google',
+    license: 'proprietary' as const,
+    qualityRank: 3,
+    description:
+      'Fastest Google image model — ~4s, references, fixed 1K output',
+    maxPromptLength: 50000,
+  },
+  nano_banana_pro: {
+    id: 'fal-ai/nano-banana-pro' as const,
+    name: 'Nano Banana Pro',
+    vendor: 'Google',
+    license: 'proprietary' as const,
+    qualityRank: 2,
+    description: 'Enhanced realism and typography',
+    maxPromptLength: 50000,
+  },
+  gpt_image_2: {
+    id: 'openai/gpt-image-2.5/flare/text-to-image' as const,
+    name: 'GPT Image 2.5',
+    vendor: 'OpenAI',
+    license: 'proprietary' as const,
+    qualityRank: 2,
+    description:
+      'Default GPT Image 2.5 — fast, rich textures, typography, up to 4K',
+    maxPromptLength: 32000,
+  },
+  grok_imagine_image: {
+    id: 'xai/grok-imagine-image/v2.0/text-to-image' as const,
+    name: 'Grok Imagine Image 2.0',
+    vendor: 'SpaceXAI',
+    license: 'proprietary' as const,
+    qualityRank: 3,
+    description:
+      'Newest Imagine image model — 1K/2K, quality medium, edit up to 3 refs',
+    // No number: Grok images always route natively and xAI documents no cap
+    // (fal's 8000 is fal's, not xAI's). The 4000 we carried was
+    // @tanstack/ai-grok's stale grok-2-image constant, which threw
+    // client-side until @tanstack/ai-grok 0.19 dropped it (#1754).
+    maxPromptLength: undefined,
+  },
+  grok_imagine_image_quality: {
+    id: 'xai/grok-imagine-image/quality/text-to-image' as const,
+    name: 'Grok Imagine Image Quality',
+    vendor: 'SpaceXAI',
+    license: 'proprietary' as const,
+    qualityRank: 3,
+    description:
+      'Quality Mode — higher fidelity and stronger text rendering, edit up to 3 refs',
+    // As grok_imagine_image: native xAI, no documented cap, no number.
+    maxPromptLength: undefined,
+  },
+  flux_2_max: {
+    id: 'fal-ai/flux-2-max' as const,
+    name: 'FLUX.2 Max',
+    vendor: 'Black Forest Labs',
+    license: 'proprietary' as const,
+    qualityRank: 4,
+    description: 'Exceptional realism, precision, and consistency',
+    maxPromptLength: 2000,
+  },
+  phota: {
+    id: 'fal-ai/phota' as const,
+    name: 'Phota',
+    vendor: 'Phota',
+    license: 'proprietary' as const,
+    qualityRank: 5,
+    description: 'Character consistency via profiles',
+    maxPromptLength: 8000,
+  },
+  hunyuan_image_v3: {
+    id: 'fal-ai/hunyuan-image/v3/text-to-image' as const,
+    name: 'Hunyuan Image v3',
+    vendor: 'Tencent',
+    license: 'open-weight' as const,
+    qualityRank: 6,
+    description: 'Open weights, strong composition',
+    maxPromptLength: 2000,
+  },
+  flux_2_dev: {
+    id: 'fal-ai/flux-2' as const,
+    name: 'FLUX.2 Dev',
+    vendor: 'Black Forest Labs',
+    license: 'open-weight' as const,
+    qualityRank: 7,
+    description: '32B open weights with native editing',
+    maxPromptLength: 2000,
+  },
+  qwen_image: {
+    id: 'fal-ai/qwen-image-2/pro/text-to-image' as const,
+    name: 'Qwen Image 2 Pro',
+    vendor: 'Alibaba',
+    license: 'open-weight' as const,
+    qualityRank: 8,
+    description: 'Apache 2.0, native 2K, text rendering, editing support',
+    maxPromptLength: 2000,
+  },
+  hidream_i1: {
+    id: 'fal-ai/hidream-i1-full' as const,
+    name: 'HiDream I1',
+    vendor: 'HiDream',
+    license: 'open-weight' as const,
+    qualityRank: 9,
+    description: 'MIT licensed, 17B parameters',
+    maxPromptLength: 2000,
+  },
+  seedream_v5: {
+    id: 'bytedance/seedream/v5/pro/text-to-image' as const,
+    name: 'Seedream 5.0 Pro',
+    vendor: 'ByteDance',
+    license: 'proprietary' as const,
+    qualityRank: 10,
+    description:
+      'Flagship generation and editing — dense layouts, native text, up to 10 refs',
+    maxPromptLength: 2000,
+    // Native BytePlus Ark route (#1157). Ark carries reference images inline
+    // on the generation call, so this route has no separate edit endpoint —
+    // see EDIT_ENDPOINTS, which stays fal-only. Pro, not lite:
+    // dola-seedream-5-0-pro-260628. Lite is seedream-5-0-260128.
+    byteplusId: 'dola-seedream-5-0-pro-260628' as const,
+  },
+  flux_2_flash: {
+    id: 'fal-ai/flux-2/flash' as const,
+    name: 'FLUX.2 Flash',
+    vendor: 'Black Forest Labs',
+    license: 'open-weight' as const,
+    qualityRank: 11,
+    description: 'Cheapest distilled FLUX.2 — sub-second, edit up to 4 refs',
+    maxPromptLength: 2000,
+  },
+  flux_2_turbo: {
+    id: 'fal-ai/flux-2/turbo' as const,
+    name: 'FLUX.2 Turbo',
+    vendor: 'Black Forest Labs',
+    license: 'open-weight' as const,
+    qualityRank: 12,
+    description: 'Distilled FLUX.2 — ~2s, edit up to 4 refs',
+    maxPromptLength: 2000,
+  },
+  krea_2_turbo: {
+    id: 'fal-ai/krea-2/turbo' as const,
+    name: 'Krea 2 Turbo',
+    vendor: 'Krea',
+    license: 'open-weight' as const,
+    qualityRank: 99,
+    description: 'Ultra-fast storyboard generation',
+    // fal's schema declares 5000 (#1754).
+    maxPromptLength: 5000,
+    hidden: true,
+  },
+} as const;
+
+// Text to image model types
+export type TextToImageModel = keyof typeof IMAGE_MODELS;
+type ImageModelConfig = (typeof IMAGE_MODELS)[TextToImageModel];
+type TextToImageModelId = ImageModelConfig['id'];
+
+export const DEFAULT_IMAGE_MODEL: TextToImageModel = 'gpt_image_2';
+
+/** Model for the sequence poster. krea_2_turbo stays hidden (no
+ *  edit/reference endpoint). Stored preview variants may still name it, or
+ *  flux_2_turbo before it. */
+export const PREVIEW_IMAGE_MODEL: TextToImageModel = 'krea_2_turbo';
+
+/** Model that draws a shot's storyboard sketch (#2094). Krea could not hold
+ *  a staged frame from the full shot spec; Lite can, at about five times
+ *  the price and a few seconds more. */
+export const SHOT_PREVIEW_IMAGE_MODEL: TextToImageModel = 'nano_banana_2_lite';
+
+// Helper to get model ID from key
+export function getTextToImageModelId(
+  modelKey: TextToImageModel
+): TextToImageModelId {
+  return IMAGE_MODELS[modelKey].id;
+}
+
+// Helper to get model config by ID
+export function getImageModelById(id: string): ImageModelConfig | undefined {
+  return Object.values(IMAGE_MODELS).find((model) => model.id === id);
+}
+
+/**
+ * The BytePlus Ark model id for a text-to-image model, or undefined when the
+ * model has no native Ark route and always goes through fal (#1157).
+ */
+export function getBytePlusImageModelId(
+  modelKey: TextToImageModel
+): BytePlusImageModel | undefined {
+  const config = IMAGE_MODELS[modelKey];
+  return 'byteplusId' in config ? config.byteplusId : undefined;
+}
+
+export function isNativeBytePlusImageModel(model: TextToImageModel): boolean {
+  return getBytePlusImageModelId(model) !== undefined;
+}
+
+// Image to video model types
+export type ImageToVideoModel = keyof typeof IMAGE_TO_VIDEO_MODELS;
+
+/**
+ * The BytePlus Ark model id for a motion model, or undefined when the model
+ * has no native Ark route and always goes through fal (#1157).
+ */
+export function getBytePlusVideoModelId(
+  modelKey: ImageToVideoModel
+): string | undefined {
+  const config = IMAGE_TO_VIDEO_MODELS[modelKey];
+  return 'byteplusId' in config ? config.byteplusId : undefined;
+}
+
+export function isNativeBytePlusVideoModel(model: ImageToVideoModel): boolean {
+  return getBytePlusVideoModelId(model) !== undefined;
+}
+
+/**
+ * Ark draft mode (#1756): the model can render a cheap 480p preview whose
+ * task id later renders the 1080p final with the same seed, prompt and
+ * assets. Only honoured on the BytePlus via — see `src/motion/draft-mode.ts`.
+ */
+export function supportsDraftMode(model: ImageToVideoModel): boolean {
+  return 'draftMode' in IMAGE_TO_VIDEO_MODELS[model];
+}
+
+export const DEFAULT_VIDEO_MODEL: ImageToVideoModel = 'seedance_v2';
+
+/**
+ * The video model new work starts on when none is named: Seedance 2.5 where
+ * the team reaches BytePlus (its only route), the platform default otherwise.
+ * Stored rows never go through this — they keep the model they were made on.
+ */
+export function defaultVideoModelFor(vias: {
+  byteplus?: boolean;
+}): ImageToVideoModel {
+  return isOfferedVideoModel('seedance_v2_5', vias)
+    ? 'seedance_v2_5'
+    : DEFAULT_VIDEO_MODEL;
+}
+
+/** Check if a video model supports audio output. */
+export function videoModelSupportsAudio(modelKey: ImageToVideoModel): boolean {
+  const config = IMAGE_TO_VIDEO_MODELS[modelKey];
+  return 'supportsAudio' in config && config.supportsAudio === true;
+}
+
+/**
+ * Can this model cut inside one generation — several shots of a scene packed
+ * into a single clip using their stored timings (#1510)? Missing or false
+ * stays unpacked. Grok Imagine is the only current `false` (one take per clip).
+ */
+export function videoModelSupportsInClipMultiShot(
+  modelKey: ImageToVideoModel
+): boolean {
+  const config = IMAGE_TO_VIDEO_MODELS[modelKey];
+  return (
+    'supportsInClipMultiShot' in config &&
+    config.supportsInClipMultiShot === true
+  );
+}
+
+/**
+ * Runtime validation: Check if a string is a valid TextToImageModel key
+ * @param value - String value to validate
+ * @returns true if value is a valid model key, false otherwise
+ */
+export function isValidTextToImageModel(
+  value: unknown
+): value is TextToImageModel {
+  return typeof value === 'string' && Object.keys(IMAGE_MODELS).includes(value);
+}
+
+/**
+ * Runtime validation: Check if a string is a valid ImageToVideoModel key
+ * @param value - String value to validate
+ * @returns true if value is a valid model key, false otherwise
+ */
+export function isValidImageToVideoModel(
+  value: unknown
+): value is ImageToVideoModel {
+  return (
+    typeof value === 'string' &&
+    Object.keys(IMAGE_TO_VIDEO_MODELS).includes(value)
+  );
+}
+
+/**
+ * Friendly display name for a video model id ("Kling 3.0 Omni"); returns the raw
+ * id for an unrecognized (e.g. retired) model rather than hiding it.
+ */
+export function videoModelDisplayName(model: string): string {
+  return isValidImageToVideoModel(model)
+    ? IMAGE_TO_VIDEO_MODELS[model].name
+    : model;
+}
+
+/**
+ * Safely cast database string to TextToImageModel with validation
+ * Falls back to default if invalid
+ * @param value - Database string value (potentially invalid)
+ * @param fallback - Default value to use if invalid (defaults to DEFAULT_IMAGE_MODEL)
+ * @returns Valid TextToImageModel
+ */
+export function safeTextToImageModel(
+  value: string | null | undefined,
+  fallback: TextToImageModel = DEFAULT_IMAGE_MODEL
+): TextToImageModel {
+  if (!value || !isValidTextToImageModel(value)) {
+    if (value) {
+      logger.warn(
+        `Invalid TextToImageModel "${value}", using fallback "${fallback}"`
+      );
+    }
+    return fallback;
+  }
+  return value;
+}
+
+/**
+ * Safely cast database string to ImageToVideoModel with validation
+ * Falls back to default if invalid
+ * @param value - Database string value (potentially invalid)
+ * @param fallback - Default value to use if invalid (defaults to DEFAULT_VIDEO_MODEL)
+ * @returns Valid ImageToVideoModel
+ */
+export function safeImageToVideoModel(
+  value: string | null | undefined,
+  fallback: ImageToVideoModel = DEFAULT_VIDEO_MODEL
+): ImageToVideoModel {
+  if (!value || !isValidImageToVideoModel(value)) {
+    if (value) {
+      logger.warn(
+        `Invalid ImageToVideoModel "${value}", using fallback "${fallback}"`
+      );
+    }
+    return fallback;
+  }
+  return value;
+}
+
+/**
+ * Check if a video model supports a specific aspect ratio
+ * @param model - The video model key to check
+ * @param aspectRatio - The aspect ratio to check for
+ * @returns true if the model supports the aspect ratio
+ */
+export function isModelCompatibleWithAspectRatio(
+  model: ImageToVideoModel,
+  aspectRatio: AspectRatio
+): boolean {
+  return modelSupportsAspectRatio(model, aspectRatio);
+}
+
+/**
+ * Get all video models that support a specific aspect ratio
+ * @param aspectRatio - The aspect ratio to filter by
+ * @returns Array of compatible model keys
+ */
+function getModelsForAspectRatio(
+  aspectRatio: AspectRatio
+): ImageToVideoModel[] {
+  return Object.keys(IMAGE_TO_VIDEO_MODELS).filter(
+    (key): key is ImageToVideoModel =>
+      isValidImageToVideoModel(key) &&
+      isOfferedVideoModel(key) &&
+      isModelCompatibleWithAspectRatio(key, aspectRatio)
+  );
+}
+
+/**
+ * Should a picker or the pricing page list this video model? `hidden` is
+ * never offered; `requiresVia` is offered only when that native via is
+ * reachable. No `vias` is the conservative answer (fal-only), which is what
+ * an anonymous visitor and any server-side fallback get.
+ */
+export function isOfferedVideoModel(
+  model: ImageToVideoModel,
+  vias: { byteplus?: boolean } = {}
+): boolean {
+  const entry = IMAGE_TO_VIDEO_MODELS[model];
+  if ('hidden' in entry) return false;
+  if ('requiresVia' in entry) return vias[entry.requiresVia] === true;
+  return true;
+}
+
+/**
+ * Get a compatible video model for an aspect ratio, falling back if needed
+ * @param currentModel - The currently selected model
+ * @param aspectRatio - The target aspect ratio
+ * @returns The current model if compatible, otherwise a compatible fallback
+ */
+export function getCompatibleModel(
+  currentModel: ImageToVideoModel,
+  aspectRatio: AspectRatio
+): ImageToVideoModel {
+  if (isModelCompatibleWithAspectRatio(currentModel, aspectRatio)) {
+    return currentModel;
+  }
+  // Try default first
+  if (isModelCompatibleWithAspectRatio(DEFAULT_VIDEO_MODEL, aspectRatio)) {
+    return DEFAULT_VIDEO_MODEL;
+  }
+  // Fall back to first compatible model
+  const compatible = getModelsForAspectRatio(aspectRatio);
+  return compatible[0] ?? DEFAULT_VIDEO_MODEL;
+}
+
+// ============================================================================
+// Audio/Music Generation Models
+// ============================================================================
+
+/**
+ * Audio/music generation models
+ * Used for generating background music and sound effects per scene
+ */
+export const AUDIO_MODELS = {
+  elevenlabs_music: {
+    id: 'elevenlabs-music' as const,
+    name: 'ElevenLabs Music',
+    vendor: 'ElevenLabs',
+    license: 'proprietary' as const,
+    qualityRank: 1,
+    type: 'music' as const,
+    capabilities: {
+      supportsPrompt: true,
+      supportsInstrumental: true,
+      maxDuration: 600,
+      defaultDuration: 60,
+      supportedFormats: ['mp3'],
+    },
+    performance: {
+      estimatedGenerationTime: 10,
+      quality: 'best',
+    },
+  },
+  ace_step_1_5: {
+    id: 'fal-ai/ace-step-1.5' as const,
+    name: 'ACE-Step 1.5',
+    vendor: 'ACE Studio',
+    license: 'open-weight' as const,
+    qualityRank: 2,
+    type: 'music' as const,
+    capabilities: {
+      supportsPrompt: true,
+      supportsLyrics: true,
+      supportsInstrumental: true,
+      maxDuration: 600,
+      defaultDuration: 60,
+      supportedFormats: ['wav'],
+    },
+    performance: {
+      estimatedGenerationTime: 33,
+      quality: 'best',
+    },
+  },
+  ace_step: {
+    id: 'fal-ai/ace-step/prompt-to-audio' as const,
+    name: 'ACE-Step',
+    vendor: 'ACE Studio',
+    license: 'open-weight' as const,
+    qualityRank: 3,
+    type: 'music' as const,
+    capabilities: {
+      supportsPrompt: true,
+      supportsLyrics: true,
+      supportsInstrumental: true,
+      maxDuration: 240,
+      defaultDuration: 60,
+      supportedFormats: ['wav'],
+    },
+    performance: {
+      estimatedGenerationTime: 33,
+      quality: 'best',
+    },
+  },
+} as const;
+
+// Audio model types
+export type AudioModel = keyof typeof AUDIO_MODELS;
+export type AudioModelConfig = (typeof AUDIO_MODELS)[AudioModel];
+
+export const DEFAULT_MUSIC_MODEL: AudioModel = 'elevenlabs_music';
+
+export function isValidAudioModel(value: unknown): value is AudioModel {
+  return typeof value === 'string' && Object.keys(AUDIO_MODELS).includes(value);
+}
+
+export function getAudioModelDurationLimits(model: AudioModel) {
+  const config = AUDIO_MODELS[model];
+  return {
+    max: config.capabilities.maxDuration,
+    default: config.capabilities.defaultDuration,
+  };
+}
+
+/** The duration a music call bills and stamps: no request → the model default, otherwise capped at its max. */
+export function clampAudioDuration(
+  requested: number | undefined,
+  config: AudioModelConfig
+): number {
+  if (!requested) return config.capabilities.defaultDuration;
+  return Math.min(requested, config.capabilities.maxDuration);
+}
+
+export function safeAudioModel(
+  value: string | null | undefined,
+  fallback: AudioModel = DEFAULT_MUSIC_MODEL
+): AudioModel {
+  if (!value || !isValidAudioModel(value)) {
+    if (value) {
+      logger.warn(
+        `Invalid AudioModel "${value}", using fallback "${fallback}"`
+      );
+    }
+    return fallback;
+  }
+  return value;
+}
+
+// ============================================================================
+// Edit Endpoint Support (for reference image generation)
+// ============================================================================
+
+/**
+ * Map text-to-image models to their edit endpoints (if available)
+ * These endpoints accept image_urls for reference-based generation
+ */
+export const EDIT_ENDPOINTS: Partial<Record<TextToImageModel, string>> = {
+  nano_banana_2: 'fal-ai/nano-banana-2/edit',
+  // T2I is `google/nano-banana-2-lite`; fal's documented edit sibling drops
+  // the `2` and carries the token pricing the `/2-lite/edit` catalog row
+  // advertises as $0 compute-seconds.
+  nano_banana_2_lite: 'google/nano-banana-lite/edit',
+  nano_banana_pro: 'fal-ai/nano-banana-pro/edit',
+  gpt_image_2: 'openai/gpt-image-2.5/flare/edit',
+  grok_imagine_image: 'xai/grok-imagine-image/v2.0/edit',
+  grok_imagine_image_quality: 'xai/grok-imagine-image/quality/edit',
+  flux_2_max: 'fal-ai/flux-2-max/edit',
+  phota: 'fal-ai/phota/edit',
+  hunyuan_image_v3: 'fal-ai/hunyuan-image/v3/instruct/edit',
+  flux_2_dev: 'fal-ai/flux-2/edit',
+  flux_2_flash: 'fal-ai/flux-2/flash/edit',
+  flux_2_turbo: 'fal-ai/flux-2/turbo/edit',
+  qwen_image: 'fal-ai/qwen-image-2/pro/edit',
+  seedream_v5: 'bytedance/seedream/v5/pro/edit',
+};
+
+/**
+ * Per-model ceiling on `image_urls` for the edit endpoints above.
+ *
+ * fal enforces these server-side and REJECTS the request over the limit — it
+ * does not truncate, despite flux-2/turbo/edit's own schema claiming "if more
+ * are provided, only the first 4 will be used". A scene with a couple of
+ * characters in a location plus props clears 4 easily, so an uncapped send
+ * fails the shot outright ("Number of image URLs must be less than or equal
+ * to 4" — 11 of them in the #1143 load test).
+ *
+ * Absent = no known cap; send what we have.
+ */
+const EDIT_REFERENCE_LIMITS: Partial<Record<TextToImageModel, number>> = {
+  flux_2_dev: 4,
+  flux_2_flash: 4,
+  flux_2_turbo: 4,
+  grok_imagine_image: 3,
+  grok_imagine_image_quality: 3,
+  // Seedream 5.0 Pro: 10 on fal edit and on Ark. Lite was 14.
+  seedream_v5: 10,
+};
+
+/**
+ * Trim reference images to what `model`'s edit endpoint accepts. References
+ * are ordered characters → locations → elements, so truncation drops the
+ * least identity-critical ones last.
+ */
+export function capReferenceImages<T>(
+  model: TextToImageModel,
+  references: T[]
+): T[] {
+  const limit = EDIT_REFERENCE_LIMITS[model];
+  return limit === undefined ? references : references.slice(0, limit);
+}
+
+/**
+ * Get the edit endpoint for a model that supports reference images
+ * @param model - The text-to-image model key
+ * @returns The Fal.ai edit endpoint ID, or null if not supported
+ */
+export function getEditEndpoint(model: TextToImageModel): string | null {
+  return EDIT_ENDPOINTS[model] ?? null;
+}
+
+/**
+ * How a model's dedicated reference-to-video endpoint binds reference images
+ * to the prompt (#873). The tag syntax is per-model prompt convention, not
+ * API surface — fal never validates it, the model just reads the tokens.
+ */
+export type MotionReferenceEndpointConfig = {
+  /** The fal reference-to-video endpoint id to submit to. */
+  endpointId: MotionEndpointId;
+  /**
+   * The model's fal text-to-video sibling (#1521). Every fal
+   * reference-to-video endpoint rejects an empty image list ("At least one
+   * reference image, video, or audio must be provided"), so a reference-only
+   * shot that matched no cast, location or element sheets submits here.
+   */
+  textToVideoEndpointId: MotionEndpointId;
+  /**
+   * Renders the prompt token bound to the image-list field at
+   * `position - 1` (1-based) — e.g. `@Image1` for Seedance, `Image 1`
+   * for H3 Max.
+   */
+  tag: (position: number) => string;
+  /** Total images the endpoint accepts, including the rendered still. */
+  maxImages: number;
+  /**
+   * Request field the stills go in. Seedance uses `image_urls`; H3 Max
+   * uses `reference_image_urls`. Defaults to `image_urls`.
+   */
+  imageField?: 'image_urls' | 'reference_image_urls';
+  /**
+   * Reference CLIPS and AUDIO the endpoint takes (#1559) — a dialogue line, a
+   * music bed, a performance or camera move to copy, uploaded as a sequence
+   * element and bound by `@` mention. 0 (the default) means the endpoint takes
+   * none, and an attached one is inlined as prose instead of dropped.
+   */
+  maxVideos?: number;
+  maxAudio?: number;
+  /** Defaults to `video_urls` / `audio_urls`. */
+  videoField?: 'video_urls' | 'reference_video_urls';
+  audioField?: 'audio_urls' | 'reference_audio_urls';
+  /** Default `@VideoN` / `@AudioN`, as with `tag`. */
+  videoTag?: (position: number) => string;
+  audioTag?: (position: number) => string;
+  /**
+   * Combined stills + clips + audio cap. fal's H3 Max r2v rejects more than 12
+   * files even when each list is inside its own max (9/3/3 = 15).
+   */
+  maxCombined?: number;
+  /**
+   * Length limits on reference clips and audio (#1559), per file and summed.
+   * A reference that busts one is rejected by the provider outright, so the
+   * binding leaves it off the request and describes it in prose instead —
+   * the same treatment as any other overflow, and disclosed by the scene
+   * panel rather than dropped in silence.
+   *
+   * Omitted where the provider states none. An element whose length we never
+   * learned (`durationSeconds: null`) is always attached: guessing it is over
+   * would drop a reference the provider might have accepted.
+   */
+  videoSeconds?: MediaDurationLimit;
+  audioSeconds?: MediaDurationLimit;
+};
+
+export type MediaDurationLimit = {
+  /**
+   * Shortest single file (#1559). A clip under it is rejected by the provider
+   * just like one over `max`, so it is refused before Generate the same way.
+   */
+  min?: number;
+  /** Longest single file. */
+  max?: number;
+  /** Longest total across every file of this kind. */
+  maxCombined?: number;
+};
+
+/**
+ * Map image-to-video models to a SEPARATE reference-to-video endpoint (#873).
+ *
+ * Some motion models accept cast/element reference images only on a dedicated
+ * endpoint that takes an image list (bound to prompt tokens — see
+ * `MotionReferenceEndpointConfig.tag`) and whose start frame is optional or
+ * absent. This is the motion analogue of `EDIT_ENDPOINTS` on the image
+ * side: when a scene has references AND the model is listed here, motion
+ * routes to this endpoint and passes the rendered still as the first image
+ * plus cast/element refs after it (see `resolveMotionEndpoint`).
+ *
+ * Kling v3 Pro's start-frame-only shots stay on image-to-video; shots with
+ * references (and reference-only shots) route to Kling O3 Pro, the sibling
+ * that actually has a reference-to-video endpoint (#1498).
+ */
+export const MOTION_REFERENCE_ENDPOINTS: Partial<
+  Record<ImageToVideoModel, MotionReferenceEndpointConfig>
+> = {
+  seedance_v2: {
+    endpointId: 'bytedance/seedance-2.0/enterprise/v2/reference-to-video',
+    textToVideoEndpointId: 'bytedance/seedance-2.0/enterprise/v2/text-to-video',
+    tag: (position) => `@Image${position}`,
+    maxImages: 9,
+    maxVideos: 3,
+    maxAudio: 3,
+    maxCombined: 12,
+    // 2.0 states its clip window as a COMBINED range (2–15s), not per file.
+    // ponytail: the 2s floor is checked per clip, which refuses two 1.5s clips
+    // the provider would take together; check the sum if that ever matters.
+    videoSeconds: { min: 2, maxCombined: 15 },
+    audioSeconds: { maxCombined: 15 },
+  },
+  seedance_v2_5: {
+    endpointId: 'bytedance/seedance-2.5/reference-to-video',
+    textToVideoEndpointId: 'bytedance/seedance-2.5/text-to-video',
+    tag: (position) => `@Image${position}`,
+    // 2.5 is far roomier than the 2.0 family and was previously pinned to
+    // 2.0's numbers, which quietly threw away most of its reference budget.
+    // fal's schema: 30 images / 10 clips / 10 audio, 50 files total. Ark
+    // documents the same 50 as "a free combination of images, videos and
+    // audio", so the per-kind splits are its floor, not a stricter ceiling.
+    maxImages: 30,
+    maxVideos: 10,
+    maxAudio: 10,
+    maxCombined: 50,
+    // Each video 1.8–30.2s; audio the same. A 2.5 edit (the word "edit")
+    // is checked separately at 4–30s (seedanceEditLengthMessage, #2036).
+    videoSeconds: { min: 1.8, max: 30.2, maxCombined: 30.2 },
+    audioSeconds: { min: 1.8, max: 30.2, maxCombined: 30.2 },
+  },
+  seedance_v2_mini: {
+    endpointId: 'bytedance/seedance-2.0/mini/reference-to-video',
+    textToVideoEndpointId: 'bytedance/seedance-2.0/mini/text-to-video',
+    tag: (position) => `@Image${position}`,
+    maxImages: 9,
+    maxVideos: 3,
+    maxAudio: 3,
+    maxCombined: 12,
+    // Same combined 2–15s clip window as 2.0 — see the ponytail note there.
+    videoSeconds: { min: 2, maxCombined: 15 },
+    audioSeconds: { maxCombined: 15 },
+  },
+  gemini_omni_flash: {
+    endpointId: 'fal-ai/gemini-omni-1.1-flash/reference-to-video',
+    // fal serves Omni Flash text-to-video from the bare model id; there is no
+    // `/text-to-video` path (the queue answers "Path /text-to-video not found").
+    textToVideoEndpointId: 'fal-ai/gemini-omni-1.1-flash',
+    // Google numbers references from zero (Omni Flash prompt guide); the API
+    // caps a request at 7 reference images.
+    tag: (position) => `<IMAGE_REF_${position - 1}>`,
+    maxImages: 7,
+    // Reference CLIPS, on both vias (#1559): fal's `reference_video_urls`
+    // (3 max, each ≤3s) proxies the same Interactions content blocks the
+    // native adapter sends. No `<VIDEO_REF_n>` token is documented, so a clip
+    // is named in prose — an invented tag would be a literal string binding
+    // nothing.
+    //
+    // Audio is absent because the API has not shipped it, NOT because the
+    // model lacks it: Omni is marketed as natively multimodal over audio and
+    // generates its own track, but ai.google.dev/gemini-api/docs/omni says
+    // "uploading audio references is unsupported in the current version of
+    // the API", fal exposes no audio field, and the Gemini adapter throws on
+    // audio prompt parts. Expect that to change — when it does this is
+    // `maxAudio` plus an `audioField`, and the binding already handles the
+    // rest.
+    maxVideos: 3,
+    videoField: 'reference_video_urls',
+    videoTag: (position) => `reference video ${position}`,
+    // "Video references support a maximum of 3 clips, up to 3 seconds each."
+    videoSeconds: { max: 3 },
+  },
+  // fal documents the 4-image cap as `elements` + reference images "when
+  // using video"; applied unconditionally rather than tracking a second
+  // budget. The start frame is neither, and rides `start_image_url` on this
+  // endpoint, so all 4 go to sheets — the same budget the inline `elements`
+  // path allowed before #1498. Worth re-checking against a live 4-sheet
+  // request if fal ever turns out to count the start frame too.
+  kling_v3_pro: {
+    endpointId: 'fal-ai/kling-video/o3/pro/reference-to-video',
+    // The O3 tier, not v3: `fal-pricing-live.ts` aliases this row to the
+    // reference endpoint's rate, and Studio prices v3 text-to-video itself.
+    textToVideoEndpointId: 'fal-ai/kling-video/o3/pro/text-to-video',
+    tag: (position) => `@Image${position}`,
+    maxImages: 4,
+  },
+  // Schema caps images at 9 (videos 3, audio 3; combined 12 files).
+  minimax_h3_max: {
+    endpointId: 'minimax/h3-max/reference-to-video',
+    textToVideoEndpointId: 'minimax/h3-max/text-to-video',
+    tag: (position) => `Image ${position}`,
+    maxImages: 9,
+    imageField: 'reference_image_urls',
+    maxVideos: 3,
+    maxAudio: 3,
+    maxCombined: 12,
+    videoField: 'reference_video_urls',
+    audioField: 'reference_audio_urls',
+    videoTag: (position) => `Video ${position}`,
+    audioTag: (position) => `Audio ${position}`,
+    // "2-15 seconds each" for both clips and audio.
+    videoSeconds: { min: 2, max: 15, maxCombined: 15 },
+    audioSeconds: { min: 2, max: 15, maxCombined: 15 },
+  },
+};
+
+/**
+ * Get the reference-to-video endpoint config for a motion model, if it has one.
+ * @returns The endpoint config, or null if the model has no reference endpoint
+ */
+export function getMotionReferenceEndpoint(
+  model: ImageToVideoModel
+): MotionReferenceEndpointConfig | null {
+  return MOTION_REFERENCE_ENDPOINTS[model] ?? null;
+}
+
+/**
+ * Can this model render a shot from reference images alone — no start frame?
+ *
+ * Reference-only mode (see `docs/architecture/reference-only-motion.md`) skips
+ * still generation entirely, so the model must have a route whose start frame
+ * is optional. That is exactly the `MOTION_REFERENCE_ENDPOINTS` set: fal's
+ * `reference-to-video` endpoints never require a start frame — Seedance and
+ * H3 Max have no such field, Kling O3's `start_image_url` is optional (the
+ * image list is schema-optional but rejected when empty — a shot with nothing
+ * matched goes to `textToVideoEndpointId`, #1521) — and the same models'
+ * BytePlus Ark route sends every image as a `reference` role (Ark's
+ * frame/reference mix-ban means the still was never a frame there either).
+ *
+ * Keyed on the MODEL alone, so it is true on EVERY via — the floor, safe to
+ * call anywhere including a pure isomorphic schema. Grok Imagine is excluded
+ * here because its fal id is `xai/grok-imagine-video/v1.5/image-to-video` —
+ * it DOES accept references with no start frame on the native xAI via. Where
+ * the via is known, ask {@link referenceOnlyCapableWith} instead.
+ */
+export function supportsReferenceOnlyMotion(model: ImageToVideoModel): boolean {
+  return model in MOTION_REFERENCE_ENDPOINTS;
+}
+
+/** Which native vias are reachable. Resolved per team by `getViaAvailabilityFn`. */
+export type ReferenceOnlyVias = { xai?: boolean; byteplus?: boolean };
+
+/**
+ * Can this model render a reference-only shot given the vias actually
+ * reachable? The one rule, shared by everything that has to answer it:
+ * the client model filters (via the router loader), the create-time server
+ * check, and `canRenderReferenceOnly` on the submit path. Duplicating it would
+ * let the UI offer a model the workflow then refuses.
+ *
+ * `xai` is the only via that adds anything today: Grok Imagine 1.5 binds up to
+ * 7 references and needs no start frame on `api.x.ai`, but falls back to a fal
+ * image-to-video endpoint when no xAI key resolves. BytePlus adds nothing —
+ * Seedance already qualifies on its fal route, and Ark sends every image as a
+ * `reference` role anyway.
+ */
+export function referenceOnlyCapableWith(
+  model: ImageToVideoModel,
+  vias: ReferenceOnlyVias
+): boolean {
+  if (supportsReferenceOnlyMotion(model)) return true;
+  return Boolean(vias.xai) && isNativeGrokVideoModel(model);
+}
+
+/**
+ * The reference-only-capable models for these vias — for UI copy, the model
+ * selectors, and validation messages. Ordered by the catalog's quality rank so
+ * the list reads the same as the selector.
+ */
+export function referenceOnlyMotionModels(
+  vias: ReferenceOnlyVias = {}
+): ImageToVideoModel[] {
+  return Object.keys(IMAGE_TO_VIDEO_MODELS)
+    .filter(isValidImageToVideoModel)
+    .filter((model) => referenceOnlyCapableWith(model, vias))
+    .sort(
+      (a, b) =>
+        IMAGE_TO_VIDEO_MODELS[a].qualityRank -
+        IMAGE_TO_VIDEO_MODELS[b].qualityRank
+    );
+}
+
+/**
+ * Check if a model supports reference images via an edit endpoint
+ * @param model - The text-to-image model key
+ * @returns true if the model has an edit endpoint for reference images
+ */
+export function supportsReferenceImages(model: TextToImageModel): boolean {
+  return model in EDIT_ENDPOINTS;
+}
